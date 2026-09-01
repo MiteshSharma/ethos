@@ -8,7 +8,8 @@ import {
 import type { AgentLoop } from '@ethosagent/core';
 import type { CardStore } from '@ethosagent/session-cards';
 import { EthosError } from '@ethosagent/types';
-import type { CardEnvelope, SseEvent } from '@ethosagent/web-contracts';
+import type { ActivityEvent, CardEnvelope, SseEvent } from '@ethosagent/web-contracts';
+import { ACTIVITY_EVENT_TYPES } from '@ethosagent/web-contracts';
 import type { SystemEventBus } from '../../services/system-event-bus';
 import { gateStructuredCard } from './card-gate';
 import type { ChatRepository } from './repository';
@@ -41,6 +42,13 @@ export interface ChatServiceOptions {
   loop: AgentLoop;
   sessions: ChatRepository;
   buffer: SessionStreamBuffer<SseEvent>;
+  /**
+   * Cross-session activity buffer feeding `GET /sse/activity`. Every event
+   * that reaches `append` is also written here under one fixed key
+   * (`ACTIVITY_KEY`); per-personality scoping is applied at READ time by
+   * `subscribeActivity`, not by the buffer.
+   */
+  activityBuffer: SessionStreamBuffer<ActivityEvent>;
   defaults: ChatDefaults;
   /** Surface label recorded on new sessions. Default: 'web'. */
   platform?: string;
@@ -121,16 +129,42 @@ interface InternalEventMap {
   appended: [sessionId: string, buffered: BufferedEvent<SseEvent>];
 }
 
+interface ActivityEventMap {
+  /** One event per append, already tagged with session + personality. */
+  'activity-appended': [buffered: BufferedEvent<ActivityEvent>];
+}
+
+/**
+ * The single key every activity event is buffered under. The activity feed is
+ * one shared bucket, not one bucket per personality — scoping is a read-time
+ * filter (`subscribeActivity`'s `matches`), so `touch`/`disconnect`/reap here
+ * apply to the whole feed at once.
+ */
+const ACTIVITY_KEY = '__activity__';
+
 export class ChatService {
   private readonly bridges = new Map<string, AgentBridge>();
   private readonly firstUserMessages = new Map<string, string>();
   private readonly emitter = new EventEmitter<InternalEventMap>();
+  /**
+   * Second emitter, deliberately separate from `emitter`: activity
+   * subscribers get the pre-tagged `ActivityEvent` shape instead of having to
+   * filter every per-session `'appended'` firing by hand.
+   */
+  private readonly activityEmitter = new EventEmitter<ActivityEventMap>();
+  /**
+   * Best-effort sessionId -> personalityId cache, populated wherever a full
+   * `Session` record is already in hand. `append` reads it to tag activity
+   * events; a miss tags the event `null` and backfills for the next one.
+   */
+  private readonly sessionPersonalityIds = new Map<string, string | null>();
   /** sessionId -> hand-back texts held until the in-flight turn's `done`. */
   private readonly pendingHandBacks = new Map<string, string[]>();
 
   constructor(private readonly opts: ChatServiceOptions) {
     // Allow many SSE connections per session (multi-tab) without warnings.
     this.emitter.setMaxListeners(0);
+    this.activityEmitter.setMaxListeners(0);
   }
 
   // ---------------------------------------------------------------------------
@@ -148,6 +182,8 @@ export class ChatService {
           ...(input.personalityId ? { personalityId: input.personalityId } : {}),
           ...(this.opts.defaults.workingDir ? { workingDir: this.opts.defaults.workingDir } : {}),
         });
+
+    this.sessionPersonalityIds.set(session.id, session.personalityId ?? null);
 
     if (!this.firstUserMessages.has(session.id)) {
       this.firstUserMessages.set(session.id, input.text);
@@ -320,6 +356,38 @@ export class ChatService {
   }
 
   /**
+   * Subscribe to the merged activity stream — every session's events, tagged
+   * with the session and personality they came from. Parallel to `subscribe`,
+   * but scoped by personality instead of by session: pass `null` for the
+   * global feed (no filter), or a personality id to see only that agent's
+   * sessions. Replays everything after `sinceSeq` first, then streams live.
+   */
+  subscribeActivity(
+    personalityId: string | null,
+    sinceSeq: number,
+    onEvent: (e: BufferedEvent<ActivityEvent>) => void | Promise<void>,
+  ): () => void {
+    this.opts.activityBuffer.touch(ACTIVITY_KEY);
+
+    const matches = (e: ActivityEvent) =>
+      personalityId === null || e.personalityId === personalityId;
+
+    for (const e of this.opts.activityBuffer.replay(ACTIVITY_KEY, sinceSeq)) {
+      if (matches(e.event)) this.invokeSubscriber(onEvent, e);
+    }
+
+    const handler = (buffered: BufferedEvent<ActivityEvent>) => {
+      if (matches(buffered.event)) this.invokeSubscriber(onEvent, buffered);
+    };
+    this.activityEmitter.on('activity-appended', handler);
+
+    return () => {
+      this.activityEmitter.off('activity-appended', handler);
+      this.opts.activityBuffer.disconnect(ACTIVITY_KEY);
+    };
+  }
+
+  /**
    * Push an out-of-band SSE event into a session — used by the approvals
    * pipeline (`tool.approval_required`, `approval.resolved`) and any future
    * push events that aren't tied to a specific bridge turn. Goes through the
@@ -393,6 +461,7 @@ export class ChatService {
     }
     this.firstUserMessages.delete(sessionId);
     this.pendingHandBacks.delete(sessionId);
+    this.sessionPersonalityIds.delete(sessionId);
     this.opts.buffer.clear(sessionId);
     // If approvals are wired, drop any pending requests for this session
     // so the awaiting hook unblocks (`{ decision: 'deny', reason: 'session
@@ -413,6 +482,7 @@ export class ChatService {
         action: 'Verify the ID. If the session was deleted, call chat.send without sessionId.',
       });
     }
+    this.sessionPersonalityIds.set(session.id, session.personalityId ?? null);
     return session;
   }
 
@@ -587,9 +657,9 @@ export class ChatService {
     this.opts.systemBus?.emitSystem({ type: 'session.titled', sessionId, title });
   }
 
-  private invokeSubscriber(
-    onEvent: (e: BufferedEvent<SseEvent>) => void | Promise<void>,
-    e: BufferedEvent<SseEvent>,
+  private invokeSubscriber<E>(
+    onEvent: (e: BufferedEvent<E>) => void | Promise<void>,
+    e: BufferedEvent<E>,
   ): void {
     // A subscriber-local failure (sync throw or async rejection) must never
     // crash the emitter or abort delivery to other subscribers.
@@ -603,6 +673,35 @@ export class ChatService {
   private append(sessionId: string, event: SseEvent): void {
     const seq = this.opts.buffer.append(sessionId, event);
     this.emitter.emit('appended', sessionId, { seq, event });
+
+    // Everything above is the per-session chat stream and is unconditional.
+    // The activity feed takes only the types it renders: `text_delta` /
+    // `thinking_delta` alone would fan every token of every session out to
+    // every activity listener and burn the shared replay buffer down in
+    // seconds, evicting one agent's real events under another's streaming.
+    // The allowlist is `ACTIVITY_EVENT_TYPES`, shared with the client's
+    // `convertSseEvent` so the two ends cannot drift.
+    if (!ACTIVITY_EVENT_TYPES.has(event.type)) return;
+
+    // Fan the same event into the cross-session activity feed, tagged with the
+    // session's personality so `subscribeActivity` can scope it.
+    const cached = this.sessionPersonalityIds.get(sessionId);
+    const personalityId = cached ?? null;
+    if (cached === undefined) {
+      // Cache miss — a session touched by broadcast()/broadcastAll() that
+      // never went through send()/requireSession(). Tag THIS event `null` and
+      // backfill for the next one. Best-effort, same posture as persistCard /
+      // tryAutoTitle: a lookup failure must never disturb the live stream.
+      void this.opts.sessions
+        .get(sessionId)
+        .then((s) => {
+          this.sessionPersonalityIds.set(sessionId, s?.personalityId ?? null);
+        })
+        .catch(() => {});
+    }
+    const activity: ActivityEvent = { sessionId, personalityId, event };
+    const activitySeq = this.opts.activityBuffer.append(ACTIVITY_KEY, activity);
+    this.activityEmitter.emit('activity-appended', { seq: activitySeq, event: activity });
   }
 }
 

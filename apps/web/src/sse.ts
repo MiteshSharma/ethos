@@ -1,4 +1,9 @@
-import { type SseEvent, SseEventSchema } from '@ethosagent/web-contracts';
+import {
+  type ActivityEvent,
+  ActivityEventSchema,
+  type SseEvent,
+  SseEventSchema,
+} from '@ethosagent/web-contracts';
 
 // Thin wrapper around the browser's native EventSource for the chat /
 // approval / push-notification stream. Two responsibilities:
@@ -24,15 +29,21 @@ import { type SseEvent, SseEventSchema } from '@ethosagent/web-contracts';
 // stall every REST/RPC fetch behind the duplicates. So all subscribers for
 // a given session share ONE underlying EventSource, fanned out in-process
 // and reference-counted.
+//
+// Two stream families use that same machinery: `/sse/sessions/:id` (one
+// session's events, bare `SseEvent` frames) and `/sse/activity` (every
+// session's events on one connection, `ActivityEvent` envelopes). They
+// differ only in URL, payload schema and registry key, so the pooling lives in
+// `subscribeShared` below and each family is a thin wrapper over it.
 
-export interface SseSubscriberOptions {
+export interface StreamSubscriberOptions<T> {
   /** Override the URL base. Defaults to same-origin. */
   apiBase?: string;
   /** Resume cursor — server replays everything with `seq > sinceSeq`. */
   sinceSeq?: number;
   /** Called for every event the server sends. Errors thrown here propagate
    *  to `onError`. */
-  onEvent: (event: SseEvent, seq: number) => void;
+  onEvent: (event: T, seq: number) => void;
   /** Connection-level errors (parse failures, dropped sockets). The
    *  EventSource will keep trying to reconnect even after these — return
    *  `'close'` from this handler to abort. Returning anything else (or
@@ -40,27 +51,33 @@ export interface SseSubscriberOptions {
   onError?: (err: unknown) => 'close' | undefined;
 }
 
+export type SseSubscriberOptions = StreamSubscriberOptions<SseEvent>;
+export type ActivitySubscriberOptions = StreamSubscriberOptions<ActivityEvent>;
+
 export interface SseSubscription {
   close(): void;
   /** Last seq the client observed. Useful for debugging mid-flight resume. */
   readonly lastSeq: number;
 }
 
-interface Subscriber {
-  onEvent: (event: SseEvent, seq: number) => void;
+interface Subscriber<T> {
+  onEvent: (event: T, seq: number) => void;
   onError?: (err: unknown) => 'close' | undefined;
 }
 
-interface SharedConnection {
+interface SharedConnection<T> {
   source: EventSource;
-  subscribers: Set<Subscriber>;
+  subscribers: Set<Subscriber<T>>;
   lastSeq: number;
 }
 
-// Keyed by `${base}|${sessionId}` so a differing apiBase doesn't collide
-// (in practice all callers use the default). Module-local state is fine —
-// this file only ever runs in a single React app instance.
-const connections = new Map<string, SharedConnection>();
+// Keyed by `${base}|${sessionId}` / `${base}|activity|${scope}` so a
+// differing apiBase doesn't collide (in practice all callers use the
+// default). One registry per stream family keeps the payload types honest
+// without a cast. Module-local state is fine — this file only ever runs in
+// a single React app instance.
+const sessionConnections = new Map<string, SharedConnection<SseEvent>>();
+const activityConnections = new Map<string, SharedConnection<ActivityEvent>>();
 
 /**
  * Open the SSE stream for a session. Returns immediately with a handle the
@@ -75,36 +92,81 @@ const connections = new Map<string, SharedConnection>();
  */
 export function subscribeToSession(sessionId: string, opts: SseSubscriberOptions): SseSubscription {
   const base = opts.apiBase ?? import.meta.env.VITE_API_URL ?? '';
-  const key = `${base}|${sessionId}`;
+  return subscribeShared(
+    sessionConnections,
+    `${base}|${sessionId}`,
+    () => new URL(`${base}/sse/sessions/${sessionId}`, window.location.origin),
+    (json) => SseEventSchema.parse(json),
+    opts,
+  );
+}
 
-  const subscriber: Subscriber = { onEvent: opts.onEvent, onError: opts.onError };
+/**
+ * Open the merged activity stream — every session's events on ONE
+ * connection, optionally narrowed to a single agent.
+ *
+ * `personalityId === null` is the global feed (the `?personalityId=` param
+ * is omitted entirely). Because scoping happens server-side, a per-agent
+ * view costs the same single connection as the global one no matter how
+ * many sessions that agent has, so nothing here fans out per session.
+ *
+ * Unlike `/sse/sessions/:id`, this stream sends no leading `stream_meta`
+ * frame: every frame carries an `id:` and is a real `ActivityEvent`, and
+ * the seq is the activity buffer's own counter, unrelated to any session's.
+ */
+export function subscribeToActivity(
+  personalityId: string | null,
+  opts: ActivitySubscriberOptions,
+): SseSubscription {
+  const base = opts.apiBase ?? import.meta.env.VITE_API_URL ?? '';
+  return subscribeShared(
+    activityConnections,
+    `${base}|activity|${personalityId ?? 'global'}`,
+    () => {
+      const url = new URL(`${base}/sse/activity`, window.location.origin);
+      if (personalityId) url.searchParams.set('personalityId', personalityId);
+      return url;
+    },
+    (json) => ActivityEventSchema.parse(json),
+    opts,
+  );
+}
 
-  let conn = connections.get(key);
+function subscribeShared<T>(
+  registry: Map<string, SharedConnection<T>>,
+  key: string,
+  buildUrl: () => URL,
+  parse: (json: unknown) => T,
+  opts: StreamSubscriberOptions<T>,
+): SseSubscription {
+  const subscriber: Subscriber<T> = { onEvent: opts.onEvent, onError: opts.onError };
+
+  let conn = registry.get(key);
   if (!conn) {
-    const url = new URL(`${base}/sse/sessions/${sessionId}`, window.location.origin);
+    const url = buildUrl();
     if (opts.sinceSeq && opts.sinceSeq > 0) {
       // EventSource doesn't let us set request headers, so encode the
       // resume hint as a query param. The server reads `Last-Event-ID` for
       // browser-driven reconnects; this is the explicit-resume escape
-      // hatch (e.g. tests, "rewind" UI later).
+      // hatch (e.g. a remount that already knows its cursor).
       url.searchParams.set('lastEventId', String(opts.sinceSeq));
     }
 
     const source = new EventSource(url.toString(), { withCredentials: true });
-    const created: SharedConnection = {
+    const created: SharedConnection<T> = {
       source,
       subscribers: new Set([subscriber]),
       lastSeq: opts.sinceSeq ?? 0,
     };
-    connections.set(key, created);
+    registry.set(key, created);
     conn = created;
 
     source.onmessage = (raw) => {
       const seq = raw.lastEventId ? Number(raw.lastEventId) : created.lastSeq + 1;
-      let parsed: SseEvent;
+      let parsed: T;
       try {
         const json = JSON.parse(raw.data) as unknown;
-        parsed = SseEventSchema.parse(json);
+        parsed = parse(json);
       } catch (err) {
         // A bad event is surfaced but the stream stays open — the browser's
         // auto-reconnect would re-fire on drop, but a one-off parse error
@@ -114,7 +176,7 @@ export function subscribeToSession(sessionId: string, opts: SseSubscriberOptions
         for (const sub of [...created.subscribers]) {
           if (sub.onError?.(err) === 'close') created.subscribers.delete(sub);
         }
-        closeIfEmpty(key, created);
+        closeIfEmpty(registry, key, created);
         return;
       }
       created.lastSeq = seq;
@@ -126,14 +188,14 @@ export function subscribeToSession(sessionId: string, opts: SseSubscriberOptions
           if (sub.onError?.(err) === 'close') created.subscribers.delete(sub);
         }
       }
-      closeIfEmpty(key, created);
+      closeIfEmpty(registry, key, created);
     };
 
     source.onerror = (err) => {
       for (const sub of [...created.subscribers]) {
         if (sub.onError?.(err) === 'close') created.subscribers.delete(sub);
       }
-      closeIfEmpty(key, created);
+      closeIfEmpty(registry, key, created);
     };
   } else {
     conn.subscribers.add(subscriber);
@@ -143,7 +205,7 @@ export function subscribeToSession(sessionId: string, opts: SseSubscriberOptions
   return {
     close: () => {
       shared.subscribers.delete(subscriber);
-      closeIfEmpty(key, shared);
+      closeIfEmpty(registry, key, shared);
     },
     get lastSeq() {
       return shared.lastSeq;
@@ -153,10 +215,14 @@ export function subscribeToSession(sessionId: string, opts: SseSubscriberOptions
 
 /** Tear down the real EventSource once the last subscriber has left. A
  *  subsequent subscribe re-opens it. */
-function closeIfEmpty(key: string, conn: SharedConnection): void {
+function closeIfEmpty<T>(
+  registry: Map<string, SharedConnection<T>>,
+  key: string,
+  conn: SharedConnection<T>,
+): void {
   if (conn.subscribers.size > 0) return;
   conn.source.close();
   // Only drop the entry if it's still the live one for this key — a
   // re-subscribe during teardown could already have replaced it.
-  if (connections.get(key) === conn) connections.delete(key);
+  if (registry.get(key) === conn) registry.delete(key);
 }

@@ -1,36 +1,58 @@
-import type { SseEvent } from '@ethosagent/web-contracts';
 import { useQuery } from '@tanstack/react-query';
-import { Empty, Select, Spin, Tag, Typography } from 'antd';
+import { Button, Empty, Select, Spin, Tag, Typography } from 'antd';
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useParams } from 'react-router-dom';
+import {
+  type ActivityDetail,
+  type ActivityGroup,
+  type ActivityKind,
+  type ActivityRow,
+  type ActivityTypeFilter,
+  buildGroups,
+  convertHistoryItem,
+  convertSseEvent,
+  groupMatchesFilter,
+  mergeRows,
+} from '../lib/activityFeed';
 import { rpc } from '../rpc';
-import { subscribeToSession } from '../sse';
+import { subscribeToActivity } from '../sse';
 
-interface ActivityEvent {
-  id: string;
-  timestamp: number;
-  sessionId: string;
-  sessionTitle: string | null;
-  type: 'tool_start' | 'tool_end' | 'done' | 'error' | 'cron.fired' | 'tool.approval_required';
-  summary: string;
-  raw: unknown;
-}
+// The activity feed reads TWO sources and shows one timeline:
+//
+//   • `activity.history` — durable rows out of `observability.db`. This is the
+//     authority: it survives a restart, because it was never held in memory.
+//     Seeded on mount and on scope change, paged backwards by "load older".
+//   • `/sse/activity` — one merged live connection for the whole scope, so a
+//     per-agent view costs the same single EventSource as the global one no
+//     matter how many sessions that agent has open.
+//
+// Scope comes from the ROUTE, not from a picker: `/p/:personalityId/activity`
+// shows that agent, the bare `/activity` shows every agent. That is the same
+// altitude convention `extractWorkspacePersonalityId` encodes, read here off
+// `useParams` rather than re-derived from the pathname.
+//
+// The session `<Select>` is a pure client-side filter over the merged list —
+// it decides what you LOOK at, never what is live. Nothing that varies per
+// render (the sessions array, the merged rows) may enter the subscription
+// effect's dependencies: that is what made the old page tear down and reopen
+// its EventSource on every background refetch, losing every event in the gap.
 
-interface ConversationGroup {
-  id: string;
-  sessionId: string;
-  sessionTitle: string | null;
-  startedAt: number;
-  completedAt: number | null;
-  turnCount: number | null;
-  events: ActivityEvent[];
-  isLive: boolean;
-}
+const PAGE_SIZE = 50;
 
-type TypeFilter = 'all' | 'tools' | 'turns' | 'errors' | 'approvals' | 'cron';
+/**
+ * Resume cursor for the live stream, deliberately MODULE-level rather than a
+ * `useRef`: a ref dies with the component, so navigating away from Activity
+ * and back would restart the stream from "now" — exactly the gap this is here
+ * to close. The activity buffer is one shared bucket scoped at read time, so a
+ * seq learned under any scope is a valid resume point under any other. If the
+ * server restarts its buffer seq goes backwards and the replay comes back
+ * empty, which is harmless: the live handler on the server side is not
+ * seq-filtered, and a mount always re-seeds from durable `activity.history`
+ * anyway.
+ */
+let lastActivitySeq = 0;
 
-const MAX_EVENTS = 50;
-
-const TYPE_FILTERS: Array<{ value: TypeFilter; label: string }> = [
+const TYPE_FILTERS: Array<{ value: ActivityTypeFilter; label: string }> = [
   { value: 'all', label: 'All' },
   { value: 'tools', label: 'Tools' },
   { value: 'turns', label: 'Turns' },
@@ -39,89 +61,25 @@ const TYPE_FILTERS: Array<{ value: TypeFilter; label: string }> = [
   { value: 'cron', label: 'Cron' },
 ];
 
-const DOT_CLASS_MAP: Record<ActivityEvent['type'], string> = {
+const DOT_CLASS_MAP: Record<ActivityKind, string> = {
   tool_start: 'tool_start',
   tool_end: 'tool_end',
   done: 'done',
   error: 'error',
-  'tool.approval_required': 'approval',
-  'cron.fired': 'cron',
+  approval: 'approval',
+  cron: 'cron',
+  notice: 'notice',
 };
 
-const TYPE_COLORS: Record<ActivityEvent['type'], string> = {
+const TAG_COLORS: Record<ActivityKind, string> = {
   tool_start: 'blue',
   tool_end: 'blue',
   done: 'green',
   error: 'red',
-  'tool.approval_required': 'orange',
-  'cron.fired': 'purple',
+  approval: 'orange',
+  cron: 'purple',
+  notice: 'default',
 };
-
-function groupMatchesFilter(group: ConversationGroup, filter: TypeFilter): boolean {
-  if (filter === 'all') return true;
-  if (filter === 'tools')
-    return group.events.some((e) => e.type === 'tool_start' || e.type === 'tool_end');
-  if (filter === 'turns') return group.events.some((e) => e.type === 'done');
-  if (filter === 'errors') return group.events.some((e) => e.type === 'error');
-  if (filter === 'approvals') return group.events.some((e) => e.type === 'tool.approval_required');
-  if (filter === 'cron') return group.events.some((e) => e.type === 'cron.fired');
-  return false;
-}
-
-function convertSseEvent(
-  event: SseEvent,
-  sessionId: string,
-  sessionTitle: string | null,
-): ActivityEvent | null {
-  const base = { sessionId, sessionTitle, timestamp: Date.now(), raw: event };
-
-  switch (event.type) {
-    case 'tool_start':
-      return {
-        ...base,
-        id: `${sessionId}-${event.toolCallId}-start`,
-        type: 'tool_start',
-        summary: `Tool started: ${event.toolName}`,
-      };
-    case 'tool_end':
-      return {
-        ...base,
-        id: `${sessionId}-${event.toolCallId}-end`,
-        type: 'tool_end',
-        summary: `Tool ${event.ok ? 'completed' : 'failed'}: ${event.toolName} (${event.durationMs}ms)`,
-      };
-    case 'done':
-      return {
-        ...base,
-        id: `${sessionId}-done-${Date.now()}`,
-        type: 'done',
-        summary: `Turn ${event.turnCount} completed`,
-      };
-    case 'error':
-      return {
-        ...base,
-        id: `${sessionId}-error-${Date.now()}`,
-        type: 'error',
-        summary: `Error: ${event.error}`,
-      };
-    case 'tool.approval_required':
-      return {
-        ...base,
-        id: `${sessionId}-approval-${event.request.approvalId}`,
-        type: 'tool.approval_required',
-        summary: `Approval needed: ${event.request.toolName}`,
-      };
-    case 'cron.fired':
-      return {
-        ...base,
-        id: `cron-${event.jobId}-${event.ranAt}`,
-        type: 'cron.fired',
-        summary: `Cron job fired: ${event.jobId}`,
-      };
-    default:
-      return null;
-  }
-}
 
 function formatRelative(ts: number): string {
   const diff = Date.now() - ts;
@@ -164,51 +122,11 @@ function ArgsBlock({ args }: { args: unknown }) {
   );
 }
 
-type EventRow =
-  | { key: string; kind: 'text'; value: string }
-  | { key: string; kind: 'args'; args: unknown }
-  | { key: string; kind: 'pre'; text: string };
-
-function EventDetail({ event }: { event: ActivityEvent }) {
-  const raw = event.raw as Record<string, unknown>;
-  const rows: EventRow[] = [];
-
-  switch (event.type) {
-    case 'tool_start':
-      rows.push({ key: 'tool', kind: 'text', value: String(raw.toolName ?? '') });
-      if (raw.args) rows.push({ key: 'args', kind: 'args', args: raw.args });
-      break;
-    case 'tool_end':
-      rows.push({ key: 'tool', kind: 'text', value: String(raw.toolName ?? '') });
-      rows.push({ key: 'status', kind: 'text', value: String(raw.ok ? '✓ ok' : '✗ failed') });
-      rows.push({ key: 'duration', kind: 'text', value: `${String(raw.durationMs ?? 0)}ms` });
-      if (raw.result) rows.push({ key: 'result', kind: 'pre', text: String(raw.result) });
-      break;
-    case 'done':
-      if (raw.turnCount != null)
-        rows.push({ key: 'turns', kind: 'text', value: String(raw.turnCount) });
-      break;
-    case 'error':
-      rows.push({ key: 'error', kind: 'text', value: String(raw.error ?? '') });
-      if (raw.code) rows.push({ key: 'code', kind: 'text', value: String(raw.code) });
-      break;
-    case 'tool.approval_required': {
-      const req = (raw.request ?? {}) as Record<string, unknown>;
-      rows.push({ key: 'tool', kind: 'text', value: String(req.toolName ?? '') });
-      if (req.args) rows.push({ key: 'args', kind: 'args', args: req.args });
-      break;
-    }
-    case 'cron.fired':
-      rows.push({ key: 'job', kind: 'text', value: String(raw.jobId ?? '') });
-      if (raw.ranAt) rows.push({ key: 'ran at', kind: 'text', value: String(raw.ranAt) });
-      break;
-  }
-
-  if (rows.length === 0) return null;
-
+function EventDetail({ details }: { details: ActivityDetail[] }) {
+  if (details.length === 0) return null;
   return (
     <div className="activity-event-detail">
-      {rows.map((row) => (
+      {details.map((row) => (
         <div key={row.key} className="aed-row">
           <span className="aed-key">{row.key}</span>
           <span className="aed-val">
@@ -227,118 +145,130 @@ function EventDetail({ event }: { event: ActivityEvent }) {
 }
 
 export function Activity() {
-  const [groups, setGroups] = useState<ConversationGroup[]>([]);
-  const [typeFilter, setTypeFilter] = useState<TypeFilter>('all');
+  const { personalityId: routePersonalityId } = useParams<{ personalityId?: string }>();
+  const personalityId = routePersonalityId ?? null;
+
+  const [rows, setRows] = useState<Map<string, ActivityRow>>(() => new Map());
+  // Both halves of the page cursor. The timestamp alone cannot resume inside a
+  // group of rows sharing one millisecond — the id breaks the tie.
+  const [nextBefore, setNextBefore] = useState<number | null>(null);
+  const [nextBeforeId, setNextBeforeId] = useState<string | null>(null);
+  const [loadingOlder, setLoadingOlder] = useState(false);
+  const [typeFilter, setTypeFilter] = useState<ActivityTypeFilter>('all');
   const [sessionFilter, setSessionFilter] = useState<string | null>(null);
   const [expandedGroupId, setExpandedGroupId] = useState<string | null>(null);
-  const [expandedEventId, setExpandedEventId] = useState<string | null>(null);
+  const [expandedRowKey, setExpandedRowKey] = useState<string | null>(null);
 
-  const { data: sessionsData, isLoading } = useQuery({
-    queryKey: ['sessions', 'list', { limit: 10 }],
-    queryFn: () => rpc.sessions.list({ limit: 10 }),
+  const historyQuery = useQuery({
+    queryKey: ['activity', 'history', personalityId],
+    queryFn: () =>
+      rpc.activity.history({
+        ...(personalityId ? { personalityId } : {}),
+        limit: PAGE_SIZE,
+      }),
   });
 
-  const sessions = sessionsData?.items ?? [];
-
-  const activeSessionId = sessionFilter ?? sessions[0]?.id ?? null;
-
-  const completedGroupCount = useMemo(
-    () => groups.filter((g) => !g.isLive && g.sessionId === activeSessionId).length,
-    [groups, activeSessionId],
-  );
-
-  const { data: sessionData } = useQuery({
-    queryKey: ['sessions', 'get', activeSessionId, completedGroupCount],
-    queryFn: () => rpc.sessions.get({ id: activeSessionId ?? '' }),
-    enabled: !!activeSessionId,
+  // Titles for group headers and the filter dropdown — nothing here decides
+  // what is live.
+  const sessionsQuery = useQuery({
+    queryKey: ['sessions', 'list', { personalityId, limit: PAGE_SIZE }],
+    queryFn: () =>
+      rpc.sessions.list({
+        ...(personalityId ? { personalityId } : {}),
+        limit: PAGE_SIZE,
+      }),
   });
-
-  const userMessages = useMemo(
-    () => (sessionData?.messages ?? []).filter((m) => m.role === 'user'),
-    [sessionData],
+  const sessionOptions = useMemo(
+    () =>
+      (sessionsQuery.data?.items ?? []).map((s) => ({
+        value: s.id,
+        label: s.title || s.id.slice(0, 12),
+      })),
+    [sessionsQuery.data],
+  );
+  const sessionTitles = useMemo(
+    () => new Map((sessionsQuery.data?.items ?? []).map((s) => [s.id, s.title])),
+    [sessionsQuery.data],
   );
 
-  // Phase 0 — per-session context anatomy (system / tools / messages token
-  // slices + cache-hit rate), aggregated from observability llm_call spans.
+  // Scope change: drop everything the previous agent's feed accumulated. The
+  // live cursor is NOT reset — the buffer's seq is one global sequence, so
+  // carrying it across means the new scope resumes without a gap instead of
+  // replaying the whole buffer.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: intentionally keyed on personalityId only — the effect body doesn't read it, it's the reset trigger
+  useEffect(() => {
+    setRows(new Map());
+    setNextBefore(null);
+    setNextBeforeId(null);
+    setSessionFilter(null);
+    setExpandedGroupId(null);
+    setExpandedRowKey(null);
+  }, [personalityId]);
+
+  useEffect(() => {
+    const page = historyQuery.data;
+    if (!page) return;
+    setRows((prev) => mergeRows(prev, page.items.map(convertHistoryItem)));
+    setNextBefore(page.nextBefore);
+    setNextBeforeId(page.nextBeforeId);
+  }, [historyQuery.data]);
+
+  useEffect(() => {
+    const sub = subscribeToActivity(personalityId, {
+      sinceSeq: lastActivitySeq,
+      onEvent: (envelope, seq) => {
+        lastActivitySeq = Math.max(lastActivitySeq, seq);
+        const row = convertSseEvent(envelope.event, {
+          sessionId: envelope.sessionId,
+          personalityId: envelope.personalityId,
+          seq,
+          timestamp: Date.now(),
+        });
+        if (row) setRows((prev) => mergeRows(prev, [row]));
+      },
+    });
+    return () => sub.close();
+  }, [personalityId]);
+
+  const loadOlder = useCallback(async () => {
+    if (nextBefore === null) return;
+    setLoadingOlder(true);
+    try {
+      const page = await rpc.activity.history({
+        ...(personalityId ? { personalityId } : {}),
+        limit: PAGE_SIZE,
+        before: nextBefore,
+        ...(nextBeforeId === null ? {} : { beforeId: nextBeforeId }),
+      });
+      setRows((prev) => mergeRows(prev, page.items.map(convertHistoryItem)));
+      setNextBefore(page.nextBefore);
+      setNextBeforeId(page.nextBeforeId);
+    } finally {
+      setLoadingOlder(false);
+    }
+  }, [nextBefore, nextBeforeId, personalityId]);
+
+  const groups = useMemo(() => buildGroups(rows.values()), [rows]);
+  const filtered = useMemo(
+    () =>
+      groups.filter(
+        (group) =>
+          groupMatchesFilter(group, typeFilter) &&
+          (sessionFilter === null || group.sessionId === sessionFilter),
+      ),
+    [groups, typeFilter, sessionFilter],
+  );
+
+  // Per-session context anatomy still needs exactly one session to be about,
+  // so it rides the session filter rather than an implicit "most recent".
   const { data: anatomyData } = useQuery({
-    queryKey: ['sessions', 'contextAnatomy', activeSessionId, completedGroupCount],
-    queryFn: () => rpc.sessions.contextAnatomy({ id: activeSessionId ?? '' }),
-    enabled: !!activeSessionId,
+    queryKey: ['sessions', 'contextAnatomy', sessionFilter],
+    queryFn: () => rpc.sessions.contextAnatomy({ id: sessionFilter ?? '' }),
+    enabled: sessionFilter !== null,
   });
   const anatomy = anatomyData?.anatomy ?? null;
 
-  const appendEvent = useCallback((evt: ActivityEvent) => {
-    setGroups((prev) => {
-      // cron.fired: standalone group, not part of a turn
-      if (evt.type === 'cron.fired') {
-        const g: ConversationGroup = {
-          id: evt.id,
-          sessionId: evt.sessionId,
-          sessionTitle: evt.sessionTitle,
-          startedAt: evt.timestamp,
-          completedAt: evt.timestamp,
-          turnCount: null,
-          events: [evt],
-          isLive: false,
-        };
-        return [g, ...prev].slice(0, MAX_EVENTS);
-      }
-
-      // Find existing live group for this session
-      const liveIdx = prev.findIndex((g) => g.sessionId === evt.sessionId && g.isLive);
-      if (liveIdx >= 0) {
-        const done = evt.type === 'done';
-        return prev.map((g, i) => {
-          if (i !== liveIdx) return g;
-          return {
-            ...g,
-            events: [...g.events, evt],
-            isLive: !done,
-            completedAt: done ? evt.timestamp : null,
-            turnCount: done ? ((evt.raw as { turnCount?: number }).turnCount ?? null) : g.turnCount,
-          };
-        });
-      }
-
-      // Start a new group
-      const newGroup: ConversationGroup = {
-        id: `${evt.sessionId}-${evt.timestamp}`,
-        sessionId: evt.sessionId,
-        sessionTitle: evt.sessionTitle,
-        startedAt: evt.timestamp,
-        completedAt: evt.type === 'done' ? evt.timestamp : null,
-        turnCount:
-          evt.type === 'done' ? ((evt.raw as { turnCount?: number }).turnCount ?? null) : null,
-        events: [evt],
-        isLive: evt.type !== 'done',
-      };
-      return [newGroup, ...prev].slice(0, MAX_EVENTS);
-    });
-  }, []);
-
-  useEffect(() => {
-    if (!activeSessionId) return;
-
-    const activeSession = sessions.find((s) => s.id === activeSessionId);
-    const title = activeSession?.title ?? null;
-
-    const sub = subscribeToSession(activeSessionId, {
-      onEvent: (sseEvent) => {
-        const converted = convertSseEvent(sseEvent, activeSessionId, title);
-        if (converted) appendEvent(converted);
-      },
-    });
-
-    return () => sub.close();
-  }, [activeSessionId, sessions, appendEvent]);
-
-  const filtered = groups.filter((group) => {
-    if (!groupMatchesFilter(group, typeFilter)) return false;
-    if (sessionFilter && group.sessionId !== sessionFilter) return false;
-    return true;
-  });
-
-  if (isLoading) {
+  if (historyQuery.isLoading) {
     return (
       <div style={{ display: 'grid', placeItems: 'center', height: 200 }}>
         <Spin />
@@ -354,15 +284,12 @@ export function Activity() {
         </Typography.Title>
         <Select
           allowClear
-          placeholder="Most recent session"
+          placeholder="All sessions"
           size="small"
           style={{ width: 220 }}
           value={sessionFilter}
           onChange={(v) => setSessionFilter(v ?? null)}
-          options={sessions.map((s) => ({
-            value: s.id,
-            label: s.title || s.id.slice(0, 12),
-          }))}
+          options={sessionOptions}
         />
       </header>
 
@@ -392,82 +319,97 @@ export function Activity() {
 
       <div className="activity-timeline">
         {filtered.length === 0 ? (
-          <Empty description="No activity yet. Events will appear as sessions stream." />
+          <Empty description="No activity yet. Events appear as agents work." />
         ) : (
-          filtered.map((group) => {
-            const toolCount = group.events.filter((e) => e.type === 'tool_start').length;
-            const hasError = group.events.some((e) => e.type === 'error');
-            const session = group.sessionTitle || group.sessionId.slice(0, 8);
-            const toolPart =
-              toolCount > 0 ? ` · ${toolCount} tool call${toolCount !== 1 ? 's' : ''}` : '';
-            const userMsg = group.turnCount != null ? userMessages[group.turnCount - 1] : null;
-            const promptText = userMsg?.content
-              ? userMsg.content.trim().replace(/\s+/g, ' ')
-              : null;
-            const MAX_PROMPT = 60;
-            const truncatedPrompt = promptText
-              ? promptText.length > MAX_PROMPT
-                ? `${promptText.slice(0, MAX_PROMPT)}…`
-                : promptText
-              : null;
-            const groupLabel = truncatedPrompt
-              ? `Turn ${group.turnCount}: ${truncatedPrompt}${toolPart}`
-              : `${session}${group.turnCount != null ? ` · Turn ${group.turnCount}` : ''}${toolPart}`;
-            const expandedGroup = expandedGroupId === group.id;
-
-            return (
-              <div key={group.id} className="activity-group">
-                <button
-                  type="button"
-                  className={`activity-group-header${expandedGroup ? ' activity-group-header--expanded' : ''}`}
-                  onClick={() => setExpandedGroupId(expandedGroup ? null : group.id)}
-                >
-                  <div className="activity-group-meta">
-                    <span
-                      className={`activity-event-dot activity-event-dot--${group.isLive ? 'tool_start' : hasError ? 'error' : 'done'}${group.isLive ? ' activity-event-dot--pulse' : ''}`}
-                    />
-                    <span className="activity-group-time">{formatRelative(group.startedAt)}</span>
-                    <Tag color={group.isLive ? 'processing' : hasError ? 'red' : 'green'}>
-                      {group.isLive ? 'live' : hasError ? 'error' : 'done'}
-                    </Tag>
-                    <span className="activity-group-summary">{groupLabel}</span>
-                  </div>
-                  <span className="activity-group-chevron">{expandedGroup ? '▲' : '▼'}</span>
-                </button>
-
-                {expandedGroup && (
-                  <div className="activity-group-events">
-                    {group.events.map((evt) => {
-                      const expandedEvt = expandedEventId === evt.id;
-                      return (
-                        <div key={evt.id}>
-                          <button
-                            type="button"
-                            className={`activity-subevent${expandedEvt ? ' activity-subevent--expanded' : ''}`}
-                            onClick={() => setExpandedEventId(expandedEvt ? null : evt.id)}
-                          >
-                            <span
-                              className={`activity-event-dot activity-event-dot--${DOT_CLASS_MAP[evt.type]}`}
-                            />
-                            <Tag
-                              color={TYPE_COLORS[evt.type]}
-                              style={{ fontSize: 11, lineHeight: '18px' }}
-                            >
-                              {evt.type}
-                            </Tag>
-                            <span className="activity-subevent-summary">{evt.summary}</span>
-                          </button>
-                          {expandedEvt && <EventDetail event={evt} />}
-                        </div>
-                      );
-                    })}
-                  </div>
-                )}
-              </div>
-            );
-          })
+          filtered.map((group) => (
+            <ActivityGroupRow
+              key={group.id}
+              group={group}
+              title={group.sessionId === null ? null : (sessionTitles.get(group.sessionId) ?? null)}
+              expanded={expandedGroupId === group.id}
+              expandedRowKey={expandedRowKey}
+              onToggle={() => setExpandedGroupId(expandedGroupId === group.id ? null : group.id)}
+              onToggleRow={(key) => setExpandedRowKey(expandedRowKey === key ? null : key)}
+            />
+          ))
         )}
       </div>
+
+      {nextBefore !== null && (
+        <div className="activity-load-older">
+          <Button size="small" loading={loadingOlder} onClick={() => void loadOlder()}>
+            Load older
+          </Button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ActivityGroupRow({
+  group,
+  title,
+  expanded,
+  expandedRowKey,
+  onToggle,
+  onToggleRow,
+}: {
+  group: ActivityGroup;
+  title: string | null;
+  expanded: boolean;
+  expandedRowKey: string | null;
+  onToggle: () => void;
+  onToggleRow: (key: string) => void;
+}) {
+  const toolCount = group.rows.filter(
+    (r) => r.label === 'tool_start' || r.label === 'tool_end',
+  ).length;
+  const hasError = group.rows.some((r) => r.kind === 'error');
+  const session = title || group.sessionId?.slice(0, 8) || 'system';
+  const toolPart = toolCount > 0 ? ` · ${toolCount} tool call${toolCount === 1 ? '' : 's'}` : '';
+  const turnPart = group.turnCount === null ? '' : ` · Turn ${group.turnCount}`;
+  const state = group.isLive ? 'live' : hasError ? 'error' : 'done';
+
+  return (
+    <div className="activity-group">
+      <button
+        type="button"
+        className={`activity-group-header${expanded ? ' activity-group-header--expanded' : ''}`}
+        onClick={onToggle}
+      >
+        <div className="activity-group-meta">
+          <span
+            className={`activity-event-dot activity-event-dot--${group.isLive ? 'tool_start' : hasError ? 'error' : 'done'}${group.isLive ? ' activity-event-dot--pulse' : ''}`}
+          />
+          <span className="activity-group-time">{formatRelative(group.startedAt)}</span>
+          <Tag color={group.isLive ? 'processing' : hasError ? 'red' : 'green'}>{state}</Tag>
+          <span className="activity-group-summary">{`${session}${turnPart}${toolPart}`}</span>
+        </div>
+        <span className="activity-group-chevron">{expanded ? '▲' : '▼'}</span>
+      </button>
+
+      {expanded && (
+        <div className="activity-group-events">
+          {group.rows.map((row) => (
+            <div key={row.key}>
+              <button
+                type="button"
+                className={`activity-subevent${expandedRowKey === row.key ? ' activity-subevent--expanded' : ''}`}
+                onClick={() => onToggleRow(row.key)}
+              >
+                <span
+                  className={`activity-event-dot activity-event-dot--${DOT_CLASS_MAP[row.kind]}`}
+                />
+                <Tag color={TAG_COLORS[row.kind]} style={{ fontSize: 11, lineHeight: '18px' }}>
+                  {row.label}
+                </Tag>
+                <span className="activity-subevent-summary">{row.summary}</span>
+              </button>
+              {expandedRowKey === row.key && <EventDetail details={row.details} />}
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

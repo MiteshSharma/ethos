@@ -74,6 +74,22 @@ describe('resolveBreadcrumb', () => {
     });
   });
 
+  it('workspace altitude: the Activity pane resolves to "Activity" (activity-feed-fix P4)', () => {
+    expect(resolveBreadcrumb('/p/engineer/activity', 'Engineer')).toEqual({
+      altitude: 'workspace',
+      scopeLabel: 'Engineer',
+      paneLabel: 'Activity',
+    });
+  });
+
+  it('library altitude: the bare /activity twin still resolves to "Activity"', () => {
+    expect(resolveBreadcrumb('/activity', null)).toEqual({
+      altitude: 'library',
+      scopeLabel: 'Library',
+      paneLabel: 'Activity',
+    });
+  });
+
   it('library altitude: "Library / {pane}" with the "All …" prefix distinguishing the twin', () => {
     expect(resolveBreadcrumb('/skills', null)).toEqual({
       altitude: 'library',

@@ -2042,6 +2042,15 @@ export function buildServeWebApi(opts: BuildServeWebApiOptions): ReturnType<type
         return null;
       }
     },
+    // Durable activity history for the web Activity tab, read from the same
+    // shared observability store.
+    activityHistoryFn: (filter) => {
+      try {
+        return getObservabilityStore().getRecentActivity(filter);
+      } catch {
+        return [];
+      }
+    },
     metricsTextFn: metricsText,
     recordHttpRequest,
     ...(cronTriggers.external ? { cronFireTrigger: cronTriggers.external } : {}),

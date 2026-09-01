@@ -13,6 +13,7 @@ import { sessionsPin } from '../features/sessions/rpc/pin';
 import { sessionsUnpin } from '../features/sessions/rpc/unpin';
 import { sessionsUpdate } from '../features/sessions/rpc/update';
 import { a2aRouter } from './a2a';
+import { activityRouter } from './activity';
 import { adminRouter } from './admin';
 import { apiKeysRouter } from './api-keys';
 import { batchRouter } from './batch';
@@ -63,6 +64,7 @@ export const apiRouter = {
     contextAnatomy: sessionsContextAnatomy,
     compact: sessionsCompact,
   },
+  activity: activityRouter,
   chat: {
     send: chatSend,
     abort: chatAbort,

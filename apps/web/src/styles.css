@@ -6000,6 +6000,14 @@ textarea {
   background: #e879f9;
 }
 
+/* Informational — something happened and it carries no success/failure state
+   of its own (run digests, notifications, memory captures, mesh changes). The
+   dim text token, so it reads as the quietest thing in the column rather than
+   claiming a status colour it hasn't earned. */
+.activity-event-dot--notice {
+  background: var(--ethos-text-dim);
+}
+
 .activity-event-dot--pulse {
   animation: activity-dot-pulse 1.2s ease-in-out infinite;
 }
@@ -6012,6 +6020,12 @@ textarea {
   50% {
     opacity: 0.35;
   }
+}
+
+/* Paging backwards through durable history. Left-aligned under the timeline,
+   not centred — it continues the list rather than closing it. */
+.activity-load-older {
+  margin-top: 12px;
 }
 
 /* Structured event detail */

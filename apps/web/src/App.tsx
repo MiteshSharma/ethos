@@ -205,6 +205,7 @@ export function App() {
           <Route path="/p/:personalityId/skills" element={<Skills />} />
           <Route path="/p/:personalityId/mcp" element={<Mcp />} />
           <Route path="/p/:personalityId/plugins" element={<Plugins />} />
+          <Route path="/p/:personalityId/activity" element={<Activity />} />
           <Route path="/p/:personalityId/identity" element={<PersonalityDetail />} />
 
           {/* Old URLs — permanent redirects to the workspace routes above. */}

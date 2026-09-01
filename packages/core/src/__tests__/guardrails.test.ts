@@ -168,7 +168,14 @@ describe('Orchestrator guardrails', () => {
       // derived from the span's truncated `attrs.args`). One import plus a
       // three-line commented call site; the dispatch rule itself lives in
       // agent-loop/memory-telemetry.ts.
-      if (lineCount > 808) {
+      // Bumped 808 -> 816 (activity-feed-fix Phase 3): the tool call's own id
+      // is written into the span's `attrs` alongside `args`, so a durable
+      // `spans` row can be matched back to the live `tool_start`/`tool_end`
+      // SSE events for the same call — without it the web Activity feed draws
+      // every tool call twice. One field, plus the comment recording why the
+      // link cannot come from the span id (generated inside the store) or from
+      // the in-memory `spanIds` map (never persisted).
+      if (lineCount > 816) {
         violations.push(`${file}: ${lineCount} lines`);
       }
     }

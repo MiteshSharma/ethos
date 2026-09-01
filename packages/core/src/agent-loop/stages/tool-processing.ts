@@ -367,7 +367,15 @@ export async function* processTools(
       traceId: ctx.traceId ?? '',
       kind: 'tool_call',
       name: tc.toolName,
-      attrs: { args: JSON.stringify(effectiveArgs).slice(0, 4096) },
+      // `tool_call_id` is the only durable link from a stored span back to the
+      // live tool_start/tool_end SSE events for the same call (the span id is
+      // generated inside the store, and the map below is in-memory) — the web
+      // Activity feed dedupes on it. Redaction keeps it at every level: the
+      // `none` branch strips `args` specifically, not the whole bag.
+      attrs: {
+        args: JSON.stringify(effectiveArgs).slice(0, 4096),
+        tool_call_id: tc.toolCallId,
+      },
       obsConfig: ctx.obsConfig,
     });
     spanIds.set(tc.toolCallId, spanId ?? '');

@@ -27,7 +27,7 @@ import type {
   SessionStore,
   Storage,
 } from '@ethosagent/types';
-import type { SseEvent } from '@ethosagent/web-contracts';
+import type { ActivityEvent, SseEvent } from '@ethosagent/web-contracts';
 import {
   createMemoryProvider,
   createPendingMemoryStore,
@@ -487,6 +487,13 @@ export interface CreateWebApiOptions {
   contextAnatomyFn?: (
     sessionId: string,
   ) => import('@ethosagent/web-contracts').ContextAnatomyWire | null;
+  /**
+   * Reads the merged durable activity feed from observability.db (tool/LLM
+   * spans, turn traces, events), backing `activity.history`. Boot code (serve)
+   * builds this over the same shared `SQLiteObservabilityStore` as
+   * `contextAnatomyFn`. Omitted → the RPC returns an empty page.
+   */
+  activityHistoryFn?: import('./routes/index').ActivityHistoryFn;
   /**
    * P2-counters (D2/D16) — renders the OpenMetrics text `GET /metrics` (scope
    * `metrics:read`) serves. Boot code builds this via
@@ -1031,10 +1038,17 @@ export function createWebApi(opts: CreateWebApiOptions): CreateWebApiResult {
   // alongside the SSE buffer so a long-running server doesn't accumulate
   // an AgentBridge per session forever (memory leak otherwise).
   const buffer = new SessionStreamBuffer<SseEvent>();
+  // Cross-session activity feed (`GET /sse/activity`). One shared bucket under
+  // a single fixed key, so touch/disconnect/reap apply to the whole feed — the
+  // per-personality isolation is applied at READ time by
+  // `ChatService.subscribeActivity`'s filter, NOT by the buffer. Larger
+  // capacity than the per-session buffer because it aggregates every session.
+  const activityBuffer = new SessionStreamBuffer<ActivityEvent>({ capacity: 5000 });
   const chatService = new ChatService({
     loop: agentLoop,
     sessions: chatRepo,
     buffer,
+    activityBuffer,
     defaults: opts.chatDefaults,
     cardStore,
     onForget: (sessionId) => approvalsService.cancelForSession(sessionId),
@@ -1333,6 +1347,7 @@ export function createWebApi(opts: CreateWebApiOptions): CreateWebApiResult {
       systemBus,
       ...(opts.a2aPeering ? { a2aPeering: opts.a2aPeering } : {}),
       ...(opts.a2aControl ? { a2aControl: opts.a2aControl } : {}),
+      ...(opts.activityHistoryFn ? { activityHistory: opts.activityHistoryFn } : {}),
     },
     ...(opts.allowedOrigins ? { allowedOrigins: opts.allowedOrigins } : {}),
     ...(opts.secureCookie !== undefined ? { secureCookie: opts.secureCookie } : {}),

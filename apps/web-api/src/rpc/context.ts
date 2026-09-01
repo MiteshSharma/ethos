@@ -102,6 +102,10 @@ export interface RpcContext {
    *  live gate the route modules and the `a2a_send` tool consult. Absent in
    *  non-serve contexts. */
   a2aControl?: import('../routes/route-module').A2aControl;
+  /** Durable activity history from the observability store, backing
+   *  `activity.history`. Absent where no observability store is wired — the RPC
+   *  then returns an empty page. */
+  activityHistory?: import('../routes/index').ActivityHistoryFn;
 }
 
 export const os = implement(contract).$context<RpcContext>();

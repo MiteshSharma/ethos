@@ -114,4 +114,26 @@ describe('ObservabilityService redaction policy', () => {
     const spans = store.getSpans(traceId);
     expect(spans[0]?.attrs?.args).toBeUndefined();
   });
+
+  // The web Activity feed dedupes a durable `tool_call` span against the live
+  // `tool_start`/`tool_end` SSE events on `attrs.tool_call_id` (written at
+  // packages/core/.../tool-processing.ts). That link is only worth anything if
+  // it survives every redaction level — `none` strips args specifically, not
+  // the whole attrs bag, and the patterns match VALUES, not keys.
+  for (const level of ['none', 'redacted', 'full'] as const) {
+    it(`level '${level}': tool_call_id survives redaction`, () => {
+      const { service, store } = makeService();
+      const traceId = service.startTrace({ kind: 'turn', redaction: { level } });
+      const spanId = service.startSpan({
+        traceId,
+        kind: 'tool_call',
+        name: 'bash',
+        attrs: { args: 'echo hi', tool_call_id: 'toolu_01ABCdef' },
+        redaction: { level, extraPatterns: ['INTERNAL-DOC-[A-Z0-9]{8}'] },
+      });
+      service.endSpan(spanId, 'ok');
+      const spans = store.getSpans(traceId);
+      expect(spans[0]?.attrs?.tool_call_id).toBe('toolu_01ABCdef');
+    });
+  }
 });

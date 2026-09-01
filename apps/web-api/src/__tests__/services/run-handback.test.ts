@@ -1,6 +1,6 @@
 import { SessionStreamBuffer } from '@ethosagent/agent-bridge';
 import { SQLiteSessionStore } from '@ethosagent/session-sqlite';
-import type { SseEvent } from '@ethosagent/web-contracts';
+import type { ActivityEvent, SseEvent } from '@ethosagent/web-contracts';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { formatRunHandBack } from '../../features/chat/handback';
 import { ChatRepository } from '../../features/chat/repository';
@@ -84,15 +84,18 @@ describe('ChatService.handBack', () => {
   let store: SQLiteSessionStore;
   let sessions: ChatRepository;
   let buffer: SessionStreamBuffer<SseEvent>;
+  let activityBuffer: SessionStreamBuffer<ActivityEvent>;
 
   beforeEach(() => {
     store = new SQLiteSessionStore(':memory:');
     sessions = new ChatRepository(store);
     buffer = new SessionStreamBuffer<SseEvent>();
+    activityBuffer = new SessionStreamBuffer<ActivityEvent>();
   });
 
   afterEach(() => {
     buffer.destroy();
+    activityBuffer.destroy();
     store.close();
   });
 
@@ -106,6 +109,7 @@ describe('ChatService.handBack', () => {
       }),
       sessions,
       buffer,
+      activityBuffer,
       defaults: { model: 'claude-test', provider: 'anthropic' },
     });
   }

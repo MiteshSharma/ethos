@@ -213,6 +213,47 @@ const sessions = {
 };
 
 // ---------------------------------------------------------------------------
+// Activity — durable history read from observability.db (spans / turn traces /
+// events), merged into one newest-first timeline. `personalityId` scopes it to
+// one agent; omitting it is the global (Library-altitude) view.
+// ---------------------------------------------------------------------------
+
+const ActivityHistoryItemSchema = z.object({
+  id: z.string(),
+  kind: z.enum(['tool_call', 'llm_call', 'turn', 'event']),
+  name: z.string(),
+  sessionId: z.string().nullable(),
+  personalityId: z.string().nullable(),
+  startedAt: z.number(),
+  endedAt: z.number().nullable(),
+  status: z.string().nullable(),
+  details: z.record(z.string(), z.unknown()).nullable(),
+});
+const ActivityHistoryInput = z.object({
+  personalityId: z.string().nullable().optional(),
+  limit: z.number().int().min(1).max(200).default(50),
+  /**
+   * Exclusive cursor from the previous page — BOTH halves, round-tripped
+   * together. A bare ms-epoch cursor is not enough: parallel tool calls share a
+   * millisecond, so a page boundary inside a tied group would skip the rest of
+   * it. `beforeId` breaks the tie against the same `(startedAt, id)` order the
+   * server pages by.
+   */
+  before: z.number().optional(),
+  beforeId: z.string().optional(),
+});
+const ActivityHistoryOutput = z.object({
+  items: z.array(ActivityHistoryItemSchema),
+  nextBefore: z.number().nullable(),
+  nextBeforeId: z.string().nullable(),
+});
+export type ActivityHistoryItemWire = z.infer<typeof ActivityHistoryItemSchema>;
+
+const activity = {
+  history: oc.input(ActivityHistoryInput).output(ActivityHistoryOutput),
+};
+
+// ---------------------------------------------------------------------------
 // Personalities (v0 read-only — create/edit lands in v1)
 // ---------------------------------------------------------------------------
 
@@ -3831,6 +3872,7 @@ const documents = {
 
 export const contract = {
   sessions,
+  activity,
   personalities,
   chat,
   tools,

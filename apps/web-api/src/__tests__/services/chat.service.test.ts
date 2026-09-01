@@ -1,7 +1,7 @@
 import { SessionStreamBuffer } from '@ethosagent/agent-bridge';
 import { SQLiteSessionStore } from '@ethosagent/session-sqlite';
 import { isEthosError } from '@ethosagent/types';
-import type { SseEvent } from '@ethosagent/web-contracts';
+import type { ActivityEvent, SseEvent } from '@ethosagent/web-contracts';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { ChatRepository } from '../../features/chat/repository';
 import { ChatService } from '../../features/chat/service';
@@ -15,15 +15,18 @@ describe('ChatService', () => {
   let store: SQLiteSessionStore;
   let sessions: ChatRepository;
   let buffer: SessionStreamBuffer<SseEvent>;
+  let activityBuffer: SessionStreamBuffer<ActivityEvent>;
 
   beforeEach(() => {
     store = new SQLiteSessionStore(':memory:');
     sessions = new ChatRepository(store);
     buffer = new SessionStreamBuffer<SseEvent>();
+    activityBuffer = new SessionStreamBuffer<ActivityEvent>();
   });
 
   afterEach(() => {
     buffer.destroy();
+    activityBuffer.destroy();
     store.close();
   });
 
@@ -38,6 +41,7 @@ describe('ChatService', () => {
       loop,
       sessions,
       buffer,
+      activityBuffer,
       defaults: { model: 'claude-test', provider: 'anthropic' },
     });
   }
@@ -82,6 +86,7 @@ describe('ChatService', () => {
       loop,
       sessions,
       buffer,
+      activityBuffer,
       defaults: { model: 'claude-test', provider: 'anthropic' },
       refreshPersonalities: async () => {
         throw new Error('malformed personality YAML on disk');
@@ -216,6 +221,7 @@ describe('ChatService', () => {
       loop,
       sessions,
       buffer,
+      activityBuffer,
       defaults: { model: 'claude-test', provider: 'anthropic' },
       titleFn: async () => {
         titleCalls++;
@@ -239,6 +245,7 @@ describe('ChatService', () => {
       }),
       sessions,
       buffer,
+      activityBuffer,
       defaults: { model: 'claude-test', provider: 'anthropic' },
       titleFn: async () => 'A Fine Title',
     });
@@ -253,6 +260,7 @@ describe('ChatService', () => {
       }),
       sessions,
       buffer,
+      activityBuffer,
       defaults: { model: 'claude-test', provider: 'anthropic' },
       titleFn: async () => '   ',
     });
@@ -269,6 +277,7 @@ describe('ChatService', () => {
       }),
       sessions,
       buffer,
+      activityBuffer,
       defaults: { model: 'claude-test', provider: 'anthropic' },
       titleFn: async () => {
         throw new Error('LLM unreachable');
@@ -374,6 +383,7 @@ describe('ChatService', () => {
       loop: makeStubAgentLoop({ events: [{ type: 'done', text: 'ok', turnCount: 1 }], gate }),
       sessions,
       buffer,
+      activityBuffer,
       defaults: { model: 'claude-test', provider: 'anthropic' },
     });
 
@@ -427,15 +437,18 @@ describe('ChatService — voice-origin on talk-mode turns', () => {
   let store: SQLiteSessionStore;
   let sessions: ChatRepository;
   let buffer: SessionStreamBuffer<SseEvent>;
+  let activityBuffer: SessionStreamBuffer<ActivityEvent>;
 
   beforeEach(() => {
     store = new SQLiteSessionStore(':memory:');
     sessions = new ChatRepository(store);
     buffer = new SessionStreamBuffer<SseEvent>();
+    activityBuffer = new SessionStreamBuffer<ActivityEvent>();
   });
 
   afterEach(() => {
     buffer.destroy();
+    activityBuffer.destroy();
     store.close();
   });
 
@@ -450,6 +463,7 @@ describe('ChatService — voice-origin on talk-mode turns', () => {
       loop,
       sessions,
       buffer,
+      activityBuffer,
       defaults: { model: 'claude-test', provider: 'anthropic' },
     });
   }
@@ -483,5 +497,185 @@ describe('ChatService — voice-origin on talk-mode turns', () => {
     await new Promise((r) => setTimeout(r, 0));
 
     expect(runOpts[0]?.voiceOrigin).toBeUndefined();
+  });
+});
+
+// The activity fan-out is a SECOND read path over the same `append`
+// chokepoint: every session's events land in one shared bucket, and scoping
+// to a single agent is a read-time filter rather than a separate buffer.
+describe('ChatService — activity fan-out', () => {
+  let store: SQLiteSessionStore;
+  let sessions: ChatRepository;
+  let buffer: SessionStreamBuffer<SseEvent>;
+  let activityBuffer: SessionStreamBuffer<ActivityEvent>;
+
+  beforeEach(() => {
+    store = new SQLiteSessionStore(':memory:');
+    sessions = new ChatRepository(store);
+    buffer = new SessionStreamBuffer<SseEvent>();
+    activityBuffer = new SessionStreamBuffer<ActivityEvent>();
+  });
+
+  afterEach(() => {
+    buffer.destroy();
+    activityBuffer.destroy();
+    store.close();
+  });
+
+  function makeService() {
+    return new ChatService({
+      // The `text_delta` is what the activity filter must drop; the tool pair
+      // gives each turn more than one activity event so the seq/replay cases
+      // have something to page through.
+      loop: makeStubAgentLoop({
+        events: [
+          { type: 'text_delta', text: 'hello' },
+          { type: 'tool_start', toolCallId: 'tc1', toolName: 'read_file', args: {} },
+          { type: 'tool_end', toolCallId: 'tc1', toolName: 'read_file', ok: true, durationMs: 3 },
+          { type: 'done', text: 'hello', turnCount: 1 },
+        ],
+      }),
+      sessions,
+      buffer,
+      activityBuffer,
+      defaults: { model: 'claude-test', provider: 'anthropic' },
+    });
+  }
+
+  /** Run one turn on a fresh session owned by `personalityId`. */
+  async function runTurn(service: ChatService, personalityId: string): Promise<string> {
+    const { sessionId } = await service.send({ clientId: 'tab-1', text: 'hi', personalityId });
+    await waitFor(() => buffer.head(sessionId) > 0);
+    return sessionId;
+  }
+
+  it('scopes the replay to one personality; null replays every personality', async () => {
+    const service = makeService();
+    const sessionA = await runTurn(service, 'agentA');
+    const sessionB = await runTurn(service, 'agentB');
+    await waitFor(() => activityBuffer.head('__activity__') >= 4);
+
+    const scoped: ActivityEvent[] = [];
+    service.subscribeActivity('agentA', 0, (b) => {
+      scoped.push(b.event);
+    })();
+
+    expect(scoped.length).toBeGreaterThan(0);
+    expect(scoped.every((e) => e.personalityId === 'agentA')).toBe(true);
+    expect(scoped.every((e) => e.sessionId === sessionA)).toBe(true);
+
+    const global: ActivityEvent[] = [];
+    service.subscribeActivity(null, 0, (b) => {
+      global.push(b.event);
+    })();
+
+    expect(global.some((e) => e.sessionId === sessionA)).toBe(true);
+    expect(global.some((e) => e.sessionId === sessionB)).toBe(true);
+    expect(global.length).toBeGreaterThan(scoped.length);
+  });
+
+  it('delivers live events to a scoped subscriber, filtering out other agents', async () => {
+    const service = makeService();
+    const scoped: ActivityEvent[] = [];
+    const unsubscribe = service.subscribeActivity('agentA', 0, (b) => {
+      scoped.push(b.event);
+    });
+
+    await runTurn(service, 'agentB');
+    await runTurn(service, 'agentA');
+    await waitForEvent(scoped, (e) => e.some((x) => x.event.type === 'done'));
+
+    expect(scoped.every((e) => e.personalityId === 'agentA')).toBe(true);
+    expect(scoped.some((e) => e.event.type === 'done')).toBe(true);
+
+    unsubscribe();
+  });
+
+  // The activity bucket takes only what the feed renders. Streaming tokens are
+  // the reason this filter exists: without it every token of every session is
+  // fanned out to every activity listener and evicts the shared replay buffer.
+  it('keeps text_delta on the per-session stream and off the activity feed', async () => {
+    const service = makeService();
+
+    const perSession: SseEvent[] = [];
+    const activity: ActivityEvent[] = [];
+    const stopActivity = service.subscribeActivity(null, 0, (b) => {
+      activity.push(b.event);
+    });
+
+    const { sessionId } = await service.send({
+      clientId: 'tab-1',
+      text: 'hi',
+      personalityId: 'agentA',
+    });
+    const stopSession = service.subscribe(sessionId, 0, (b) => {
+      perSession.push(b.event);
+    });
+    await waitForEvent(perSession, (e) => e.some((x) => x.type === 'done'));
+
+    expect(perSession.some((e) => e.type === 'text_delta')).toBe(true);
+    expect(activity.some((e) => e.event.type === 'text_delta')).toBe(false);
+    // The activity feed still sees the same turn's discrete actions.
+    expect(activity.some((e) => e.event.type === 'done' && e.sessionId === sessionId)).toBe(true);
+
+    stopSession();
+    stopActivity();
+  });
+
+  it('replays only events with seq > sinceSeq', async () => {
+    const service = makeService();
+    await runTurn(service, 'agentA');
+    await waitFor(() => activityBuffer.head('__activity__') > 0);
+    const head = activityBuffer.head('__activity__');
+
+    const all: Array<{ seq: number }> = [];
+    service.subscribeActivity(null, 0, (b) => {
+      all.push({ seq: b.seq });
+    })();
+    expect(all.length).toBe(head);
+
+    const tail: Array<{ seq: number }> = [];
+    service.subscribeActivity(null, 1, (b) => {
+      tail.push({ seq: b.seq });
+    })();
+    expect(tail.length).toBe(head - 1);
+    expect(tail[0]?.seq).toBe(2);
+
+    const none: Array<{ seq: number }> = [];
+    service.subscribeActivity(null, head, (b) => {
+      none.push({ seq: b.seq });
+    })();
+    expect(none.length).toBe(0);
+  });
+
+  it('tags a broadcast on an unknown session null, then backfills the next one', async () => {
+    const service = makeService();
+    const sessionId = await runTurn(service, 'agentA');
+
+    // A fresh service has never seen this session through send()/requireSession(),
+    // so the first broadcast misses the personality cache.
+    const cold = new ChatService({
+      loop: makeStubAgentLoop({ events: [] }),
+      sessions,
+      buffer,
+      activityBuffer,
+      defaults: { model: 'claude-test', provider: 'anthropic' },
+    });
+
+    const seen: ActivityEvent[] = [];
+    const unsubscribe = cold.subscribeActivity(null, activityBuffer.head('__activity__'), (b) => {
+      seen.push(b.event);
+    });
+
+    cold.broadcast(sessionId, { type: 'notification', message: 'first' });
+    expect(seen[0]?.personalityId).toBeNull();
+
+    // The miss kicked off a fire-and-forget lookup; the next event is tagged.
+    await waitFor(() => {
+      cold.broadcast(sessionId, { type: 'notification', message: 'later' });
+      return seen[seen.length - 1]?.personalityId === 'agentA';
+    });
+
+    unsubscribe();
   });
 });

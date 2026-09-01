@@ -186,6 +186,12 @@ export function ScopeNav({ needsYouCount = 0 }: { needsYouCount?: number }) {
             badge={needsYouCount}
           />
           <NavRow
+            path={`/p/${personalityId}/activity`}
+            icon="📊"
+            label="Activity"
+            pathname={pathname}
+          />
+          <NavRow
             path={`/p/${personalityId}/identity`}
             icon="🪪"
             label="Identity"

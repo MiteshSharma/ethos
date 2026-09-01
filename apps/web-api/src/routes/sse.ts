@@ -86,6 +86,51 @@ export function sseRoutes(opts: SseRoutesOptions) {
     });
   });
 
+  // Merged activity stream — every session's events on one connection,
+  // optionally narrowed to a single agent via `?personalityId=`. Absent or
+  // empty means the global feed (no filter). Same `Last-Event-ID` resume as
+  // `/sessions/:id`, but the seq is the activity buffer's, not a session's.
+  //
+  // Frames carry the `ActivityEvent` envelope (`{ sessionId, personalityId,
+  // event }`), not a bare `SseEvent` — the tags are what let the client
+  // attribute a row to an agent and a conversation.
+  app.get('/activity', async (c) => {
+    const raw = c.req.query('personalityId');
+    const personalityId = raw && raw.length > 0 ? raw : null;
+    // `Last-Event-ID` covers the browser's own reconnect. A remount that
+    // already knows its cursor cannot set a header on an `EventSource`, so the
+    // query param is the explicit-resume escape hatch the web client uses.
+    const sinceSeq = parseLastEventId(c.req.header('Last-Event-ID') ?? c.req.query('lastEventId'));
+
+    return streamSSE(c, async (stream) => {
+      let unsubscribe: (() => void) | null = null;
+      let aborted = false;
+
+      stream.onAbort(() => {
+        aborted = true;
+        if (unsubscribe) unsubscribe();
+      });
+
+      unsubscribe = opts.chat.subscribeActivity(personalityId, sinceSeq, async (buffered) => {
+        // Same abort/write-failure handling as `/sessions/:id` above, and the
+        // same deliberate omission of an `event:` line.
+        if (aborted) return;
+        try {
+          await stream.writeSSE({
+            id: String(buffered.seq),
+            data: JSON.stringify(buffered.event),
+          });
+        } catch {
+          aborted = true;
+          if (unsubscribe) unsubscribe();
+        }
+      });
+
+      // Block forever — `onAbort` is the only way out.
+      await new Promise<void>(() => {});
+    });
+  });
+
   return app;
 }
 

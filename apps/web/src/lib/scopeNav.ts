@@ -25,7 +25,9 @@ export function currentAltitude(pathname: string): Altitude {
 }
 
 // Workspace pane label, keyed by the path segment right after
-// `/p/:personalityId/` — the eleven P1a routes plus chat.
+// `/p/:personalityId/` — the eleven P1a routes plus chat, plus `activity`
+// (plan/phases/activity-feed-fix.md Phase 4: the workspace twin of the bare
+// `/activity` Library route, which stays exactly where it is).
 const WORKSPACE_PANE_LABELS: Record<string, string> = {
   chat: 'Chat',
   sessions: 'Sessions',
@@ -37,6 +39,7 @@ const WORKSPACE_PANE_LABELS: Record<string, string> = {
   plugins: 'Plugins',
   goals: 'Goals',
   tasks: 'Tasks',
+  activity: 'Activity',
   identity: 'Identity',
 };
 

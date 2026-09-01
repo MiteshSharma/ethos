@@ -13,7 +13,7 @@
 
 import { SessionStreamBuffer } from '@ethosagent/agent-bridge';
 import { SQLiteSessionStore } from '@ethosagent/session-sqlite';
-import { type SseEvent, SseEventSchema } from '@ethosagent/web-contracts';
+import { type ActivityEvent, type SseEvent, SseEventSchema } from '@ethosagent/web-contracts';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { ChatRepository } from '../../features/chat/repository';
 import { ChatService } from '../../features/chat/service';
@@ -23,15 +23,18 @@ describe('ChatService — turn identity (B3)', () => {
   let store: SQLiteSessionStore;
   let sessions: ChatRepository;
   let buffer: SessionStreamBuffer<SseEvent>;
+  let activityBuffer: SessionStreamBuffer<ActivityEvent>;
 
   beforeEach(() => {
     store = new SQLiteSessionStore(':memory:');
     sessions = new ChatRepository(store);
     buffer = new SessionStreamBuffer<SseEvent>();
+    activityBuffer = new SessionStreamBuffer<ActivityEvent>();
   });
 
   afterEach(() => {
     buffer.destroy();
+    activityBuffer.destroy();
     store.close();
   });
 
@@ -40,6 +43,7 @@ describe('ChatService — turn identity (B3)', () => {
       loop: makeStubAgentLoop({ events }),
       sessions,
       buffer,
+      activityBuffer,
       defaults: { model: 'claude-test', provider: 'anthropic' },
     });
   }

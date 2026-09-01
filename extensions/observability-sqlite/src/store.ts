@@ -1,5 +1,12 @@
 import Database, { migrate } from '@ethosagent/sqlite';
-import type { ObsEvent, ObservabilityStore, Snapshot, Span, Trace } from '@ethosagent/types';
+import type {
+  ActivityHistoryRow,
+  ObsEvent,
+  ObservabilityStore,
+  Snapshot,
+  Span,
+  Trace,
+} from '@ethosagent/types';
 import {
   incrementCounter,
   incrementHistogram,
@@ -208,6 +215,82 @@ export class SQLiteObservabilityStore implements ObservabilityStore {
   getRecentTraces(limit: number): Trace[] {
     const rows = this.db.prepare('SELECT * FROM traces ORDER BY start_ts DESC LIMIT ?').all(limit);
     return (rows as TraceRow[]).map(rowToTrace);
+  }
+
+  /**
+   * Merged activity feed — the three things this store already records, in one
+   * newest-first timeline: `tool_call`/`llm_call` spans, completed turn traces,
+   * and events. Spans and events carry no subject of their own, so both branches
+   * join to `traces` for `session_id` / `subject_id` (the personality).
+   *
+   * The events branch uses a LEFT JOIN so an event with no trace still appears
+   * in the unfiltered (global) view; a `personalityId` filter necessarily drops
+   * it, since there is nothing to attribute it to.
+   *
+   * Class-only, deliberately NOT on the `ObservabilityStore` interface — this
+   * is a web-page-specific merged projection, not something every observability
+   * backend should have to reproduce. Same posture as
+   * `getLlmCallSpansForSession` below, which backs the context-anatomy view.
+   *
+   * Paging is a composite `(started_at, id)` cursor, not a bare timestamp.
+   * `start_ts` is millisecond-precision `Date.now()`, and parallel tool calls
+   * routinely share one millisecond, so ordering on the timestamp alone is
+   * non-deterministic AND silently skips the rest of a tied group when a page
+   * boundary lands inside it. `id` (span/trace/event id) is a UUID, so
+   * `(started_at DESC, id DESC)` is a total order and the tuple predicate
+   * resumes exactly where the previous page stopped.
+   */
+  getRecentActivity(filter: {
+    personalityId?: string;
+    before?: number;
+    beforeId?: string;
+    limit: number;
+  }): ActivityHistoryRow[] {
+    // Each branch takes the same optional predicates, in the same order, so the
+    // bound values below line up branch by branch.
+    const values: unknown[] = [];
+    const predicates = (subject: string, ts: string, id: string): string => {
+      let sql = '';
+      if (filter.personalityId !== undefined) {
+        sql += ` AND ${subject} = ?`;
+        values.push(filter.personalityId);
+      }
+      if (filter.before !== undefined) {
+        if (filter.beforeId === undefined) {
+          sql += ` AND ${ts} < ?`;
+          values.push(filter.before);
+        } else {
+          sql += ` AND (${ts} < ? OR (${ts} = ? AND ${id} < ?))`;
+          values.push(filter.before, filter.before, filter.beforeId);
+        }
+      }
+      return sql;
+    };
+
+    const spansBranch = `
+      SELECT s.span_id AS id, s.kind AS kind, s.name AS name, t.session_id AS session_id,
+             t.subject_id AS personality_id, s.start_ts AS started_at, s.end_ts AS ended_at,
+             s.status AS status, s.attrs AS details
+        FROM spans s JOIN traces t ON t.trace_id = s.trace_id
+       WHERE s.kind IN ('tool_call', 'llm_call')${predicates('t.subject_id', 's.start_ts', 's.span_id')}`;
+    const tracesBranch = `
+      SELECT t.trace_id, t.kind, t.kind, t.session_id, t.subject_id, t.start_ts, t.end_ts,
+             t.status, t.attrs
+        FROM traces t
+       WHERE t.kind = 'turn'${predicates('t.subject_id', 't.start_ts', 't.trace_id')}`;
+    const eventsBranch = `
+      SELECT e.event_id, 'event', e.category, t.session_id, t.subject_id, e.ts, NULL,
+             e.severity, e.details
+        FROM events e LEFT JOIN traces t ON t.trace_id = e.trace_id
+       WHERE 1 = 1${predicates('t.subject_id', 'e.ts', 'e.event_id')}`;
+
+    const rows = this.db
+      .prepare(
+        `${spansBranch} UNION ALL ${tracesBranch} UNION ALL ${eventsBranch}
+         ORDER BY started_at DESC, id DESC LIMIT ?`,
+      )
+      .all(...values, filter.limit);
+    return (rows as ActivityRow[]).map(rowToActivity);
   }
 
   // ---------------------------------------------------------------------------
@@ -876,6 +959,33 @@ function rowToEvent(r: EventRow): ObsEvent {
     code: r.code ?? undefined,
     cause: r.cause ?? undefined,
     details: r.details ? (JSON.parse(r.details) as Record<string, unknown>) : undefined,
+  };
+}
+
+/** One row of the `getRecentActivity` union — column names come from its first branch. */
+interface ActivityRow {
+  id: string;
+  kind: string;
+  name: string;
+  session_id: string | null;
+  personality_id: string | null;
+  started_at: number;
+  ended_at: number | null;
+  status: string | null;
+  details: string | null;
+}
+
+function rowToActivity(r: ActivityRow): ActivityHistoryRow {
+  return {
+    id: r.id,
+    kind: r.kind as ActivityHistoryRow['kind'],
+    name: r.name,
+    sessionId: r.session_id,
+    personalityId: r.personality_id,
+    startedAt: r.started_at,
+    endedAt: r.ended_at,
+    status: r.status,
+    details: r.details ? (JSON.parse(r.details) as Record<string, unknown>) : null,
   };
 }
 

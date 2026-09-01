@@ -295,3 +295,60 @@ export type ClarifyRequestEvent = z.infer<typeof ClarifyRequestEventSchema>;
 
 /** The `run.update` push event — the run card's ≤1 Hz liveness digest. */
 export type RunUpdateEvent = z.infer<typeof RunUpdateEventSchema>;
+
+// ---------------------------------------------------------------------------
+// Activity envelope — NOT a member of the `SseEvent` union; it WRAPS one.
+// ---------------------------------------------------------------------------
+
+/**
+ * One row on the merged activity stream (`GET /sse/activity`). The same
+ * `SseEvent` the per-session stream carries, tagged with the session it came
+ * from and that session's personality so a subscriber can scope the feed to a
+ * single agent (or watch every agent at once).
+ *
+ * `personalityId` is null when the session has no personality, or when the
+ * server could not attribute it at append time (see `ChatService`'s
+ * best-effort session→personality cache).
+ */
+export const ActivityEventSchema = z.object({
+  sessionId: z.string(),
+  personalityId: z.string().nullable(),
+  event: SseEventSchema,
+});
+export type ActivityEvent = z.infer<typeof ActivityEventSchema>;
+
+/**
+ * The `SseEvent` types the activity feed carries — the ONE list, shared by both
+ * ends. The server (`ChatService.append`) drops everything else before it ever
+ * reaches the activity buffer, and the client's `convertSseEvent` drops
+ * everything else before it becomes a row. Two lists would drift, and the cost
+ * of that drift is asymmetric: a type the server admits but the client discards
+ * is a system-wide fan-out of events nobody renders.
+ *
+ * Excluded on purpose: `text_delta`, `thinking_delta`, `usage`, `context_meta`,
+ * `stream_meta`, `protocol.upgrade_required`. Those are per-token /
+ * per-connection plumbing, not discrete actions — fanning every streamed token
+ * of every session out to every activity listener would also burn the replay
+ * buffer down in seconds, collapsing the resume window for everything real.
+ */
+export const ACTIVITY_EVENT_TYPES: ReadonlySet<SseEventType> = new Set<SseEventType>([
+  'tool_start',
+  'tool_progress',
+  'tool_end',
+  'done',
+  'error',
+  'message_persisted',
+  'tool.approval_required',
+  'approval.resolved',
+  'cron.fired',
+  'clarify.request',
+  'clarify.resolved',
+  'run.update',
+  'run_start',
+  'mesh.changed',
+  'evolve.skill_pending',
+  'evolve.skill_applied',
+  'notification',
+  'memory.captured',
+  'dry_run_summary',
+]);

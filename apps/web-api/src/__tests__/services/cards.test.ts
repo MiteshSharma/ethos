@@ -2,7 +2,7 @@ import { SessionStreamBuffer } from '@ethosagent/agent-bridge';
 import type { AgentEvent } from '@ethosagent/core';
 import { SQLiteCardStore } from '@ethosagent/session-cards';
 import { SQLiteSessionStore } from '@ethosagent/session-sqlite';
-import type { CardEnvelope, SseEvent } from '@ethosagent/web-contracts';
+import type { ActivityEvent, CardEnvelope, SseEvent } from '@ethosagent/web-contracts';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { gateStructuredCard } from '../../features/chat/card-gate';
 import { ChatRepository } from '../../features/chat/repository';
@@ -118,6 +118,7 @@ describe('card wire + replay', () => {
   let store: SQLiteSessionStore;
   let cards: SQLiteCardStore;
   let buffer: SessionStreamBuffer<SseEvent>;
+  let activityBuffer: SessionStreamBuffer<ActivityEvent>;
   let chatRepo: ChatRepository;
   let sessionsRepo: SessionsRepository;
 
@@ -125,12 +126,14 @@ describe('card wire + replay', () => {
     store = new SQLiteSessionStore(':memory:');
     cards = new SQLiteCardStore(':memory:');
     buffer = new SessionStreamBuffer<SseEvent>();
+    activityBuffer = new SessionStreamBuffer<ActivityEvent>();
     chatRepo = new ChatRepository(store);
     sessionsRepo = new SessionsRepository(store);
   });
 
   afterEach(() => {
     buffer.destroy();
+    activityBuffer.destroy();
     cards.close();
     store.close();
     vi.restoreAllMocks();
@@ -141,6 +144,7 @@ describe('card wire + replay', () => {
       loop: makeStubAgentLoop({ events }),
       sessions: chatRepo,
       buffer,
+      activityBuffer,
       defaults: { model: 'claude-test', provider: 'anthropic' },
       cardStore: cards,
     });
@@ -290,6 +294,7 @@ describe('card wire + replay', () => {
       loop: makeStubAgentLoop({ events: cardToolEvents([EVERY_KIND[0]]) }),
       sessions: chatRepo,
       buffer,
+      activityBuffer,
       defaults: { model: 'claude-test', provider: 'anthropic' },
     });
     const { sessionId, seen } = await runTurn(chat);

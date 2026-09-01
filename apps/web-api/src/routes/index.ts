@@ -142,7 +142,22 @@ export interface ServiceContainer {
    *  stage) so the Settings toggle flips the same live gate the route modules
    *  and the `a2a_send` tool consult. */
   a2aControl?: import('./route-module').A2aControl;
+  /** Durable activity history from the observability store, backing
+   *  `activity.history`. Absent where no observability store is wired. */
+  activityHistory?: ActivityHistoryFn;
 }
+
+/**
+ * Reads the merged activity feed out of the observability store. Boot code
+ * closes over `SQLiteObservabilityStore.getRecentActivity`; deployments with no
+ * observability store omit it entirely.
+ */
+export type ActivityHistoryFn = (filter: {
+  personalityId?: string;
+  before?: number;
+  beforeId?: string;
+  limit: number;
+}) => import('@ethosagent/types').ActivityHistoryRow[];
 
 /**
  * WEB-002 CORS origin decision. Returns the origin to reflect (allowing
