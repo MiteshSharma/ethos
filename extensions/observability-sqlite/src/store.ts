@@ -1,12 +1,5 @@
 import Database, { migrate } from '@ethosagent/sqlite';
-import type {
-  ActivityHistoryRow,
-  ObsEvent,
-  ObservabilityStore,
-  Snapshot,
-  Span,
-  Trace,
-} from '@ethosagent/types';
+import type { ObsEvent, ObservabilityStore, Snapshot, Span, Trace } from '@ethosagent/types';
 import {
   incrementCounter,
   incrementHistogram,
@@ -960,6 +953,34 @@ function rowToEvent(r: EventRow): ObsEvent {
     cause: r.cause ?? undefined,
     details: r.details ? (JSON.parse(r.details) as Record<string, unknown>) : undefined,
   };
+}
+
+/**
+ * One row of the merged activity feed — a `tool_call`/`llm_call` span, a
+ * completed turn trace, or a standalone event, flattened into one shape so the
+ * Activity view can render them in a single timeline.
+ *
+ * `personalityId` is the owning trace's `subjectId`. An `events` row with no
+ * `traceId` (or whose trace carries no subject) has none, and is therefore only
+ * ever reachable from the unfiltered (global) view.
+ *
+ * It lives HERE, beside the only query that produces it, and not in
+ * `@ethosagent/types`: it is a web-facing read projection over this store's own
+ * SQLite tables with no interface behind it, so the lowest-level shared
+ * contracts package has nothing to say about it. Same placement as
+ * `ContextAnatomy` / `ToolUsageRow`, the other class-only projections this
+ * package exports.
+ */
+export interface ActivityHistoryRow {
+  id: string;
+  kind: 'tool_call' | 'llm_call' | 'turn' | 'event';
+  name: string;
+  sessionId: string | null;
+  personalityId: string | null;
+  startedAt: number;
+  endedAt: number | null;
+  status: string | null;
+  details: Record<string, unknown> | null;
 }
 
 /** One row of the `getRecentActivity` union — column names come from its first branch. */

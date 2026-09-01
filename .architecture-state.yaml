@@ -262,10 +262,10 @@ register_anchors:
     - { path: packages/safety/redact/src/index.ts, line: 39, contains: "export function detectSecrets" }
     - { path: packages/safety/redact/src/index.ts, line: 51, contains: "export function redactString" }
     - { path: packages/safety/redact/src/index.ts, line: 68, contains: "export function redactJson" }
-    - { path: extensions/observability-sqlite/src/store.ts, line: 164, contains: "redactJson(trace.attrs)" }
-    - { path: extensions/observability-sqlite/src/store.ts, line: 302, contains: "redactJson(span.attrs, extraRedactPatterns)" }
-    - { path: extensions/observability-sqlite/src/store.ts, line: 355, contains: "redactJson(attrs, extraRedactPatterns)" }
-    - { path: extensions/observability-sqlite/src/store.ts, line: 485, contains: "redactJson(event.details, extraRedactPatterns)" }
+    - { path: extensions/observability-sqlite/src/store.ts, line: 157, contains: "redactJson(trace.attrs)" }
+    - { path: extensions/observability-sqlite/src/store.ts, line: 295, contains: "redactJson(span.attrs, extraRedactPatterns)" }
+    - { path: extensions/observability-sqlite/src/store.ts, line: 348, contains: "redactJson(attrs, extraRedactPatterns)" }
+    - { path: extensions/observability-sqlite/src/store.ts, line: 478, contains: "redactJson(event.details, extraRedactPatterns)" }
     - { path: extensions/platform-slack/src/blocks/approval.ts, line: 118, contains: "function formatArgs" }
     - { path: extensions/platform-discord/src/blocks/approval.ts, line: 77, contains: "function formatArgs" }
 
@@ -300,7 +300,7 @@ register_anchors:
     - { path: packages/safety/channel/src/channel-filter.ts, line: 33, contains: "contextVisibility?:" }
 
   G-AUDIT:
-    - { path: extensions/observability-sqlite/src/store.ts, line: 164, contains: "redactJson(trace.attrs)" }
+    - { path: extensions/observability-sqlite/src/store.ts, line: 157, contains: "redactJson(trace.attrs)" }
 
 # ---- Security tiers -------------------------------------------------------
 # Every workspace package under packages/, packages/safety/, extensions/, and

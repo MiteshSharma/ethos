@@ -46,6 +46,8 @@ export interface ActivityRow {
    * `tool:<sessionId>:<toolCallId>`, so the merge collapses them to one row —
    * that link exists because `tool-processing.ts` writes `tool_call_id` into
    * the span's `attrs`, which `getRecentActivity` surfaces as `details`.
+   * A turn's three forms — the durable `turn` trace, the live `run_start`, the
+   * live `done` — collapse the same way on `turn:<traceId>`; see `turnKey`.
    * Everything else keys on something already unique to the event.
    */
   key: string;
@@ -172,7 +174,7 @@ export function convertSseEvent(event: SseEvent, ctx: LiveRowContext): ActivityR
     case 'done':
       return {
         ...base,
-        key: `done:${ctx.sessionId}:${ctx.seq}`,
+        key: event.traceId ? turnKey(event.traceId) : `done:${ctx.sessionId}:${ctx.seq}`,
         kind: 'done',
         label: 'done',
         role: 'close',
@@ -203,7 +205,7 @@ export function convertSseEvent(event: SseEvent, ctx: LiveRowContext): ActivityR
     case 'run_start':
       return {
         ...base,
-        key: `run_start:${ctx.sessionId}:${event.traceId ?? ctx.seq}`,
+        key: event.traceId ? turnKey(event.traceId) : `run_start:${ctx.sessionId}:${ctx.seq}`,
         kind: 'notice',
         label: 'run_start',
         role: 'open',
@@ -470,7 +472,7 @@ export function convertHistoryItem(item: ActivityHistoryItemWire): ActivityRow {
   if (item.kind === 'turn') {
     return {
       ...base,
-      key: `turn:${item.id}`,
+      key: turnKey(item.id),
       kind: failed ? 'error' : 'done',
       label: 'turn',
       role: 'open',
@@ -519,7 +521,10 @@ export function convertHistoryItem(item: ActivityHistoryItemWire): ActivityRow {
  * page that lands after the live `tool_end` cannot regress the row to
  * "started". Equal rank means the later arrival replaces (that is what makes a
  * `run.update` digest a replacement rather than a pile). The earliest known
- * timestamp is kept either way so a row never jumps position when it closes.
+ * timestamp is kept either way so a row never jumps position when it closes,
+ * and a known `turnCount` survives being replaced by a form that has none — a
+ * durable `turn` trace carries no turn count, so without this the group header
+ * would lose the number the live `done` already told us.
  */
 export function mergeRows(
   existing: ReadonlyMap<string, ActivityRow>,
@@ -529,7 +534,16 @@ export function mergeRows(
   for (const row of incoming) {
     const prev = next.get(row.key);
     if (prev && rank(prev) > rank(row)) continue;
-    next.set(row.key, prev ? { ...row, timestamp: Math.min(prev.timestamp, row.timestamp) } : row);
+    next.set(
+      row.key,
+      prev
+        ? {
+            ...row,
+            timestamp: Math.min(prev.timestamp, row.timestamp),
+            turnCount: row.turnCount ?? prev.turnCount,
+          }
+        : row,
+    );
   }
   return next;
 }
@@ -621,6 +635,23 @@ export function groupMatchesFilter(group: ActivityGroup, filter: ActivityTypeFil
 
 function toolKey(sessionId: string | null, toolCallId: string): string {
   return `tool:${sessionId ?? '?'}:${toolCallId}`;
+}
+
+/**
+ * Dedupe identity for one turn's lifecycle. The durable `turn` trace, the live
+ * `run_start` and the live `done` all describe the SAME turn, and they share an
+ * id: `startTurnTrace` returns the `traces.trace_id` that `getRecentActivity`
+ * surfaces as a turn row's `id`, and the agent loop mirrors that same value
+ * onto `run_start.traceId` and `done.traceId`. Keying all three on it is what
+ * stops an overlapping history seed and live replay from drawing one turn
+ * two or three times.
+ *
+ * `traceId` is additive-optional on the wire (absent when no observability
+ * adapter is wired), so both live forms keep a seq-based fallback — those
+ * deployments have no durable turn rows to collide with anyway.
+ */
+function turnKey(traceId: string): string {
+  return `turn:${traceId}`;
 }
 
 function rank(row: ActivityRow): number {

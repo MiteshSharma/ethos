@@ -157,7 +157,7 @@ export type ActivityHistoryFn = (filter: {
   before?: number;
   beforeId?: string;
   limit: number;
-}) => import('@ethosagent/types').ActivityHistoryRow[];
+}) => import('@ethosagent/observability-sqlite').ActivityHistoryRow[];
 
 /**
  * WEB-002 CORS origin decision. Returns the origin to reflect (allowing

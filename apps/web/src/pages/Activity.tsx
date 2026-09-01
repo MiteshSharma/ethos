@@ -12,6 +12,7 @@ import {
   convertHistoryItem,
   convertSseEvent,
   groupMatchesFilter,
+  MAX_GROUPS,
   mergeRows,
 } from '../lib/activityFeed';
 import { rpc } from '../rpc';
@@ -40,17 +41,33 @@ import { subscribeToActivity } from '../sse';
 const PAGE_SIZE = 50;
 
 /**
- * Resume cursor for the live stream, deliberately MODULE-level rather than a
- * `useRef`: a ref dies with the component, so navigating away from Activity
- * and back would restart the stream from "now" — exactly the gap this is here
- * to close. The activity buffer is one shared bucket scoped at read time, so a
- * seq learned under any scope is a valid resume point under any other. If the
- * server restarts its buffer seq goes backwards and the replay comes back
- * empty, which is harmless: the live handler on the server side is not
+ * Resume cursor for the live stream, PER SCOPE, deliberately MODULE-level
+ * rather than a `useRef`: a ref dies with the component, so navigating away
+ * from Activity and back would restart the stream from "now" — exactly the gap
+ * this is here to close.
+ *
+ * One cursor per scope, NOT one shared cursor, because the server filters in
+ * that order: `SessionStreamBuffer.replay` drops everything at or below
+ * `sinceSeq` FIRST, and `subscribeActivity`'s personality `matches()` runs only
+ * on what survives. A seq learned under agent A therefore says nothing about
+ * what agent B has delivered — an A event that advanced a shared cursor past a
+ * B event this client never received would skip that B event permanently, and
+ * for the live-only types (`notification`, `run.update`, `clarify.*`,
+ * `mesh.changed`, `message_persisted`, `approval.resolved`, `evolve.*`,
+ * `cron.fired`, `tool_progress`) durable `activity.history` cannot recover it,
+ * because none of them are in the observability projection at all.
+ *
+ * If the server restarts its buffer seq goes backwards and the replay comes
+ * back empty, which is harmless: the live handler on the server side is not
  * seq-filtered, and a mount always re-seeds from durable `activity.history`
  * anyway.
  */
-let lastActivitySeq = 0;
+const lastActivitySeq = new Map<string, number>();
+
+/** Cursor key for a scope. `null` (the bare `/activity`) is its own scope. */
+function scopeKey(personalityId: string | null): string {
+  return personalityId ?? 'global';
+}
 
 const TYPE_FILTERS: Array<{ value: ActivityTypeFilter; label: string }> = [
   { value: 'all', label: 'All' },
@@ -154,6 +171,13 @@ export function Activity() {
   const [nextBefore, setNextBefore] = useState<number | null>(null);
   const [nextBeforeId, setNextBeforeId] = useState<string | null>(null);
   const [loadingOlder, setLoadingOlder] = useState(false);
+  // How many groups the timeline renders. `buildGroups` caps the list to keep
+  // the DOM bounded, so the cap has to GROW with each "load older" — otherwise
+  // the button fetches a page, grows the row map, and every older group it
+  // brought back is sliced straight off the end again: work the user paid for
+  // and never sees. A page is at most `PAGE_SIZE` rows, so it is at most
+  // `PAGE_SIZE` new groups.
+  const [groupLimit, setGroupLimit] = useState(MAX_GROUPS);
   const [typeFilter, setTypeFilter] = useState<ActivityTypeFilter>('all');
   const [sessionFilter, setSessionFilter] = useState<string | null>(null);
   const [expandedGroupId, setExpandedGroupId] = useState<string | null>(null);
@@ -192,14 +216,15 @@ export function Activity() {
   );
 
   // Scope change: drop everything the previous agent's feed accumulated. The
-  // live cursor is NOT reset — the buffer's seq is one global sequence, so
-  // carrying it across means the new scope resumes without a gap instead of
-  // replaying the whole buffer.
+  // live cursor is not touched either way — it is keyed per scope (see
+  // `lastActivitySeq`), so the new scope resumes from its own last-seen seq and
+  // the old scope's is still there when the user navigates back.
   // biome-ignore lint/correctness/useExhaustiveDependencies: intentionally keyed on personalityId only — the effect body doesn't read it, it's the reset trigger
   useEffect(() => {
     setRows(new Map());
     setNextBefore(null);
     setNextBeforeId(null);
+    setGroupLimit(MAX_GROUPS);
     setSessionFilter(null);
     setExpandedGroupId(null);
     setExpandedRowKey(null);
@@ -214,10 +239,11 @@ export function Activity() {
   }, [historyQuery.data]);
 
   useEffect(() => {
+    const key = scopeKey(personalityId);
     const sub = subscribeToActivity(personalityId, {
-      sinceSeq: lastActivitySeq,
+      sinceSeq: lastActivitySeq.get(key) ?? 0,
       onEvent: (envelope, seq) => {
-        lastActivitySeq = Math.max(lastActivitySeq, seq);
+        lastActivitySeq.set(key, Math.max(lastActivitySeq.get(key) ?? 0, seq));
         const row = convertSseEvent(envelope.event, {
           sessionId: envelope.sessionId,
           personalityId: envelope.personalityId,
@@ -243,12 +269,13 @@ export function Activity() {
       setRows((prev) => mergeRows(prev, page.items.map(convertHistoryItem)));
       setNextBefore(page.nextBefore);
       setNextBeforeId(page.nextBeforeId);
+      setGroupLimit((n) => n + PAGE_SIZE);
     } finally {
       setLoadingOlder(false);
     }
   }, [nextBefore, nextBeforeId, personalityId]);
 
-  const groups = useMemo(() => buildGroups(rows.values()), [rows]);
+  const groups = useMemo(() => buildGroups(rows.values(), groupLimit), [rows, groupLimit]);
   const filtered = useMemo(
     () =>
       groups.filter(

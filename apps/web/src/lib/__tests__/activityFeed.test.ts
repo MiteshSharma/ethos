@@ -315,6 +315,43 @@ describe('mergeRows', () => {
     expect(merged.get(end.key)?.kind).toBe('error');
   });
 
+  it('draws one turn once across its durable trace, run_start and done', () => {
+    // All three carry the same id: `startTurnTrace`'s trace id is the durable
+    // `turn` row's `id` AND the `traceId` mirrored onto both live forms.
+    const fromHistory = convertHistoryItem(
+      historyItem({ id: 'trace-a', kind: 'turn', name: 'turn', startedAt: 100, endedAt: 900 }),
+    );
+    const start = live(
+      { type: 'run_start', provider: 'p', model: 'm', source: 'personality', traceId: 'trace-a' },
+      { seq: 1, timestamp: 100 },
+    );
+    const done = live(
+      { type: 'done', text: 'x', turnCount: 4, traceId: 'trace-a' },
+      { seq: 2, timestamp: 900 },
+    );
+
+    const merged = mergeRows(new Map(), [start, done, fromHistory]);
+    expect(merged.size).toBe(1);
+    expect([...merged.keys()]).toEqual(['turn:trace-a']);
+    // The durable row landed last and carries no turn count of its own; the
+    // count the live `done` established survives the replacement.
+    expect(merged.get('turn:trace-a')?.turnCount).toBe(4);
+    expect(buildGroups(merged.values())).toHaveLength(1);
+  });
+
+  it('keeps a traceless turn on its own seq-based key', () => {
+    // No observability adapter wired: `traceId` is absent on both live forms,
+    // and there is no durable turn row for them to collide with.
+    const start = live(
+      { type: 'run_start', provider: 'p', model: 'm', source: 'personality' },
+      { seq: 1, timestamp: 100 },
+    );
+    const done = live({ type: 'done', text: 'x', turnCount: 2 }, { seq: 2, timestamp: 900 });
+    expect(start.key).toBe('run_start:sess-a:1');
+    expect(done.key).toBe('done:sess-a:2');
+    expect(mergeRows(new Map(), [start, done]).size).toBe(2);
+  });
+
   it('keeps the earliest timestamp so a closing row does not jump position', () => {
     const start = live(
       { type: 'tool_start', toolCallId: 'tc1', toolName: 'bash', args: {} },

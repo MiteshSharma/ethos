@@ -15,6 +15,10 @@ import type React from 'react';
 import { act, createElement } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { buildGroups, convertHistoryItem, MAX_GROUPS } from '../../lib/activityFeed';
+
+/** The page's own history page size — the amount the visible cap grows by. */
+const PAGE_SIZE = 50;
 
 const activityHistory = vi.fn();
 const sessionsList = vi.fn();
@@ -86,6 +90,18 @@ async function mount(): Promise<void> {
     root.render(createElement(QueryClientProvider, { client }, createElement(Activity)));
   });
   await flush();
+}
+
+/** Tear the page down and mount it fresh, as navigating away and back does.
+ *  A second `root.render` would keep the component instance (and its effects)
+ *  alive, which is not what a remount tests. */
+async function remount(): Promise<void> {
+  await act(async () => root.unmount());
+  container.remove();
+  container = document.createElement('div');
+  document.body.appendChild(container);
+  root = createRoot(container);
+  await mount();
 }
 
 /** Expand every collapsed group so its rows are in the DOM. */
@@ -186,6 +202,71 @@ describe('Activity — durable history seed', () => {
     ({ Activity } = await import('../Activity'));
     await mount();
     expect(container.textContent).toContain('Load older');
+  });
+
+  it('shows what "load older" fetched even when the timeline is already capped', () => {
+    // `buildGroups` caps the rendered list. A page fetched past that cap used
+    // to be sliced straight off the end — the button did real work the user
+    // never saw. The cap has to grow with each page.
+    const turn = (i: number) => ({
+      id: `trace-${i}`,
+      kind: 'turn' as const,
+      name: 'turn',
+      sessionId: 'sess-a',
+      personalityId: 'agent-a',
+      startedAt: 10_000 + i,
+      endedAt: 10_000 + i,
+      status: 'ok',
+      details: null,
+    });
+    const first = Array.from({ length: MAX_GROUPS }, (_, i) => turn(i + 1));
+    const older = [turn(0)];
+
+    const capped = buildGroups([...first, ...older].map(convertHistoryItem), MAX_GROUPS);
+    expect(capped).toHaveLength(MAX_GROUPS);
+    expect(capped.some((g) => g.id.includes('trace-0'))).toBe(false);
+
+    const grown = buildGroups([...first, ...older].map(convertHistoryItem), MAX_GROUPS + PAGE_SIZE);
+    expect(grown).toHaveLength(MAX_GROUPS + 1);
+    expect(grown.some((g) => g.id.includes('trace-0'))).toBe(true);
+  });
+
+  it('grows the visible cap on every "load older"', async () => {
+    const turn = (i: number) => ({
+      id: `trace-${i}`,
+      kind: 'turn',
+      name: 'turn',
+      sessionId: 'sess-a',
+      personalityId: 'agent-a',
+      startedAt: 10_000 + i,
+      endedAt: 10_000 + i,
+      status: 'ok',
+      details: null,
+    });
+    activityHistory.mockResolvedValueOnce({
+      items: Array.from({ length: MAX_GROUPS }, (_, i) => turn(i + 1)),
+      nextBefore: 10_001,
+      nextBeforeId: 'trace-1',
+    });
+    activityHistory.mockResolvedValueOnce({
+      items: [turn(0)],
+      nextBefore: null,
+      nextBeforeId: null,
+    });
+
+    await mount();
+    expect(container.querySelectorAll('.activity-group')).toHaveLength(MAX_GROUPS);
+
+    const button = [...container.querySelectorAll('button')].find((b) =>
+      b.textContent?.includes('Load older'),
+    );
+    await act(async () => {
+      button?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    await flush();
+
+    // The older page is on screen, not silently sliced off the end.
+    expect(container.querySelectorAll('.activity-group')).toHaveLength(MAX_GROUPS + 1);
   });
 
   it('pages backwards with the returned cursor', async () => {
@@ -329,7 +410,8 @@ describe('Activity — live stream', () => {
     expect(container.querySelectorAll('.activity-subevent')).toHaveLength(1);
   });
 
-  it('resumes from the last seen seq when the scope changes', async () => {
+  it('resumes a remount of the SAME scope from the last seen seq', async () => {
+    routeParams = { personalityId: 'agent-a' };
     await mount();
     expect(subscribeToActivity.mock.calls[0]?.[1]?.sinceSeq).toBe(0);
 
@@ -344,10 +426,53 @@ describe('Activity — live stream', () => {
       );
     });
 
-    routeParams = { personalityId: 'agent-a' };
-    await mount();
+    await remount();
 
     expect(subscribeToActivity).toHaveBeenCalledTimes(2);
     expect(subscribeToActivity.mock.calls[1]?.[1]?.sinceSeq).toBe(7);
+  });
+
+  it("never resumes one scope from another scope's cursor", async () => {
+    // The server filters in this order: `SessionStreamBuffer.replay` drops
+    // everything at or below `sinceSeq`, and only THEN does `subscribeActivity`
+    // apply the personality filter. So a seq agent-a advanced past may still
+    // hold agent-b frames this client has never been handed — carrying one
+    // cursor across scopes skips them for good, and the live-only event types
+    // are not in `activity.history` to recover from.
+    routeParams = { personalityId: 'agent-a' };
+    await mount();
+
+    await act(async () => {
+      emit?.(
+        {
+          sessionId: 'sess-a',
+          personalityId: 'agent-a',
+          event: { type: 'notification', message: 'from a' },
+        },
+        9,
+      );
+    });
+
+    routeParams = { personalityId: 'agent-b' };
+    await remount();
+    expect(subscribeToActivity.mock.calls[1]?.[0]).toBe('agent-b');
+    expect(subscribeToActivity.mock.calls[1]?.[1]?.sinceSeq).toBe(0);
+
+    await act(async () => {
+      emit?.(
+        {
+          sessionId: 'sess-b',
+          personalityId: 'agent-b',
+          event: { type: 'notification', message: 'from b' },
+        },
+        11,
+      );
+    });
+
+    // Back to agent-a: its own cursor, not agent-b's.
+    routeParams = { personalityId: 'agent-a' };
+    await remount();
+    expect(subscribeToActivity.mock.calls[2]?.[0]).toBe('agent-a');
+    expect(subscribeToActivity.mock.calls[2]?.[1]?.sinceSeq).toBe(9);
   });
 });

@@ -87,32 +87,6 @@ export interface Snapshot {
   body: string;
 }
 
-/**
- * One row of the merged activity feed — a `tool_call`/`llm_call` span, a
- * completed turn trace, or a standalone event, flattened into one shape so the
- * Activity view can render them in a single timeline.
- *
- * `personalityId` is the owning trace's `subjectId`. An `events` row with no
- * `traceId` (or whose trace carries no subject) has none, and is therefore only
- * ever reachable from the unfiltered (global) view.
- *
- * The row shape lives here so callers can name it; the projection that produces
- * it (`getRecentActivity`) is class-only on `SQLiteObservabilityStore` and is
- * deliberately NOT on the `ObservabilityStore` interface below — same split as
- * `Span` / `getLlmCallSpansForSession`.
- */
-export interface ActivityHistoryRow {
-  id: string;
-  kind: 'tool_call' | 'llm_call' | 'turn' | 'event';
-  name: string;
-  sessionId: string | null;
-  personalityId: string | null;
-  startedAt: number;
-  endedAt: number | null;
-  status: string | null;
-  details: Record<string, unknown> | null;
-}
-
 export interface ObservabilityStore {
   insertTrace(trace: Trace): void;
   closeTrace(traceId: string, status: 'ok' | 'error' | 'aborted'): void;
