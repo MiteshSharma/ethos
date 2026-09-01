@@ -301,3 +301,68 @@ describe('McpService.personalityServers', () => {
     });
   });
 });
+
+describe('McpService.catalog', () => {
+  function makeService(): McpService {
+    const storage = new InMemoryStorage();
+    const mcpManager = {} as unknown as McpManager;
+    return new McpService({
+      mcpManager,
+      personalityUpdater: { get: () => undefined, update: async () => undefined },
+      secrets: new InMemorySecretsResolver(),
+      mcpJsonStore: new McpJsonStore(storage),
+      redirectUri: 'http://localhost/oauth/callback',
+    });
+  }
+
+  it('returns both preset arrays', () => {
+    const catalog = makeService().catalog();
+    expect(Array.isArray(catalog.remote)).toBe(true);
+    expect(Array.isArray(catalog.local)).toBe(true);
+  });
+
+  it('includes linear in remote with its widened fields', () => {
+    const linear = makeService()
+      .catalog()
+      .remote.find((p) => p.name === 'linear');
+    expect(linear).toMatchObject({
+      name: 'linear',
+      label: 'Linear',
+      url: 'https://mcp.linear.app/mcp',
+      transport: 'streamable-http',
+      authType: 'oauth',
+      category: 'Productivity',
+    });
+    expect(linear?.description.length).toBeGreaterThan(0);
+  });
+
+  it('includes all four stdio presets in local, each with a category', () => {
+    const local = makeService().catalog().local;
+    const names = local.map((p) => p.name);
+    expect(names).toEqual(expect.arrayContaining(['filesystem', 'git', 'fetch', 'memory']));
+    // sqlite was removed from the preset table: archived upstream, Python-only,
+    // and the npm package it named has never existed.
+    expect(names).not.toContain('sqlite');
+    for (const preset of local) {
+      expect(preset.category.length).toBeGreaterThan(0);
+    }
+  });
+
+  it('carries each preset argVars through to the browser', () => {
+    const local = makeService().catalog().local;
+    for (const preset of local) {
+      expect(Array.isArray(preset.argVars)).toBe(true);
+    }
+    expect(local.find((p) => p.name === 'filesystem')?.argVars).toEqual(['ALLOWED_PATH']);
+    expect(local.find((p) => p.name === 'memory')?.argVars).toEqual([]);
+  });
+
+  it('orders both arrays deterministically across calls', () => {
+    const service = makeService();
+    const first = service.catalog();
+    const second = service.catalog();
+    expect(first.remote.map((p) => p.name)).toEqual(second.remote.map((p) => p.name));
+    expect(first.local.map((p) => p.name)).toEqual(second.local.map((p) => p.name));
+    expect(first.local.map((p) => p.name)).toEqual([...first.local.map((p) => p.name)].sort());
+  });
+});

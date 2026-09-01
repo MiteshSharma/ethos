@@ -4,6 +4,8 @@ import {
   ConfidentialClientUnsupported,
   DcrUnsupported,
   deleteTokens,
+  MCP_PRESETS,
+  MCP_REMOTE_PRESETS,
   McpInstallFlow,
   type McpJsonStore,
   type McpManager,
@@ -441,6 +443,19 @@ export class McpService {
       outcome: 'unknown' as const,
       declaredScopes,
       actualScopes: [] as string[],
+    };
+  }
+
+  /**
+   * The curated preset catalog. Static data — no McpManager involvement.
+   * Served over oRPC so `apps/web` never imports the Node-only tools-mcp
+   * package. Sorted by name so the UI order is stable across calls.
+   */
+  catalog() {
+    const byName = (a: { name: string }, b: { name: string }) => a.name.localeCompare(b.name);
+    return {
+      remote: Object.values(MCP_REMOTE_PRESETS).sort(byName),
+      local: Object.values(MCP_PRESETS).sort(byName),
     };
   }
 

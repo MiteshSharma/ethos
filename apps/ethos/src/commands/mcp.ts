@@ -38,6 +38,7 @@ import {
 import type { SecretsResolver } from '@ethosagent/types';
 import { writeJson } from '../json-output';
 import { createAgentLoop, getSecretsResolver, getStorage } from '../wiring';
+import { buildPresetArgs, collectArgFlags } from './mcp-preset-args';
 
 const mcpStore = new McpJsonStore(getStorage());
 
@@ -57,6 +58,7 @@ Subcommands:
     --preset <name>  Use a built-in preset (see 'ethos mcp presets')
     --url <mcpUrl>   Remote MCP server URL (runs OAuth discovery + DCR)
     --env KEY=val    Set environment variable (repeatable)
+    --arg NAME=val   Supply a preset's command-line value (repeatable)
   presets          List available MCP server presets
   login <name>     Authenticate with an OAuth-configured MCP server
   logout <name>    Revoke and delete tokens for an MCP server
@@ -270,14 +272,18 @@ Options:
   --preset <name>  Use a built-in preset (see 'ethos mcp presets')
   --url <mcpUrl>   Remote MCP server URL (runs OAuth discovery + DCR)
   --env KEY=val    Set environment variable (repeatable)
+  --arg NAME=val   Supply a preset's command-line value (repeatable).
+                   Appended to the preset's args in declaration order —
+                   see the 'arg:' hints in 'ethos mcp presets'.
 
 Without --preset or --url, you must provide --command and optionally --args:
   --command <cmd>  Server command (e.g. 'npx')
   --args <a> ...   Command arguments (consumes remaining positional args)
 
 Examples:
-  ethos mcp add fs --preset filesystem --env ALLOWED_PATHS=/data
-  ethos mcp add my-git --preset git --env GIT_REPO_PATH=/repos/myapp
+  ethos mcp add fs --preset filesystem --arg ALLOWED_PATH=/data
+  ethos mcp add my-git --preset git --arg GIT_REPO_PATH=/repos/myapp
+  ethos mcp add mem --preset memory --env MEMORY_FILE_PATH=/data/memory.json
   ethos mcp add custom --command npx --args -y @myorg/mcp-server
   ethos mcp add linear --url https://mcp.linear.app/mcp`;
 
@@ -286,10 +292,14 @@ function parseAddArgs(argv: string[]): {
   preset?: string;
   url?: string;
   env: Record<string, string>;
+  argValues: Record<string, string>;
   command?: string;
   args: string[];
 } {
   const env: Record<string, string> = {};
+  // Collected by the one exported implementation, which is also what the unit
+  // test drives — see commands/mcp-preset-args.ts.
+  const argValues = collectArgFlags(argv);
   const extraArgs: string[] = [];
   let name: string | undefined;
   let preset: string | undefined;
@@ -320,6 +330,10 @@ function parseAddArgs(argv: string[]): {
         }
       }
       i++;
+    } else if (arg === '--arg') {
+      // Value already collected by `collectArgFlags` above; skip past it so it
+      // is not mistaken for the positional server name.
+      i++;
     } else if (arg === '--command') {
       command = argv[i + 1];
       i++;
@@ -330,7 +344,7 @@ function parseAddArgs(argv: string[]): {
     }
   }
 
-  return { name, preset, url, env, command, args: extraArgs };
+  return { name, preset, url, env, argValues, command, args: extraArgs };
 }
 
 async function readMcpJson(): Promise<McpServerConfig[]> {
@@ -380,6 +394,13 @@ async function runAdd(argv: string[]): Promise<void> {
       return;
     }
 
+    const built = buildPresetArgs(preset, parsed.argValues, parsed.name);
+    if (!built.ok) {
+      console.error(built.error);
+      process.exitCode = 1;
+      return;
+    }
+
     const envKeys = Object.keys(parsed.env);
     const envPassthrough = envKeys.length > 0 ? envKeys : undefined;
     const envRefs = await persistEnvSecrets(parsed.name, parsed.env);
@@ -388,7 +409,7 @@ async function runAdd(argv: string[]): Promise<void> {
       name: parsed.name,
       transport: 'stdio',
       command: preset.command,
-      args: preset.args,
+      args: built.args,
       ...(envKeys.length > 0 ? { env: envRefs } : {}),
       ...(envPassthrough ? { mcpEnvPassthrough: envPassthrough } : {}),
     };
@@ -513,6 +534,7 @@ function runPresets(argv: string[]): void {
       name: preset.name,
       description: preset.description,
       envVars: preset.envVars,
+      argVars: preset.argVars,
     }));
     writeJson(presets);
     return;
@@ -520,10 +542,16 @@ function runPresets(argv: string[]): void {
 
   console.log('Available MCP server presets:\n');
   for (const preset of Object.values(MCP_PRESETS)) {
-    const envHint = preset.envVars.length > 0 ? ` (env: ${preset.envVars.join(', ')})` : '';
-    console.log(`  ${preset.name.padEnd(14)} ${preset.description}${envHint}`);
+    const hints: string[] = [];
+    if (preset.argVars.length > 0) hints.push(`arg: ${preset.argVars.join(', ')}`);
+    if (preset.envVars.length > 0) hints.push(`env: ${preset.envVars.join(', ')}`);
+    const hint = hints.length > 0 ? ` (${hints.join('; ')})` : '';
+    console.log(`  ${preset.name.padEnd(14)} ${preset.description}${hint}`);
   }
-  console.log('\nUsage: ethos mcp add <name> --preset <preset> [--env KEY=val ...]');
+  console.log(
+    '\nUsage: ethos mcp add <name> --preset <preset> [--arg NAME=val ...] [--env KEY=val ...]',
+  );
+  console.log("An 'arg:' value is required — the server reads it from its command line.");
 }
 
 function runDoctor(argv: string[]): void {

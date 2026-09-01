@@ -804,6 +804,48 @@ export const McpScopeStatusOutputSchema = z.object({
   error: z.string().optional(),
 });
 
+// ---------------------------------------------------------------------------
+// MCP default catalog — the curated preset slate, served over oRPC.
+//
+// The catalog data itself lives in `@ethosagent/tools-mcp`, a Node-only
+// package (stdio transports spawn child processes). `apps/web` must never
+// import it, so the catalog crosses the same oRPC boundary every other piece
+// of MCP data already crosses. These shapes mirror `McpRemotePreset` /
+// `McpPreset` in that package exactly.
+// ---------------------------------------------------------------------------
+
+export const McpRemotePresetSchema = z.object({
+  name: z.string(),
+  label: z.string(),
+  url: z.string(),
+  transport: z.literal('streamable-http'),
+  authType: z.enum(['oauth', 'none', 'bearer']),
+  description: z.string(),
+  /** Grouping label for the catalog UI, e.g. "Developer tools". */
+  category: z.string(),
+  docsUrl: z.string().optional(),
+});
+export type McpRemotePresetInfo = z.infer<typeof McpRemotePresetSchema>;
+
+export const McpLocalPresetSchema = z.object({
+  name: z.string(),
+  description: z.string(),
+  command: z.string(),
+  args: z.array(z.string()),
+  /** Env vars the preset expects the user to supply. */
+  envVars: z.array(z.string()),
+  /** Values the user supplies that are appended to `args`, in order. */
+  argVars: z.array(z.string()),
+  category: z.string(),
+});
+export type McpLocalPresetInfo = z.infer<typeof McpLocalPresetSchema>;
+
+export const McpCatalogOutputSchema = z.object({
+  remote: z.array(McpRemotePresetSchema),
+  local: z.array(McpLocalPresetSchema),
+});
+export type McpCatalogOutput = z.infer<typeof McpCatalogOutputSchema>;
+
 export const McpValidateConfigInputSchema = z.object({
   transport: z.enum(['streamable-http', 'sse', 'stdio']),
   url: z.string().optional(),

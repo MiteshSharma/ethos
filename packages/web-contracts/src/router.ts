@@ -44,6 +44,7 @@ import {
   McpAttachInputSchema,
   McpAttachOutputSchema,
   McpCancelInputSchema,
+  McpCatalogOutputSchema,
   McpCompleteInputSchema,
   McpCompleteOutputSchema,
   McpDeleteInputSchema,
@@ -2276,6 +2277,8 @@ const mcp = {
   updateToken: oc.input(McpUpdateTokenInputSchema).output(McpUpdateTokenOutputSchema),
   scopeStatus: oc.input(McpScopeStatusInputSchema).output(McpScopeStatusOutputSchema),
   validateConfig: oc.input(McpValidateConfigInputSchema).output(McpValidateConfigOutputSchema),
+  /** The curated preset catalog, so the browser never imports the Node-only tools-mcp package. */
+  catalog: oc.output(McpCatalogOutputSchema),
 };
 
 // ---------------------------------------------------------------------------
