@@ -511,9 +511,10 @@ export interface CreateWebApiOptions {
    */
   recordHttpRequest?: (method: string, status: number) => void;
   /** External cron trigger (plan/phases/cron-scheduler-seam.md) — mounts
-   *  `POST /cron/fire` (bearer auth, scope `cron`) when present. Boot code
-   *  supplies an `HttpFireTrigger` only when `cron.trigger.external` is
-   *  `true`; omitted → `/cron/fire` is not mounted. */
+   *  `POST /cron/fire` (bearer auth, scope `cron`) when present. No config
+   *  gates it — `ethos serve` / `ethos boot` always supply an
+   *  `HttpFireTrigger`. Optional so embedders (and this package's own tests)
+   *  can build an app without one; omitted → `/cron/fire` is not mounted. */
   cronFireTrigger?: import('./routes/cron').CronFireTrigger;
 }
 
@@ -1365,10 +1366,10 @@ export function createWebApi(opts: CreateWebApiOptions): CreateWebApiResult {
     ...(opts.cronFireTrigger ? { cronFireTrigger: opts.cronFireTrigger } : {}),
     ...(opts.idempotencyStore ? { idempotencyStore: opts.idempotencyStore } : {}),
     ...(opts.corsOrigins ? { corsOrigins: opts.corsOrigins } : {}),
-    // The download route is a built-in module rather than a caller-supplied
-    // one: it needs `documentsService`, which is constructed here. Declaring it
-    // through the same seam keeps its auth posture explicit and reviewable, and
-    // mounts it BEFORE the static `/*` catch-all.
+    // The download/upload routes are a built-in module rather than a
+    // caller-supplied one: they need `documentsService`, which is constructed
+    // here. Declaring it through the same seam keeps its auth posture explicit
+    // and reviewable, and mounts it BEFORE the static `/*` catch-all.
     routeModules: [
       ...(opts.routeModules ?? []),
       {
@@ -1376,8 +1377,9 @@ export function createWebApi(opts: CreateWebApiOptions): CreateWebApiResult {
         router: documentsRoutes({ documents: documentsService }),
         auth: 'cookie',
         description:
-          'Streams a file from a personality workdir. Cookie-only: an `<a download>` ' +
-          'navigation carries `ethos_auth`, but a Bearer header cannot be attached to one.',
+          'Streams a file out of a personality workdir, and accepts a raw-body upload ' +
+          'into one. Cookie-only: an `<a download>` navigation carries `ethos_auth`, ' +
+          'but a Bearer header cannot be attached to one.',
       },
       {
         basePath: '/api/personalities',

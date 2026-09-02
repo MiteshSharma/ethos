@@ -104,49 +104,113 @@ describe('NoopArmingBackend', () => {
 });
 
 // ---------------------------------------------------------------------------
-// buildCronTriggers — the three deployment profiles fall out of config with
-// no code fork (plan/phases/cron-scheduler-seam.md "Config surface").
+// buildCronTriggers — the mode falls out of one presence-gated config field,
+// `cron.fireUrl` (plan/phases/cron-fire-url-collapse.md).
 // ---------------------------------------------------------------------------
 
+const FIRE_URL = 'https://agent.example.com/cron/fire';
+
 describe('buildCronTriggers', () => {
-  it('local/always-on: no cron config at all reproduces today — only the local trigger', () => {
+  it('local mode: no cron config at all reproduces today — local trigger, no notices', () => {
     const { engine } = makeEngine();
     const result = buildCronTriggers(engine, undefined);
 
     expect(result.local).toBeInstanceOf(LocalIntervalTrigger);
-    expect(result.external).toBeNull();
-    expect(result.arming).toBeInstanceOf(NoopArmingBackend);
-  });
-
-  it('local/always-on: explicit trigger.local: true, trigger.external: false', () => {
-    const { engine } = makeEngine();
-    const result = buildCronTriggers(engine, { trigger: { local: true, external: false } });
-
-    expect(result.local).toBeInstanceOf(LocalIntervalTrigger);
-    expect(result.external).toBeNull();
-  });
-
-  it('hybrid/dev rehearsal: both true — local keeps ticking, external is also live', () => {
-    const { engine } = makeEngine();
-    const result = buildCronTriggers(engine, { trigger: { local: true, external: true } });
-
-    expect(result.local).toBeInstanceOf(LocalIntervalTrigger);
     expect(result.external).toBeInstanceOf(HttpFireTrigger);
     expect(result.arming).toBeInstanceOf(NoopArmingBackend);
+    expect(result.notices).toEqual([]);
   });
 
-  it('external/scale-to-zero: local off, external on', () => {
+  it('local mode: an empty cron section with an HTTP surface still ticks locally', () => {
     const { engine } = makeEngine();
-    const result = buildCronTriggers(engine, { trigger: { local: false, external: true } });
+    const result = buildCronTriggers(engine, {}, { hasHttpSurface: true });
+
+    expect(result.local).toBeInstanceOf(LocalIntervalTrigger);
+    expect(result.notices).toEqual([]);
+  });
+
+  it('external mode: fireUrl on a process with an HTTP surface drops the local interval', () => {
+    const { engine } = makeEngine();
+    const result = buildCronTriggers(engine, { fireUrl: FIRE_URL }, { hasHttpSurface: true });
 
     expect(result.local).toBeNull();
     expect(result.external).toBeInstanceOf(HttpFireTrigger);
   });
 
-  it('arming is always NoopArmingBackend this phase, regardless of arming.backend value', () => {
+  it('external mode emits a notice naming the URL, so a remote deployment is diagnosable', () => {
     const { engine } = makeEngine();
-    const result = buildCronTriggers(engine, { arming: { backend: 'firecracker' } });
+    const result = buildCronTriggers(engine, { fireUrl: FIRE_URL }, { hasHttpSurface: true });
 
-    expect(result.arming).toBeInstanceOf(NoopArmingBackend);
+    expect(result.notices).toHaveLength(1);
+    expect(result.notices[0]).toContain(FIRE_URL);
+    expect(result.notices[0]).toContain('POST /cron/fire');
+  });
+
+  // The D1 guard. A process that cannot be fired over HTTP must keep ticking
+  // regardless of fireUrl — otherwise every scheduled job silently stops.
+  it('forces the local interval when the process has no HTTP surface, and says so', () => {
+    const { engine } = makeEngine();
+    const result = buildCronTriggers(engine, { fireUrl: FIRE_URL }, { hasHttpSurface: false });
+
+    expect(result.local).toBeInstanceOf(LocalIntervalTrigger);
+    expect(result.notices).toHaveLength(1);
+    expect(result.notices[0]).toContain(FIRE_URL);
+    expect(result.notices[0]).toContain('ignored');
+  });
+
+  // Pins the fail-safe default: a call site that forgets the option gets a
+  // redundant tick (safe — `claimDueJob` is a compare-and-swap), never silence.
+  it('defaults hasHttpSurface to false when options are omitted entirely', () => {
+    const { engine } = makeEngine();
+    const result = buildCronTriggers(engine, { fireUrl: FIRE_URL });
+
+    expect(result.local).toBeInstanceOf(LocalIntervalTrigger);
+    expect(result.notices).toHaveLength(1);
+    expect(result.notices[0]).toContain(FIRE_URL);
+    expect(result.notices[0]).toContain('ignored');
+  });
+
+  // The D2 guard: config no longer gates POST /cron/fire.
+  it('always constructs the external HttpFireTrigger, in every mode', () => {
+    const { engine } = makeEngine();
+
+    for (const result of [
+      buildCronTriggers(engine, undefined),
+      buildCronTriggers(engine, {}, { hasHttpSurface: true }),
+      buildCronTriggers(engine, { fireUrl: FIRE_URL }, { hasHttpSurface: true }),
+      buildCronTriggers(engine, { fireUrl: FIRE_URL }, { hasHttpSurface: false }),
+    ]) {
+      expect(result.external).toBeInstanceOf(HttpFireTrigger);
+    }
+  });
+
+  it('arming is always NoopArmingBackend, in every mode', () => {
+    const { engine } = makeEngine();
+
+    for (const result of [
+      buildCronTriggers(engine, undefined),
+      buildCronTriggers(engine, { fireUrl: FIRE_URL }, { hasHttpSurface: true }),
+      buildCronTriggers(engine, { fireUrl: FIRE_URL }, { hasHttpSurface: false }),
+    ]) {
+      expect(result.arming).toBeInstanceOf(NoopArmingBackend);
+    }
+  });
+
+  it('honours localIntervalMs from the options object', async () => {
+    vi.useFakeTimers();
+    try {
+      const { engine, fire } = makeEngine();
+      const result = buildCronTriggers(engine, undefined, { localIntervalMs: 1_000 });
+
+      result.local?.start();
+      expect(fire).toHaveBeenCalledTimes(1); // immediate check-on-start
+
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(fire).toHaveBeenCalledTimes(2);
+
+      result.local?.stop();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

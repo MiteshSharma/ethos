@@ -18,6 +18,7 @@ import {
 import { AcpServer } from '@ethosagent/acp-server';
 import { AgentMesh, meshRegistryPath } from '@ethosagent/agent-mesh';
 import {
+  configParseNotices,
   type EthosConfig,
   ethosDir,
   readConfig,
@@ -319,6 +320,15 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
     return;
   }
 
+  // `serve` loads config via `readConfig`, which returns a bare `EthosConfig`
+  // and no diagnostics — so every parse error and deprecation warning was
+  // invisible in the one process where `cron.fireUrl` (and the rest) matters
+  // most. `configParseNotices` is the read-side accessor for exactly this;
+  // `ethos doctor` uses it the same way (doctor.ts).
+  const configNotices = configParseNotices(config);
+  for (const err of configNotices.errors) console.error(`config: ${err}`);
+  for (const warn of configNotices.warnings) console.warn(`config: ${warn}`);
+
   const personalityOverride = parseFlagValue(args, ['--personality']);
   if (personalityOverride) config = { ...config, personality: personalityOverride };
 
@@ -529,13 +539,20 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
   // config above). Backing jobs are seeded by `watcherManager.start()` later.
   watcherManager.attachScheduler(cronScheduler);
 
-  // Cron trigger seam (plan/phases/cron-scheduler-seam.md). `cronScheduler`
-  // is the `CronEngine`; `buildCronTriggers` picks the trigger/backend pair
-  // per `cron.*` config. Defaults (`trigger.local: true`, `trigger.external:
-  // false`) reproduce today's behavior exactly — only the local interval
-  // trigger runs. `external` is threaded into `createWebApi` below (only
-  // when non-null) so `POST /cron/fire` is mounted iff the operator opted in.
-  const cronTriggers: CronTriggers = buildCronTriggers(cronScheduler, config.cron);
+  // Cron trigger seam (plan/phases/cron-fire-url-collapse.md). `cronScheduler`
+  // is the `CronEngine`; the presence of `cron.fireUrl` is the whole mode
+  // switch — absent → the in-process interval, present → external mode where
+  // something outside this process drives `POST /cron/fire`. `ethos serve`
+  // mounts that route, so it passes `hasHttpSurface: true` and the fire URL is
+  // honoured here (D1). `external` is threaded into `createWebApi` below
+  // unconditionally: config no longer gates the route, the `cron` scope on a
+  // bearer key does (D2).
+  const cronTriggers: CronTriggers = buildCronTriggers(cronScheduler, config.cron, {
+    hasHttpSurface: true,
+  });
+  // Boot-log the mode notice so a remote deployment whose external caller
+  // never arrives is diagnosable from its own log rather than from silence.
+  for (const notice of cronTriggers.notices) console.warn(notice);
   // Late-bind the arming backend `buildCronTriggers` just produced back onto
   // the scheduler it was built from — see `CronScheduler.setArmingBackend`.
   cronScheduler.setArmingBackend(cronTriggers.arming);
@@ -2061,6 +2078,9 @@ export function buildServeWebApi(opts: BuildServeWebApiOptions): ReturnType<type
     },
     metricsTextFn: metricsText,
     recordHttpRequest,
-    ...(cronTriggers.external ? { cronFireTrigger: cronTriggers.external } : {}),
+    // Always supplied — `CronTriggers.external` is non-nullable, so
+    // `POST /cron/fire` is live on every `ethos serve` and gated solely by a
+    // bearer key carrying the `cron` scope (D2).
+    cronFireTrigger: cronTriggers.external,
   });
 }

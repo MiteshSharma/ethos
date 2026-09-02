@@ -119,8 +119,10 @@ export interface CronRunInfo {
 }
 
 // ---------------------------------------------------------------------------
-// Trigger seam (plan/phases/cron-scheduler-seam.md) — what a `CronTriggerSource`
-// calls into, and who gets told when the next run is due.
+// Trigger seam (plan/completed/cron-scheduler-seam.md) — what a
+// `CronTriggerSource` calls into, and who gets told when the next run is due.
+// The mode is selected by one presence-gated config field, `cron.fireUrl`
+// (plan/phases/cron-fire-url-collapse.md) — see `buildCronTriggers`.
 // ---------------------------------------------------------------------------
 
 /**
@@ -138,7 +140,7 @@ export interface CronEngine {
  * Told the next time work is due, so an external wake mechanism (e.g. a
  * future Firecracker Wake Controller) knows when to resume a sleeping
  * instance. `NoopArmingBackend` (see `trigger.ts`) is the only implementation
- * this phase ships — arms nothing — but the `arm(nextRunAt)` contract is
+ * there is — arms nothing — but the `arm(nextRunAt)` contract is
  * exercised for real (see `CronScheduler`'s call site) so a later real backend
  * is designed against a tested signature, not a guessed one.
  */
@@ -845,9 +847,9 @@ export class CronScheduler {
       // mid-run doesn't double-fire on the next tick. `claimDueJob` re-checks
       // `nextRunAt` against this tick's snapshot INSIDE the jobs lock — a
       // real compare-and-swap, not a last-write-wins patch — so two `tick()`
-      // calls racing on the same due job (hybrid deployments firing both
-      // `LocalIntervalTrigger` and `HttpFireTrigger` close together) can't
-      // both win the claim and both execute it.
+      // calls racing on the same due job (a local interval and an externally
+      // fired `POST /cron/fire` landing close together) can't both win the
+      // claim and both execute it.
       const upcoming = nextRunForSchedule(job.schedule, now, new Date(job.createdAt));
       // Stamped inside the CAS below, so a losing claimant never writes it.
       const runningStamp = Date.now();
@@ -867,8 +869,9 @@ export class CronScheduler {
         continue;
       }
       if (!claimed) {
-        // Another concurrent tick already claimed this job — expected in
-        // the hybrid profile, not an error.
+        // Another concurrent tick already claimed this job — expected
+        // whenever a local interval and an external fire overlap, not an
+        // error.
         continue;
       }
 
@@ -1285,7 +1288,12 @@ export {
 // Re-exports from the trigger module (CronTriggerSource / CronArmingBackend)
 // ---------------------------------------------------------------------------
 
-export type { CronDeploymentConfig, CronTriggerSource, CronTriggers } from './trigger';
+export type {
+  BuildCronTriggersOptions,
+  CronDeploymentConfig,
+  CronTriggerSource,
+  CronTriggers,
+} from './trigger';
 export {
   buildCronTriggers,
   HttpFireTrigger,

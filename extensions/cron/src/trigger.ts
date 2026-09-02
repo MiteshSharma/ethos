@@ -2,7 +2,7 @@ import type { CronArmingBackend, CronEngine } from './index';
 
 // ---------------------------------------------------------------------------
 // CronTriggerSource — who calls `CronEngine.fire()`.
-// See plan/phases/cron-scheduler-seam.md for the full design.
+// See plan/completed/cron-scheduler-seam.md for the full design.
 // ---------------------------------------------------------------------------
 
 /**
@@ -81,12 +81,12 @@ export class HttpFireTrigger implements CronTriggerSource {
 // ---------------------------------------------------------------------------
 
 /**
- * Arms nothing. The only `CronArmingBackend` this phase ships — used by
- * local mode (the next interval tick always finds due work, no arming
- * needed) and by hybrid dev mode (an operator plays the arming backend's
- * part by hand, via `curl` or a tunnel, against `POST /cron/fire`). A real
- * backend (e.g. a Firecracker Wake Controller) is explicitly deferred — see
- * plan/phases/cron-scheduler-seam.md.
+ * Arms nothing. The only `CronArmingBackend` there is — used by local mode
+ * (the next interval tick always finds due work, no arming needed) and by a
+ * dev rehearsal where an operator plays the arming backend's part by hand,
+ * via `curl` or a tunnel, against `POST /cron/fire`. A real backend (e.g. a
+ * Firecracker Wake Controller) is explicitly deferred — see
+ * plan/completed/cron-scheduler-seam.md.
  */
 export class NoopArmingBackend implements CronArmingBackend {
   arm(): void {
@@ -95,55 +95,110 @@ export class NoopArmingBackend implements CronArmingBackend {
 }
 
 // ---------------------------------------------------------------------------
-// Config-driven construction — the three deployment profiles fall out of
-// four config keys with no code fork (plan §"Config surface").
+// Config-driven construction — one presence-gated field selects the mode
+// (plan/phases/cron-fire-url-collapse.md).
 // ---------------------------------------------------------------------------
 
 /** Structural shape of the `cron:` top-level config section. Kept separate
  *  from `@ethosagent/config`'s `EthosConfig['cron']` type (duck-typed, not
- *  imported) so this package doesn't take a dependency on the config layer. */
+ *  imported) so this package doesn't take a dependency on the config layer.
+ *  Its counterpart is `CronTopLevelConfig` in `packages/config/src/index.ts`;
+ *  the two shapes are kept in sync by hand. */
 export interface CronDeploymentConfig {
-  trigger?: {
-    local?: boolean;
-    external?: boolean;
-  };
-  arming?: {
-    backend?: string;
-    fireUrl?: string | null;
-  };
+  /** Where an external scheduler reaches this process's `POST /cron/fire`.
+   *  Presence is the mode switch: set → external mode (no in-process
+   *  interval); absent → local mode (today's `setInterval`).
+   *
+   *  Nothing in Ethos reads the value — it is recorded, not dialled. It stays
+   *  a URL rather than collapsing to a boolean for two reasons. It is the
+   *  exact address a real `CronArmingBackend` will need to call back on, so a
+   *  boolean would have to be replaced by this field later, breaking every
+   *  operator's config at that point. And it documents, in the file an
+   *  operator actually reads, where the external scheduler is expected to
+   *  reach this process — information a boolean destroys. */
+  fireUrl?: string;
+}
+
+export interface BuildCronTriggersOptions {
+  /** Tick interval for the in-process `LocalIntervalTrigger`, when one is
+   *  built. Omit for `LocalIntervalTrigger`'s own 60s default. */
+  localIntervalMs?: number;
+  /** Does this process mount `POST /cron/fire`?
+   *
+   *  Default `false`, deliberately: it is the fail-safe direction. A call
+   *  site that forgets the option keeps ticking locally — at worst a
+   *  redundant tick, which `claimDueJob`'s compare-and-swap already makes
+   *  safe against double execution. A default of `true` would instead hand a
+   *  forgetful call site a silently dead scheduler. `serve` and `boot` pass
+   *  `true`; `gateway` has no HTTP surface and passes `false`. */
+  hasHttpSurface?: boolean;
 }
 
 export interface CronTriggers {
-  /** Present iff `cron.trigger.local` is true (default). */
+  /** The in-process interval. `null` only in external mode — `fireUrl` set
+   *  AND this process actually mounts `POST /cron/fire`. */
   local: LocalIntervalTrigger | null;
-  /** Present iff `cron.trigger.external` is true (default false). */
-  external: HttpFireTrigger | null;
-  /** Always present — `NoopArmingBackend` is the only implementation this
-   *  phase ships, regardless of `cron.arming.backend`'s value. */
+  /** Always constructed: config no longer gates `POST /cron/fire`. Whether
+   *  the route is reachable is decided by the host app mounting it and by the
+   *  bearer key's `cron` scope. A process with no HTTP surface builds one and
+   *  ignores it. */
+  external: HttpFireTrigger;
+  /** Always present — `NoopArmingBackend` is the only implementation, and it
+   *  is inert. */
   arming: CronArmingBackend;
+  /** Operator-facing notices for the app layer to print at boot. Empty in the
+   *  normal local case. They are returned as data rather than logged here
+   *  because library code in this repo must not write to the console — a rule
+   *  this package has never broken, and this field is what keeps that true. */
+  notices: string[];
 }
 
 /**
- * Build the trigger/backend combination for a deployment from `cron.*`
- * config, per the three profiles in plan/phases/cron-scheduler-seam.md:
+ * Build the trigger/backend combination for a deployment. One field decides
+ * the mode — the presence of `cron.fireUrl`:
  *
- * - local/always-on   — `trigger.local: true`,  `trigger.external: false` (default)
- * - hybrid/dev         — `trigger.local: true`,  `trigger.external: true`
- * - external/scale-to-zero — `trigger.local: false`, `trigger.external: true`
+ * - absent  → local mode. Today's in-process `LocalIntervalTrigger`.
+ * - present → external mode. No in-process interval; something outside the
+ *   process (an external scheduler, an operator's `curl`) drives
+ *   `POST /cron/fire`.
+ *
+ * With one override. A process that does not mount `POST /cron/fire`
+ * (`hasHttpSurface` false — the default) can never be fired externally, so it
+ * keeps its local interval regardless of `fireUrl` and says so in `notices`
+ * rather than going silently dark. Log and fall through, never throw at boot.
  *
  * An operator with no `cron:` section at all gets exactly today's behavior:
- * only `LocalIntervalTrigger` running, nothing else constructed.
+ * the local interval running, and `POST /cron/fire` available to a bearer key
+ * carrying the `cron` scope wherever the host app mounts it.
  */
 export function buildCronTriggers(
   engine: CronEngine,
   config: CronDeploymentConfig | undefined,
-  localIntervalMs = 60_000,
+  opts?: BuildCronTriggersOptions,
 ): CronTriggers {
-  const local = config?.trigger?.local ?? true;
-  const external = config?.trigger?.external ?? false;
+  const fireUrl = config?.fireUrl;
+  const forceLocal = opts?.hasHttpSurface !== true;
+  const notices: string[] = [];
+
+  if (fireUrl && forceLocal) {
+    notices.push(
+      `cron: fireUrl is set (${fireUrl}) but this process has no HTTP surface to mount ` +
+        'POST /cron/fire on, so the fire URL is ignored here and the in-process cron ' +
+        'interval is running instead.',
+    );
+  }
+  if (fireUrl && !forceLocal) {
+    notices.push(
+      `cron: external mode — fireUrl is set (${fireUrl}), so the in-process cron interval ` +
+        'is not running. An external caller must drive POST /cron/fire with a bearer key ' +
+        "carrying the 'cron' scope, or no scheduled job will ever run.",
+    );
+  }
+
   return {
-    local: local ? new LocalIntervalTrigger(engine, localIntervalMs) : null,
-    external: external ? new HttpFireTrigger(engine) : null,
+    local: !fireUrl || forceLocal ? new LocalIntervalTrigger(engine, opts?.localIntervalMs) : null,
+    external: new HttpFireTrigger(engine),
     arming: new NoopArmingBackend(),
+    notices,
   };
 }

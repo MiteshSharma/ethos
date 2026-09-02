@@ -441,11 +441,8 @@ export interface SlackAppConfig {
   /**
    * Inbound transport. Absent = today's behaviour: Socket Mode.
    *
-   * Shape borrowed from `cron`'s `trigger: { local, external }` block, the
-   * convention this file already establishes for an additive boolean pair
-   * (§3b). DELIBERATE DIVERGENCE from that precedent: cron permits both at
-   * once (a documented hybrid/dev profile). This does not. Socket Mode and
-   * HTTP Events are two transports for the SAME inbound event stream —
+   * An additive boolean pair (§3b), and a MUTUALLY EXCLUSIVE one: Socket Mode
+   * and HTTP Events are two transports for the SAME inbound event stream —
    * Slack's own dashboard treats them as alternatives, and there is no reason
    * to receive every event twice. The adapter throws when both are `true`;
    * this layer only records what the operator wrote.
@@ -1071,20 +1068,56 @@ export function backgroundDefaults(): Required<Omit<BackgroundConfig, 'enabled' 
 }
 
 /**
- * Cron trigger/arming seam (`cron:` section, plan/phases/cron-scheduler-seam.md).
- * Parsed from `cron.trigger.<field>: <value>` / `cron.arming.<field>: <value>`
- * keys. Defaults are applied by the wiring layer (`@ethosagent/cron`'s
+ * Cron trigger surface (`cron:` section,
+ * plan/phases/cron-fire-url-collapse.md). One presence-gated switch:
+ * `cron.fireUrl` present means external mode (no in-process interval;
+ * something outside the process drives `POST /cron/fire`), absent means local
+ * mode (today's in-process `setInterval`). There is no third state, and in
+ * particular no way to configure "nothing fires anything."
+ *
+ * Defaults are applied by the wiring layer (`@ethosagent/cron`'s
  * `buildCronTriggers`), not here — an absent `cron:` section means "use
- * today's behavior" (`trigger.local: true`, `trigger.external: false`,
- * `arming.backend: 'none'`).
+ * today's behavior", i.e. local mode.
+ *
+ * `trigger` and `arming` are the legacy four-key surface, still parsed for one
+ * release by the deprecation shim in `buildCronConfig`.
  */
 export interface CronTopLevelConfig {
+  /**
+   * URL an external scheduler is expected to reach `POST /cron/fire` on.
+   * Present → external mode; absent → local mode. Config key:
+   *   cron.fireUrl: https://agent.example.com/cron/fire
+   * Overridden by the `ETHOS_CRON_FIRE_URL` environment variable.
+   *
+   * WHY A URL AND NOT A BOOLEAN. Nothing reads this value today — no code path
+   * fetches it, `NoopArmingBackend` is inert, and `HttpFireTrigger` is called
+   * *by* the route rather than calling out. So it looks like a boolean wearing
+   * a string, and the obvious "simplification" is `cron.external: true`. Do not
+   * make it. First, it is the exact field a real `CronArmingBackend` will need
+   * — the address it calls back on — so the boolean would have to be replaced
+   * by this field later, breaking every operator's config at that point.
+   * Second, it documents, in the file where an operator actually looks, WHERE
+   * the external scheduler is expected to reach this process; a boolean
+   * destroys that information. (plan/phases/cron-fire-url-collapse.md, N1.)
+   */
+  fireUrl?: string;
+  /**
+   * @deprecated Removed in 0.9.0. Replaced by `cron.fireUrl`: absent means
+   * local mode, present means external mode. `external` no longer gates
+   * anything — `POST /cron/fire` is mounted on every process that has an HTTP
+   * surface, reachable only by a bearer key with the `cron` scope.
+   */
   trigger?: {
     /** Run the in-process interval trigger. Default `true`. */
     local?: boolean;
     /** Mount `POST /cron/fire`, gated by a bearer key with the `cron` scope. Default `false`. */
     external?: boolean;
   };
+  /**
+   * @deprecated Removed in 0.9.0. `backend` never had an implementation other
+   * than the inert `NoopArmingBackend` and was always ignored; `fireUrl` is
+   * replaced by the top-level `cron.fireUrl`.
+   */
   arming?: {
     /** Who gets told the next `nextRunAt`. Only `'none'` is implemented this phase. Default `'none'`. */
     backend?: string;
@@ -1635,11 +1668,9 @@ export interface EthosConfig {
    */
   background?: BackgroundConfig;
   /**
-   * Cron trigger/arming seam (plan/phases/cron-scheduler-seam.md), parsed
-   * from the `cron.trigger.*` / `cron.arming.*` keys. Defaults
-   * (`trigger.local: true`, `trigger.external: false`, `arming.backend:
-   * 'none'`) reproduce today's behavior exactly — a fresh config.yaml with no
-   * `cron:` section at all runs only the local interval trigger, unchanged.
+   * Cron trigger surface (plan/phases/cron-fire-url-collapse.md), parsed from
+   * the `cron.fireUrl` / `cron.maxParallelJobs` keys. A fresh config.yaml with
+   * no `cron:` section at all runs only the local interval trigger, unchanged.
    */
   cron?: CronTopLevelConfig;
   displayBellOnComplete?: boolean;
@@ -2940,8 +2971,27 @@ export async function writeConfig(
         `toolLoop.maxIdenticalToolCallsWarnAt: ${config.toolLoop.maxIdenticalToolCallsWarnAt}`,
       );
   }
-  if (config.cron?.maxParallelJobs !== undefined) {
-    lines.push(`cron.maxParallelJobs: ${config.cron.maxParallelJobs}`);
+  if (config.cron) {
+    // KNOWN HAZARD, mirrored not fixed: `cron.fireUrl` may have arrived from
+    // ETHOS_CRON_FIRE_URL rather than the yaml (the parse folds the env
+    // override into the config), so a writeConfig on a process started with
+    // that variable bakes the env value into config.yaml. `pauseLifecycle.
+    // http.url` behaves identically with ETHOS_ORCHESTRATOR_URL; we follow the
+    // precedent rather than diverge from it. Fixing both at once is an
+    // out-of-scope follow-up (plan/phases/cron-fire-url-collapse.md, N3).
+    // The sentinel is NEVER serialized. It is an in-memory stand-in for a
+    // legacy mode, not an address: persisting it would outlive the shim that
+    // gives it meaning, so in 0.9.0 it would still read as external mode by
+    // presence while the operator's config carried a nonsense address forever.
+    // A legacy-external deployment therefore round-trips with no `cron.fireUrl`
+    // line at all and keeps getting the deprecation warning until it writes a
+    // real URL — which is the correct nag, not a regression.
+    if (config.cron.fireUrl !== undefined && config.cron.fireUrl !== LEGACY_EXTERNAL_FIRE_URL) {
+      lines.push(`cron.fireUrl: ${config.cron.fireUrl}`);
+    }
+    if (config.cron.maxParallelJobs !== undefined) {
+      lines.push(`cron.maxParallelJobs: ${config.cron.maxParallelJobs}`);
+    }
   }
   if (config.kanban) {
     if (config.kanban.maxInProgress !== undefined)
@@ -3213,7 +3263,9 @@ function parseConfigYaml(src: string): EthosConfig {
   const backgroundKv: Record<string, string> = {};
   /** `background.acp.agents.<name>.<field>` — the named ACP-agent roster (T4/I3). */
   const backgroundAcpAgentsKv: Record<string, Record<string, string>> = {};
-  // cron.trigger.<field> / cron.arming.<field> — keyed by combined subsection.field.
+  // The `cron:` section: `fireUrl` / `maxParallelJobs`, plus the deprecated
+  // `trigger.<field>` / `arming.<field>` keys, which are stored under their
+  // combined `subsection.field` name.
   const cronKv: Record<string, string> = {};
   const auxiliaryCompressionKv: Record<string, string> = {};
   const auxiliaryVisionKv: Record<string, string> = {};
@@ -3671,12 +3723,21 @@ function parseConfigYaml(src: string): EthosConfig {
       continue;
     }
     // cron.trigger.<field>: <value>  or  cron.arming.<field>: <value>
+    // DEPRECATED, removed in 0.9.0. Kept only so the shim in buildCronConfig
+    // can see these keys — the flat-key parser has no catch-all, so deleting
+    // this branch would silently drop them instead of warning.
     const cron = line.match(/^cron\.(trigger|arming)\.([a-zA-Z]+):\s*(.+)$/);
     if (cron) {
       cronKv[`${cron[1]}.${cron[2]}`] = cron[3].trim().replace(/^["']|["']$/g, '');
       continue;
     }
-    // cron.maxParallelJobs: <n>  (scalar sibling of the trigger/arming blocks)
+    // cron.fireUrl: <url>  — presence is the local/external mode switch.
+    const cronFire = line.match(/^cron\.fireUrl:\s*(.+)$/);
+    if (cronFire) {
+      cronKv.fireUrl = cronFire[1].trim().replace(/^["']|["']$/g, '');
+      continue;
+    }
+    // cron.maxParallelJobs: <n>  (scalar sibling of cron.fireUrl)
     const cronMax = line.match(/^cron\.maxParallelJobs:\s*(.+)$/);
     if (cronMax) {
       cronKv.maxParallelJobs = cronMax[1].trim().replace(/^["']|["']$/g, '');
@@ -4132,6 +4193,21 @@ function parseConfigYaml(src: string): EthosConfig {
           ...(pauseLifecycleHttpToken !== undefined ? { token: pauseLifecycleHttpToken } : {}),
         }
       : undefined;
+  // ETHOS_CRON_FIRE_URL wins over the yaml value, same precedence as
+  // ETHOS_ORCHESTRATOR_URL over the pauseLifecycle url above. Deliberately NOT
+  // derived from ETHOS_PUBLIC_URL (N2): a public URL answers "what is this
+  // process's address", this answers "should this process stop running its own
+  // clock", and plenty of deployments want the first without the second.
+  const cronDeprecations: string[] = [];
+  const cronBuilt = buildCronConfig(cronKv, cronDeprecations);
+  const cronFireUrl = process.env.ETHOS_CRON_FIRE_URL ?? cronBuilt?.fireUrl;
+  const cron =
+    cronBuilt || cronFireUrl !== undefined
+      ? {
+          ...cronBuilt,
+          ...(cronFireUrl !== undefined ? { fireUrl: cronFireUrl } : {}),
+        }
+      : undefined;
   const parsedMaxBytes = logsRotationKv.maxBytes ? Number(logsRotationKv.maxBytes) : undefined;
   const parsedMaxFiles = logsRotationKv.maxFiles ? Number(logsRotationKv.maxFiles) : undefined;
   const logsRotation =
@@ -4418,7 +4494,7 @@ function parseConfigYaml(src: string): EthosConfig {
       ? Number(backgroundKv.max_concurrent)
       : undefined,
     background: buildBackgroundConfig(backgroundKv, backgroundAcpAgentsKv),
-    cron: buildCronConfig(cronKv),
+    cron,
     displayBellOnComplete: displayKv.bell_on_complete === 'true' ? true : undefined,
     displayMemoryNotices:
       displayKv.memory_notices === 'true'
@@ -4539,7 +4615,9 @@ function parseConfigYaml(src: string): EthosConfig {
   // readRawConfig (used by CLI commands that don't gateway-boot) ignores them
   // and continues with whatever entries did parse.
   parseErrorsByConfig.set(config, parseErrors);
-  parseWarningsByConfig.set(config, auxTimeoutWarnings);
+  // Cron's deprecations lead: D3(b)'s behaviour-changing case is the one an
+  // operator most needs to read, and it is already first within its own group.
+  parseWarningsByConfig.set(config, [...cronDeprecations, ...auxTimeoutWarnings]);
   return config;
 }
 
@@ -5123,12 +5201,41 @@ function buildBackgroundConfig(
 }
 
 /**
- * Parse the `cron:` section from the shared `cron.trigger.*` / `cron.arming.*`
- * flat-key bag (see `CronTopLevelConfig`). Returns undefined when no
- * recognised field is present so `config.cron` is only set when the section
- * actually appears — an absent section means "today's behavior, unchanged".
+ * Placeholder address for a legacy deployment that expressed external mode as
+ * `cron.trigger.local: false` + `cron.trigger.external: true` without ever
+ * setting an `arming.fireUrl` — the documented shape of the old external
+ * profile, since `arming.backend` defaulted to `'none'` and only a non-`none`
+ * backend required an address. Under the collapsed surface the mode IS the
+ * presence of `fireUrl`, so preserving that deployment's mode across the
+ * upgrade requires *some* value here. Nothing reads it (see
+ * `CronTopLevelConfig.fireUrl`), and the accompanying deprecation warning
+ * tells the operator to replace it with their real URL. Goes away in 0.9.0
+ * with the rest of the shim.
+ *
+ * IT MUST NEVER BE WRITTEN TO DISK, and must never be shown to an operator as
+ * an address. It is not one: no scheduler lives there, and the operator
+ * checklist promises `cron.fireUrl` is where their scheduler reaches this
+ * process. `writeConfig` guards its emission on exactly this constant; any
+ * future surface that serializes or displays `cron.fireUrl` must guard the
+ * same way.
  */
-function buildCronConfig(kv: Record<string, string>): CronTopLevelConfig | undefined {
+const LEGACY_EXTERNAL_FIRE_URL = 'legacy:cron.trigger.external';
+
+/**
+ * Parse the `cron:` section from its flat-key bag (see `CronTopLevelConfig`).
+ * Returns undefined when no recognised field is present so `config.cron` is
+ * only set when the section actually appears — an absent section means
+ * "today's behavior, unchanged".
+ *
+ * Also runs the one-release deprecation shim for the removed
+ * `cron.trigger.*` / `cron.arming.*` keys, pushing operator-facing messages
+ * onto `deprecations` (plan/phases/cron-fire-url-collapse.md, D3). Removed in
+ * 0.9.0.
+ */
+function buildCronConfig(
+  kv: Record<string, string>,
+  deprecations: string[],
+): CronTopLevelConfig | undefined {
   const trigger: NonNullable<CronTopLevelConfig['trigger']> = {};
   if (kv['trigger.local'] !== undefined) trigger.local = kv['trigger.local'] === 'true';
   if (kv['trigger.external'] !== undefined) trigger.external = kv['trigger.external'] === 'true';
@@ -5138,6 +5245,92 @@ function buildCronConfig(kv: Record<string, string>): CronTopLevelConfig | undef
   if (kv['arming.fireUrl']) arming.fireUrl = kv['arming.fireUrl'];
 
   const cfg: CronTopLevelConfig = {};
+
+  // --- Deprecation shim (D3). Delete this whole block in 0.9.0. ------------
+  //
+  // THE SUBTLE RULE, which is not deducible from either key in isolation:
+  // while ANY legacy `cron.trigger.*` key is present, the legacy keys decide
+  // the MODE and a legacy `arming.fireUrl` supplies only the ADDRESS. Under
+  // the old surface `arming.fireUrl` was orthogonal to the trigger booleans,
+  // so an operator could set an address while leaving `trigger.local` at its
+  // default `true`. Under the new surface a `fireUrl` IS the mode switch, so
+  // naively aliasing `arming.fireUrl -> fireUrl` would turn that operator's
+  // local interval off on upgrade — a silent outage introduced by the
+  // migration shim itself. A bare `arming.fireUrl` with no legacy trigger key
+  // does mean external mode; that one is a pure rename.
+  const hasLegacyTrigger =
+    kv['trigger.local'] !== undefined || kv['trigger.external'] !== undefined;
+  const legacyLocal = kv['trigger.local'] !== 'false';
+  const legacyExternal = kv['trigger.external'] === 'true';
+  const legacyFireUrl = kv['arming.fireUrl'];
+
+  let legacyMode: 'local' | 'external' | undefined;
+  if (hasLegacyTrigger) {
+    if (!legacyLocal && legacyExternal) {
+      // (b) The coherent external deployment. Honoured: an operator here has a
+      // real scheduler already hitting /cron/fire, and switching their
+      // interval back on would change live behaviour during an upgrade.
+      legacyMode = 'external';
+      deprecations.push(
+        'cron.trigger.local/external are deprecated. This deployment is running in external mode; express it as cron.fireUrl: <url> (or ETHOS_CRON_FIRE_URL).',
+      );
+    } else if (!legacyLocal) {
+      // (b, alone) "Nothing fires cron jobs at all" — the state this whole
+      // change exists to make unrepresentable. Deliberately behaviour-changing,
+      // and deliberately first in the list. Safe because the missed-run policy
+      // skips any job more than one tick interval stale, so re-enabling the
+      // interval recomputes nextRunAt rather than stampeding a backlog.
+      legacyMode = 'local';
+      deprecations.unshift(
+        "cron.trigger.local: false without cron.trigger.external was 'nothing fires cron jobs at all' — a state the new configuration cannot express. The in-process interval has been enabled. If this deployment is driven by an external scheduler, set cron.fireUrl: <url>.",
+      );
+    } else {
+      legacyMode = 'local';
+      if (legacyExternal) {
+        // (a) Behaviour-preserving: the old hybrid profile (interval ticking
+        // AND /cron/fire live) is what every serve/boot now gets by default.
+        deprecations.push(
+          "cron.trigger.external is deprecated and has no effect. POST /cron/fire is now always mounted for a bearer key with the 'cron' scope. To stop the in-process interval and let an external scheduler drive firing, set cron.fireUrl: <url>.",
+        );
+      } else {
+        deprecations.push(
+          'cron.trigger.local is deprecated and has no replacement: local mode is what you get when cron.fireUrl is absent. Remove the key.',
+        );
+      }
+    }
+  }
+
+  // (c) `arming.backend` selected nothing — there has only ever been the inert
+  // NoopArmingBackend. `none` was the documented default, so writing it down is
+  // not a false belief and warns nothing; any other value is, and does.
+  if (kv['arming.backend'] !== undefined && kv['arming.backend'] !== 'none') {
+    deprecations.push(
+      'cron.arming.backend is removed; no arming backend was ever implemented and the value was always ignored.',
+    );
+  }
+
+  // Precedence: cron.fireUrl > cron.arming.fireUrl. (ETHOS_CRON_FIRE_URL wins
+  // over both and is applied by the caller, alongside the other env overrides.)
+  let fireUrl = kv.fireUrl;
+  if (fireUrl === undefined && legacyMode === 'external') {
+    fireUrl = legacyFireUrl ?? LEGACY_EXTERNAL_FIRE_URL;
+  }
+  if (legacyFireUrl !== undefined) {
+    if (legacyMode === 'local') {
+      // The subtle rule, made visible to the operator: their address was NOT
+      // promoted, because promoting it would have flipped them to external mode.
+      deprecations.push(
+        'cron.arming.fireUrl was not migrated to cron.fireUrl because cron.trigger.local is set and cron.fireUrl would stop the in-process interval. This deployment stays in local mode. To move to external mode, delete the cron.trigger.* keys and set cron.fireUrl: <url>.',
+      );
+    } else {
+      // (d) A pure rename: same field, same semantics.
+      if (fireUrl === undefined) fireUrl = legacyFireUrl;
+      deprecations.push('cron.arming.fireUrl is deprecated; rename it to cron.fireUrl.');
+    }
+  }
+  // --- end deprecation shim ------------------------------------------------
+
+  if (fireUrl !== undefined) cfg.fireUrl = fireUrl;
   if (Object.keys(trigger).length > 0) cfg.trigger = trigger;
   if (Object.keys(arming).length > 0) cfg.arming = arming;
   // Positive integer only — `0` would mean "never fire anything", which is a

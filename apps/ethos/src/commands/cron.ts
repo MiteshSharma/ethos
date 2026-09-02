@@ -93,7 +93,7 @@ function makeScheduler(config: EthosConfig): { scheduler: CronScheduler; cleanup
   // The CLI never starts a trigger loop (each subcommand is a one-shot CRUD
   // or `runJobNow` call, not a long-running daemon) — `cleanup` is a no-op
   // now that `start()`/`stop()` have moved off `CronScheduler` onto
-  // `LocalIntervalTrigger` (plan/phases/cron-scheduler-seam.md). Kept as a
+  // `LocalIntervalTrigger` (plan/completed/cron-scheduler-seam.md). Kept as a
   // shape so every call site's `finally { cleanup() }` needs no change.
   return { scheduler, cleanup: () => {} };
 }

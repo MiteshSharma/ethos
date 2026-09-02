@@ -81,10 +81,12 @@ export interface CreateRoutesOptions {
    *  request (method + status), excluding `/healthz`. Omitted → requests are
    *  simply not counted. */
   recordHttpRequest?: (method: string, status: number) => void;
-  /** External cron trigger (plan/phases/cron-scheduler-seam.md) — mounts
-   *  `POST /cron/fire` (bearer auth, scope `cron`) when present. Boot code
-   *  supplies an `HttpFireTrigger` only when `cron.trigger.external` is
-   *  `true`; omitted → `/cron/fire` is not mounted. */
+  /** External cron trigger (plan/phases/cron-fire-url-collapse.md) — mounts
+   *  `POST /cron/fire` (bearer auth, scope `cron`) when present. No config
+   *  gates it — `ethos serve` / `ethos boot` always supply an
+   *  `HttpFireTrigger`, so the `cron` scope check is the sole gate. Optional
+   *  so embedders (and this package's own tests) can build an app without
+   *  one; omitted → `/cron/fire` is not mounted. */
   cronFireTrigger?: CronFireTrigger;
 }
 
@@ -409,8 +411,8 @@ export function createRoutes(opts: CreateRoutesOptions): Hono {
 
   // External cron trigger (plan/phases/cron-scheduler-seam.md). Same
   // bearer-auth-gated, presence-mounted shape as `/metrics` above — mounted
-  // only when boot code wires an `HttpFireTrigger` (i.e. `cron.trigger.external`
-  // is `true`), so a deployment that never opts in needs no `cron`-scoped key.
+  // whenever the host app wires an `HttpFireTrigger`, which `ethos serve` /
+  // `ethos boot` now always do, so the `cron` scope check is the only gate.
   if (opts.apiKeys && opts.cronFireTrigger) {
     app.route('/cron', cronRoutes({ apiKeys: opts.apiKeys, trigger: opts.cronFireTrigger }));
   }

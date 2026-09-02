@@ -611,14 +611,23 @@ export async function runGatewayStart(opts: GatewayStartOptions = {}): Promise<v
   // config above). Backing jobs are seeded by `watcherManager.start()` later.
   watcherManager.attachScheduler(scheduler);
 
-  // Cron trigger seam (plan/phases/cron-scheduler-seam.md). `scheduler` is the
-  // `CronEngine`; `buildCronTriggers` picks the trigger/backend pair per
-  // `cron.*` config. `ethos gateway` has no HTTP surface to mount `/cron/fire`
-  // on, so `cronTriggers.external` (when an operator sets `cron.trigger.
-  // external: true` here) is constructed but unused — external firing only
-  // takes effect in a process that also runs `ethos serve`. Defaults
-  // (`trigger.local: true`) reproduce today's behavior exactly.
-  const cronTriggers: CronTriggers = buildCronTriggers(scheduler, config.cron);
+  // Cron trigger seam (plan/phases/cron-fire-url-collapse.md, D1). `scheduler`
+  // is the `CronEngine`. `ethos gateway` builds no web API, so there is
+  // nowhere for `POST /cron/fire` to be mounted and this process can never be
+  // fired externally. `hasHttpSurface: false` is therefore passed EXPLICITLY,
+  // even though it is the default: it forces the in-process interval on
+  // regardless of `cron.fireUrl`, which is the invariant that keeps a fire URL
+  // meant for `ethos serve` from silently killing every scheduled job and
+  // every cron-backed watcher here. `buildCronTriggers` records why in
+  // `notices`, printed below — log and fall through, never throw at boot.
+  // `cronTriggers.external` is still constructed and still unused here, now
+  // because there is no HTTP surface rather than because of a config flag.
+  const cronTriggers: CronTriggers = buildCronTriggers(scheduler, config.cron, {
+    hasHttpSurface: false,
+  });
+  for (const notice of cronTriggers.notices) {
+    console.log(`${c.yellow}⚠${c.reset} ${c.dim}${notice}${c.reset}`);
+  }
   // Late-bind the arming backend `buildCronTriggers` just produced back onto
   // the scheduler it was built from — see `CronScheduler.setArmingBackend`.
   scheduler.setArmingBackend(cronTriggers.arming);

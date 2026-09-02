@@ -385,7 +385,16 @@ export async function runBoot(args: string[], config: EthosConfig | null): Promi
     },
   });
   watcherManager.attachScheduler(scheduler);
-  const cronTriggers: CronTriggers = buildCronTriggers(scheduler, cfg.cron);
+  // `boot` threads `cronTriggers` into the shared serve-role helper below, so
+  // it inherits serve's `POST /cron/fire` mount and must answer the same way:
+  // `hasHttpSurface: true` means a `cron.fireUrl` genuinely stops the
+  // in-process interval here (plan/phases/cron-fire-url-collapse.md, D1).
+  const cronTriggers: CronTriggers = buildCronTriggers(scheduler, cfg.cron, {
+    hasHttpSurface: true,
+  });
+  for (const notice of cronTriggers.notices) {
+    console.log(`${c.yellow}⚠${c.reset} ${c.dim}${notice}${c.reset}`);
+  }
   scheduler.setArmingBackend(cronTriggers.arming);
 
   // -------------------------------------------------------------------------

@@ -20,11 +20,18 @@ describe('cron.maxParallelJobs config parsing', () => {
     expect(cfg?.cron).toEqual({ maxParallelJobs: 3 });
   });
 
-  it('sits alongside the trigger/arming sub-blocks', async () => {
+  it('sits alongside cron.fireUrl', async () => {
     const cfg = await load(
-      [...base, 'cron.trigger.external: true', 'cron.maxParallelJobs: 2'].join('\n'),
+      [
+        ...base,
+        'cron.fireUrl: https://agent.example.com/cron/fire',
+        'cron.maxParallelJobs: 2',
+      ].join('\n'),
     );
-    expect(cfg?.cron).toEqual({ trigger: { external: true }, maxParallelJobs: 2 });
+    expect(cfg?.cron).toEqual({
+      fireUrl: 'https://agent.example.com/cron/fire',
+      maxParallelJobs: 2,
+    });
   });
 
   it('drops a non-positive or non-numeric cap', async () => {

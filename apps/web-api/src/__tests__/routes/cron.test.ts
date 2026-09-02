@@ -48,7 +48,7 @@ describe('createWebApi — POST /cron/fire', () => {
     }).app;
   }
 
-  it('is not mounted when no cronFireTrigger is supplied (cron.trigger.external: false)', async () => {
+  it('is not mounted when the host app supplies no cronFireTrigger', async () => {
     const app = buildApp();
     const res = await app.request('/cron/fire', { method: 'POST' });
     expect(res.status).toBe(404);
