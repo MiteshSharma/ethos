@@ -735,8 +735,9 @@ function WhatsAppPanel() {
     >
       <Typography.Paragraph type="secondary" style={{ marginTop: 0 }}>
         WhatsApp pairs via Baileys — no Cloud API credentials needed. Enable a bot with the phone
-        number to link, restart the gateway, then enter the pairing code shown in setup (or scan the
-        QR as a fallback).
+        number to link, wait for the gateway to pick it up, then enter the pairing code shown in
+        setup (or scan the QR as a fallback). A platform whose access control is new needs a restart
+        first — see the note below.
       </Typography.Paragraph>
 
       {botsQuery.isLoading ? (
@@ -855,7 +856,7 @@ function WhatsAppPanel() {
       <Alert
         type="info"
         showIcon
-        message="Restart the gateway (or re-run `ethos serve`) to apply, then open the setup link next to a bot above to see its pairing code."
+        message="`ethos boot` picks up added and removed bots within ~10 seconds — no restart, provided WhatsApp access control was already saved before the process started. If you are adding WhatsApp access control in this same edit, restart to apply it: until it is installed, a new bot is refused rather than run without it. Under `ethos gateway`, restart to apply. Either way, open the setup link next to a bot above to see its pairing code."
         style={{ marginTop: 16 }}
       />
 
@@ -1117,7 +1118,7 @@ function AccessControlSection({ platform }: { platform: string }) {
               <Alert
                 type="info"
                 showIcon
-                message="Restart the gateway (or re-run `ethos serve`) to apply changes."
+                message="Restart the gateway to apply. Access control is read once at startup — unlike adding or removing a bot, it does not reload live. Until you restart, a new bot on a platform whose access control is also new is refused rather than run without it."
                 style={{ marginTop: 16 }}
               />
             )}

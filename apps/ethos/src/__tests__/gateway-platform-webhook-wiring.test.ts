@@ -537,7 +537,7 @@ describe('runBoot wiring — parity with runGatewayStart (source)', () => {
   it('builds the mounts AFTER every adapter has been started', async () => {
     const src = await read('apps/ethos/src/commands/boot.ts');
     const startedAt = src.indexOf('await Promise.all(adapters.map((a) => a.start()));');
-    const mountedAt = src.indexOf('buildPlatformWebhookMounts(cfg, adapters');
+    const mountedAt = src.indexOf('buildPlatformWebhookMounts(cfg, gateway.listAdapters()');
     expect(startedAt).toBeGreaterThan(-1);
     expect(mountedAt).toBeGreaterThan(-1);
     // Same ordering constraint as the gateway: `TelegramAdapter.webhook` is
@@ -547,8 +547,12 @@ describe('runBoot wiring — parity with runGatewayStart (source)', () => {
 
   it('starts the server only when at least one bot or app needs it', async () => {
     const src = await read('apps/ethos/src/commands/boot.ts');
+    // The gate moved inside `ensurePlatformWebhookServer` with Phase C — the
+    // same listener is now bound on demand, either at boot or when a live
+    // config edit mounts the first route — but the rule is unchanged: no
+    // mounted route, no bound port.
     expect(src).toContain(
-      'if (platformWebhookMounts.telegram.size > 0 || platformWebhookMounts.slack.size > 0) {',
+      'if (platformWebhookMounts.telegram.size === 0 && platformWebhookMounts.slack.size === 0) return;',
     );
   });
 
@@ -570,8 +574,10 @@ describe('runBoot wiring — parity with runGatewayStart (source)', () => {
     const src = await read('apps/ethos/src/commands/boot.ts');
     // boot.ts is the only entry point that walks a fallback ladder for the web
     // bind, so it is the only one that can collide with its own listener.
-    expect(src).toContain('if (platformWebhookServer) reservedPorts.add(platformWebhookPort);');
-    const reservedAt = src.indexOf('if (platformWebhookServer) reservedPorts.add(');
+    // Reserved unconditionally since Phase C — see the matching assertion in
+    // `boot-profile-command.test.ts` for why.
+    expect(src).toContain('platformWebhookPort]);');
+    const reservedAt = src.indexOf('const reservedPorts = new Set<number>(');
     const ladderAt = src.indexOf('listenWithFallback(');
     expect(reservedAt).toBeGreaterThan(-1);
     expect(ladderAt).toBeGreaterThan(reservedAt);

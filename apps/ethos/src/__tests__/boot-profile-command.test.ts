@@ -78,7 +78,10 @@ describe('ethos boot — §3b construction order', () => {
     const reconcile = src.indexOf('await runBootReconciliation({');
     const health = src.indexOf('const healthServer = createHealthServer(');
     const acpBind = src.indexOf('acpServer.startHttp(acpPort);');
-    const webBind = src.indexOf('await listenWithFallback(');
+    // Phase D turned the ladder into a named closure so a live rebind reruns
+    // it; the BIND is the call, not the closure's definition — and matching the
+    // call rather than the local it is assigned to keeps a rename cheap.
+    const webBind = src.indexOf('await listenWeb(');
     expect(adaptersStarted).toBeGreaterThan(-1);
     expect(reconcile).toBeGreaterThan(-1);
     // §3b step 8 is a hard precondition for step 9: a delivery sweep against
@@ -104,12 +107,15 @@ describe('ethos boot — §3b construction order', () => {
 
   it('hands the web bind the ports it has already reserved (§5 / §11 OQ10)', async () => {
     const src = await read('apps/ethos/src/commands/boot.ts');
-    expect(src).toMatch(/const reservedPorts = new Set<number>\(\[acpPort, healthPort\]\);/);
-    expect(src).toMatch(/if \(webhookServer\) reservedPorts\.add\(webhookPort\);/);
-    // 3006, the native platform-webhook listener — reserved on the same rule as
-    // 3003 above. Only when it is actually bound: an unconditional reserve
-    // would push the web bind off a port nothing is holding.
-    expect(src).toMatch(/if \(platformWebhookServer\) reservedPorts\.add\(platformWebhookPort\);/);
+    // 3003 (generic webhooks) and 3006 (the native platform-webhook listener)
+    // are reserved UNCONDITIONALLY, not just when they are already bound.
+    // That rule changed with plan/phases/gateway-live-reload.md Phase C: a live
+    // `config.yaml` edit can now bring either listener up long after the web
+    // bind has settled, so a port left unreserved is a port the web server may
+    // already be sitting on when the operator's first webhook route arrives.
+    expect(src).toMatch(
+      /const reservedPorts = new Set<number>\(\[\s*acpPort,\s*healthPort,\s*webhookPort,\s*platformWebhookPort,?\s*\]\);/,
+    );
     expect(src).toMatch(/listenWithFallback\([\s\S]{0,200}?reservedPorts,\s*\);/);
   });
 
@@ -118,7 +124,10 @@ describe('ethos boot — §3b construction order', () => {
     expect(src).toMatch(/process\.on\('SIGINT', \(\) => void shutdown\(\)\);/);
     expect(src).toMatch(/process\.on\('SIGTERM', \(\) => void shutdown\(\)\);/);
     for (const teardown of [
-      'await approvalFlow.shutdown();', // gateway role
+      // Matched on the guarded STEP, not on a local's name: the gateway role's
+      // approval surfaces are per bot now, and a rename must not fail a
+      // behaviour-preserving change.
+      "await guard('approval-flow',", // gateway role
       'created.forceSettleApprovals();', // serve role
       'healthServer.close();',
       'await callCaptureOwnershipManager?.stop();',
@@ -195,11 +204,13 @@ describe('ethos boot — idle watcher', () => {
     expect(construction).toBeGreaterThan(-1);
     // After every handle its sources sample, and after the servers bind.
     for (const earlier of [
-      'const approvalFlow = wireApprovalFlow(',
+      // The call, not `const approvalFlow = ...`: there is one flow per bot
+      // now, held in a botKey-keyed registry rather than a single local.
+      'wireApprovalFlow(',
       'await runBootReconciliation({',
       'const healthServer = createHealthServer(',
       'acpServer.startHttp(acpPort);',
-      'await listenWithFallback(',
+      'await listenWeb(',
       "process.on('SIGTERM', () => void shutdown());",
     ]) {
       expect(src.indexOf(earlier)).toBeGreaterThan(-1);
@@ -221,10 +232,15 @@ describe('ethos boot — idle watcher', () => {
     // the per-bot handles PLUS the shared loop's, so they sample strictly more
     // than the serve half's. Reversing this would under-report busy.
     expect(gateway).toBeLessThan(serve);
-    // The fold that makes the drop lossless.
+    // The fold that makes the drop lossless: the shared loop's handles ride
+    // along as one more `bots:` entry, beside a source that folds the gateway's
+    // LIVE routing table per sample. No static `...bots` snapshot — a replaced
+    // bot keeps its botKey, so any static/hot split by key loses it entirely
+    // (plan/phases/gateway-live-reload.md §2).
     expect(src).toMatch(
-      /bots: \[\s*\.\.\.bots,\s*\{ jobStore: shared\.jobStore, backgroundExecutor: shared\.backgroundExecutor \},/,
+      /bots: \[\s*createLiveBotBusySource\(\(\) => gateway\.listBots\(\)\),\s*\{ jobStore: shared\.jobStore, backgroundExecutor: shared\.backgroundExecutor \},/,
     );
+    expect(src).not.toMatch(/bots: \[\s*\.\.\.bots,/);
     // `boot.ts` writes no BusySource of its own — every source comes from a
     // builder the two split commands also use.
     expect(src).not.toMatch(/checkBusy:/);

@@ -218,6 +218,48 @@ export const CHANNEL_EXCLUDED_TOOLS: readonly string[] = ['emit_card', 'render_u
  */
 const CLARIFY_ESCALATION_POLL_MS = 5_000;
 
+/**
+ * How long `removeAdapter` waits for one adapter's in-flight work before it
+ * stops the adapter anyway. Generous, because the alternative to waiting used
+ * to be a process restart, which dropped the turn outright.
+ */
+const DEFAULT_DRAIN_TIMEOUT_MS = 30_000;
+
+/**
+ * How long `removeAdapter` waits AFTER aborting a wedged turn, before it stops
+ * the adapter regardless.
+ *
+ * `SessionLane.abort()` only signals — the running task keeps going until it
+ * observes the signal — so stopping the transport the instant the abort is
+ * raised is the very tear-out-from-under-a-live-turn this drain exists to
+ * prevent. Short, because by this point the turn has already had the full
+ * `drainTimeoutMs` and has now been told to stop.
+ */
+const ABORT_GRACE_MS = 2_000;
+
+/** `telegram:<botKey>` → `telegram`. An id with no colon IS the platform. */
+function platformOfAdapterId(id: string): string {
+  const colon = id.indexOf(':');
+  return colon > 0 ? id.slice(0, colon) : id;
+}
+
+/** `telegram:<botKey>` → `<botKey>`. An id with no colon IS the botKey — the
+ *  same derivation the wiring uses when it builds its own adapter maps. */
+function botKeyOfAdapterId(id: string): string {
+  const colon = id.indexOf(':');
+  return colon > 0 ? id.slice(colon + 1) : id;
+}
+
+/**
+ * The botKey segment of a lane key. `buildLaneKey` joins
+ * `(platform, botKey, chatId[, threadId])` with `:` after
+ * `encodeURIComponent`, so segment 1 is the encoded botKey.
+ */
+function botKeyOfLaneKey(laneKey: string): string {
+  const segment = laneKey.split(':')[1];
+  return segment === undefined ? '' : decodeURIComponent(segment);
+}
+
 /** Reply sent when a lane is rejected under saturation (typed busy result). */
 const SYSTEM_BUSY_MESSAGE =
   '⚠ The system is busy right now — too many requests in progress. Please try again in a moment.';
@@ -591,6 +633,19 @@ export interface GatewayConfig {
   voiceBitrateKbps?: number;
   /** Adapter lookup for agent-initiated outbound sends (send_message tool). */
   adapters?: Map<string, PlatformAdapter>;
+  /**
+   * The adapters `adapters` above cannot carry, keyed by the botKey each one
+   * serves. `adapters` is keyed by PLATFORM and holds only the first adapter
+   * per platform, so in a multi-bot-per-platform deployment the second and
+   * later adapters have nowhere else to arrive.
+   *
+   * NOT a duplicate of `adapters`: the gateway recovers every adapter it is
+   * given there on its own (each value names its bot in `adapter.id`), so this
+   * only has to carry the ones a platform-keyed map physically cannot hold.
+   * Absent → `listAdapters()` reports every adapter the constructor received
+   * plus every hot-added one.
+   */
+  botAdapters?: ReadonlyMap<string, PlatformAdapter>;
   /** Plugin-contributed adapter factories. The gateway instantiates and starts
    *  each one, creating a ChannelContext that routes inbound messages through
    *  the standard handleMessage pipeline with auto-stamped botKey. */
@@ -695,12 +750,28 @@ export interface SessionRouting {
 }
 
 export class Gateway {
-  /** Bot routing table keyed by `botKey`. */
-  private readonly bots: Map<string, GatewayBotConfig>;
+  /** Bot routing table keyed by `botKey`. Mutable so `addAdapter` /
+   *  `removeAdapter` can reconcile a live config change (Phase A of
+   *  plan/phases/gateway-live-reload.md) without a process restart. */
+  private bots: Map<string, GatewayBotConfig>;
   /** The botKey used when `InboundMessage.botKey` is absent (single-bot
    *  deployments). When the config supplies multiple bots, this is null
-   *  and a message without `botKey` is treated as an unknown route. */
-  private readonly defaultBotKey: string | null;
+   *  and a message without `botKey` is treated as an unknown route.
+   *  Recomputed by `addAdapter`/`removeAdapter`: hot-adding a second bot
+   *  turns a single-bot deployment into a multi-bot one, and a stale
+   *  default would keep routing unstamped messages to the first bot. */
+  private defaultBotKey: string | null;
+  /**
+   * Bots whose `removeAdapter` has started but whose existing work is still
+   * draining.
+   *
+   * A retiring bot keeps its routing-table entry and its loop wiring for the
+   * whole drain — work accepted under that infrastructure has to RUN under it
+   * — so "stop accepting" cannot be expressed by deleting the entry. This set
+   * is that gate: `handleMessage` refuses new inbound for a retiring botKey
+   * while everything already queued keeps resolving normally.
+   */
+  private readonly retiringBots = new Set<string>();
   private readonly lanes = new Map<string, SessionLane>();
   /** Effective session key per lane (allows /new to fork a fresh session). */
   private readonly sessionKeys = new Map<string, string>();
@@ -770,8 +841,11 @@ export class Gateway {
   /** §4.6 rung 3 — timer running the unanswered-question escalation sweep. */
   private clarifyEscalationTimer: ReturnType<typeof setInterval> | undefined;
   private readonly clarifyEscalationDelayMs: number;
-  /** Chapter 1 safety: per-platform sender allowlist + pairing config. */
-  private readonly channelFilter: ChannelFilterConfig | undefined;
+  /** Chapter 1 safety: per-platform sender allowlist + pairing config.
+   *  Not `readonly` — Phase B of plan/phases/gateway-live-reload.md replaces
+   *  it live. No setter ships until that phase's fail-closed-per-adapter
+   *  redesign is signed off. */
+  private channelFilter: ChannelFilterConfig | undefined;
   /** Static per-channel toolset narrowing (platform → allowed tool names). */
   private readonly channelToolsets: Record<string, string[]> | undefined;
   /** SQLite DB for pairing codes. */
@@ -849,8 +923,37 @@ export class Gateway {
   private readonly voiceBitrateKbps: number | undefined;
   /** Tracks whether the most recent inbound message per lane had audio. */
   private readonly lastInboundHadAudio = new Map<string, boolean>();
-  /** Adapter lookup for agent-initiated outbound sends (send_message tool). */
-  private readonly adapterRegistry: Map<string, PlatformAdapter>;
+  /** Adapter lookup for agent-initiated outbound sends (send_message tool).
+   *  Keyed by PLATFORM (`telegram`, `slack`, ...), not by botKey: a
+   *  multi-bot deployment registers the FIRST adapter per platform and
+   *  every cross-platform send resolves through that one. */
+  private adapterRegistry: Map<string, PlatformAdapter>;
+  /**
+   * THE authoritative adapter registry: every adapter this gateway knows,
+   * keyed by the botKey it serves. `listAdapters()` is this map's values and
+   * `removeAdapter(botKey)` resolves through it; `adapterRegistry` above is a
+   * derived one-per-platform view of the same adapters, maintained from here
+   * by `addAdapter` / `removeAdapter`.
+   *
+   * Seeded at construction from every adapter the constructor receives — the
+   * values of `GatewayConfig.adapters` (each names its own bot in `adapter.id`)
+   * and the plugin-contributed adapters this constructor builds itself — plus
+   * `GatewayConfig.botAdapters` for the ones a platform-keyed map cannot carry.
+   */
+  private readonly botAdapters: Map<string, PlatformAdapter>;
+  /**
+   * Per-bot teardown callbacks (the `session_start` hook registration and the
+   * background-completion subscription). `removeAdapter` runs them so a
+   * removed bot's loop stops feeding this gateway's routing tables.
+   */
+  private readonly botCleanups = new Map<string, Array<() => void>>();
+  /**
+   * Callbacks waiting for a turn to end, fired from `runTurn`'s `finally`.
+   * `removeAdapter` parks here rather than polling: the drain has to be exact
+   * ("this adapter's turns are done"), and a poll interval is either a
+   * needless delay or a race depending on which side of it the turn lands.
+   */
+  private readonly drainWaiters = new Set<() => void>();
   private readonly resolveUserIdFn:
     | ((platform: string, platformUserId: string, displayLabel?: string) => Promise<string>)
     | undefined;
@@ -872,8 +975,6 @@ export class Gateway {
   >();
   /** job.id of every wake already delivered (or claimed for delivery) — exactly-once. */
   private readonly deliveredWakes = new Set<string>();
-  /** Unsubscribe callbacks for each bot executor's `onComplete` subscription. */
-  private readonly bgWakeUnsubs: Array<() => void> = [];
   /** Periodic timer retrying deferred wakes whose lane may since have gone idle. */
   private bgWakeSweepTimer: ReturnType<typeof setInterval> | undefined;
 
@@ -915,21 +1016,6 @@ export class Gateway {
       throw new Error('Gateway: duplicate botKey in GatewayConfig.bots.');
     }
     this.defaultBotKey = botEntries.length === 1 ? botEntries[0].botKey : null;
-
-    // Bridge `sessionId → routing`. `session_start` fires inside `loop.run()`
-    // (AgentLoop step 2) and is the only hook that carries BOTH `sessionId`
-    // and `sessionKey`. We register it on every bot loop so that, by the time
-    // any `before_tool_call` approval hook fires later in the same turn, the
-    // gateway can resolve the sessionId back to its adapter/chat/thread.
-    for (const entry of botEntries) {
-      entry.loop.hooks.registerVoid('session_start', async (payload) => {
-        const routing = this.sessionRouting.get(payload.sessionKey);
-        if (routing) {
-          this.approvalRoutes.set(payload.sessionId, routing);
-          this.sessionIdByKey.set(payload.sessionKey, payload.sessionId);
-        }
-      });
-    }
 
     this.dedupWindow = config.dedupWindow ?? 1024;
     this.inboundDedup = config.inboundDedup;
@@ -1001,6 +1087,16 @@ export class Gateway {
     this.voiceBitrateKbps = config.voiceBitrateKbps;
     this.trustedVoicePlugins = config.trustedVoicePlugins;
     this.adapterRegistry = config.adapters ?? new Map();
+    // Seed the authoritative registry from EVERY adapter handed to this
+    // constructor, not just from the optional `botAdapters` map: each value of
+    // `config.adapters` names its own bot in `adapter.id`, so a caller that
+    // passed only the platform-keyed map still gets an honest
+    // `listAdapters()` rather than an empty one.
+    this.botAdapters = new Map(config.botAdapters ?? []);
+    for (const adapter of this.adapterRegistry.values()) {
+      const botKey = botKeyOfAdapterId(adapter.id);
+      if (!this.botAdapters.has(botKey)) this.botAdapters.set(botKey, adapter);
+    }
     this.resolveUserIdFn = config.resolveUserId;
     this.pluginLoader = config.pluginLoader;
     this.notificationRouter = config.notificationRouter;
@@ -1040,18 +1136,17 @@ export class Gateway {
           adapter.start().catch(() => {});
         }
         this.adapterRegistry.set(name, adapter);
+        // A plugin adapter is a live adapter — `listAdapters()` would be
+        // lying if it left them out.
+        this.botAdapters.set(adapterBotKey, adapter);
       }
     }
 
-    // Background completion wakes — one subscription per bot whose loop has a
-    // durable executor. A finished job's notice is delivered to its originating
-    // chat, but never while a turn is in flight on that lane (see flushWakes).
-    for (const bot of botEntries) {
-      if (!bot.backgroundExecutor) continue;
-      this.bgWakeUnsubs.push(
-        bot.backgroundExecutor.onComplete((job) => this.onBackgroundJobComplete(bot, job)),
-      );
-    }
+    // Per-bot loop wiring — the `session_start` bridge and the
+    // background-completion subscription. One method, called here for every
+    // configured bot and again from `addAdapter` for every hot-added one, so
+    // the two paths can never drift.
+    for (const bot of botEntries) this.wireBotLoop(bot);
     // Periodic retry for deferred wakes: a turn that was in flight when a job
     // finished won't always fire the turn-end flush for the RIGHT lane (a wake
     // may arrive between turns), so sweep every lane with pending items.
@@ -1063,13 +1158,18 @@ export class Gateway {
     // Clarify sweep — fires on a single timer for all bots' bridges so a
     // multi-bot deployment doesn't pile up N timers. Each bridge owns its own
     // expiry logic; we just tick them in parallel.
+    // ARMED ON THE SETTING, NOT ON THE CONSTRUCTION-TIME BRIDGE LIST. The tick
+    // already reads the LIVE routing table, but gating the timer's CREATION on
+    // `bridges.length > 0` meant a process that booted with no clarify bridge
+    // never started one — so the first bot hot-added with a bridge was never
+    // swept, for the life of the process. An empty tick costs one
+    // `Promise.all([])`.
     const sweepMs = config.clarifySweepIntervalMs ?? 30_000;
-    const bridges = botEntries
-      .map((b) => b.loop.clarifyBridge)
-      .filter((b): b is NonNullable<typeof b> => b !== undefined);
-    if (sweepMs > 0 && bridges.length > 0) {
+    if (sweepMs > 0) {
       this.clarifySweepTimer = setInterval(() => {
-        void Promise.all(bridges.map((b) => b.sweep())).catch(() => {});
+        // Read from the LIVE routing table, not the construction-time
+        // snapshot, so a hot-added bot's bridge is swept too.
+        void Promise.all(this.clarifyBridges().map((b) => b.sweep())).catch(() => {});
       }, sweepMs);
       // `unref()` lets the process exit when only the sweep timer remains.
       this.clarifySweepTimer.unref?.();
@@ -1078,8 +1178,9 @@ export class Gateway {
     // §4.6 rung 3 — its own timer, not the 30s clarify sweep's: a 60s rung
     // polled every 30s fires anywhere between 60s and 90s, and the ladder's
     // whole claim is that the push lands when the silence has actually lasted
-    // a minute. Its own cadence keeps the fire window at 60–65s.
-    if (this.clarifyEscalationDelayMs > 0 && bridges.length > 0) {
+    // a minute. Its own cadence keeps the fire window at 60–65s. Armed on the
+    // setting alone, for the same hot-add reason as the sweep above.
+    if (this.clarifyEscalationDelayMs > 0) {
       this.clarifyEscalationTimer = setInterval(() => {
         void this.sweepClarifyEscalations().catch(() => {});
       }, CLARIFY_ESCALATION_POLL_MS);
@@ -1098,6 +1199,308 @@ export class Gateway {
         }
       }
     }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Live adapter reconciliation (plan/phases/gateway-live-reload.md Phase A)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Register the per-bot loop subscriptions this gateway owns, and record how
+   * to undo them.
+   *
+   * `session_start` bridges `sessionId → routing`. It fires inside
+   * `loop.run()` (AgentLoop step 2) and is the only hook carrying BOTH
+   * `sessionId` and `sessionKey`, so by the time a `before_tool_call` approval
+   * hook fires later in the same turn the gateway can resolve the sessionId
+   * back to its adapter/chat/thread.
+   *
+   * The background-completion subscription delivers a finished job's notice to
+   * its originating chat — never while a turn is in flight on that lane (see
+   * `flushWakes`). A bot whose loop has no durable executor contributes none.
+   */
+  private wireBotLoop(bot: GatewayBotConfig): void {
+    const undos: Array<() => void> = [
+      bot.loop.hooks.registerVoid('session_start', async (payload) => {
+        const routing = this.sessionRouting.get(payload.sessionKey);
+        if (routing) {
+          this.approvalRoutes.set(payload.sessionId, routing);
+          this.sessionIdByKey.set(payload.sessionKey, payload.sessionId);
+        }
+      }),
+    ];
+    if (bot.backgroundExecutor) {
+      undos.push(
+        bot.backgroundExecutor.onComplete((job) => this.onBackgroundJobComplete(bot, job)),
+      );
+    }
+    this.botCleanups.set(bot.botKey, undos);
+  }
+
+  /** Every live adapter, in registration order. */
+  listAdapters(): PlatformAdapter[] {
+    return [...this.botAdapters.values()];
+  }
+
+  /** Every bot in the routing table, in registration order. */
+  listBots(): GatewayBotConfig[] {
+    return [...this.bots.values()];
+  }
+
+  /**
+   * Whether an access-control filter for `platform` is INSTALLED in this
+   * running gateway — as opposed to merely present in `config.yaml`.
+   *
+   * `channelFilter` is assigned once, at construction, and Phase B (live
+   * `channel_filter` edits) is deliberately not implemented: nothing replaces
+   * it while the process runs. So a `channel_filter.<platform>` block an
+   * operator adds to the file is NOT in force, and a hot-added bot on that
+   * platform would otherwise go live under access control that was never
+   * installed. `hotAddRefusalReason` in `apps/ethos/src/config-reload.ts` asks
+   * THIS, not the parsed file, and refuses the addition until a restart
+   * installs the filter.
+   *
+   * Read-only and additive (plan/phases/gateway-live-reload.md §5.3);
+   * installing a filter live stays Phase B's job.
+   */
+  hasChannelFilterFor(platform: string): boolean {
+    return this.channelFilter?.[platform] !== undefined;
+  }
+
+  /** Live clarify bridges across every registered bot. */
+  private clarifyBridges(): NonNullable<GatewayBotConfig['loop']['clarifyBridge']>[] {
+    return [...this.bots.values()]
+      .map((b) => b.loop.clarifyBridge)
+      .filter((b): b is NonNullable<typeof b> => b !== undefined);
+  }
+
+  /**
+   * Register one bot in the routing table, live, with NO adapter of its own.
+   *
+   * That is not a degenerate case: a generic inbound webhook route
+   * (`webhooks.<hookId>` in `config.yaml`) is a first-class bot here — the
+   * wiring builds it a personality-bound loop and stamps `webhook:<hookId>` on
+   * every inbound — but its transport is the webhook server's per-request
+   * capturing adapter, not a long-lived `PlatformAdapter`. Without this, a
+   * route added live would be SERVED and then dropped at `no_bot_available`.
+   *
+   * `addAdapter` is this plus the adapter-side registration, so the
+   * duplicate-botKey guard and the loop wiring are defined in exactly one
+   * place (plan/phases/gateway-live-reload.md Phase C).
+   */
+  addBot(bot: GatewayBotConfig): void {
+    if (this.bots.has(bot.botKey)) {
+      throw new Error(`Gateway: botKey "${bot.botKey}" is already registered.`);
+    }
+    this.bots.set(bot.botKey, bot);
+    this.defaultBotKey = this.bots.size === 1 ? bot.botKey : null;
+    this.wireBotLoop(bot);
+  }
+
+  /**
+   * Register one already-constructed adapter and its bot, live.
+   *
+   * The caller is responsible for `adapter.start()` AFTER this returns — the
+   * inbound handler has to be wired before the adapter can deliver anything,
+   * and (for webhook-mode adapters) the route mount is only possible once
+   * `start()` has resolved.
+   *
+   * The duplicate-botKey check the constructor performs fires exactly once, at
+   * construction; this is the same rule enforced as a runtime guard, so a diff
+   * that re-adds a bot which is still registered is refused rather than
+   * silently replacing a live routing-table entry.
+   */
+  addAdapter(adapter: PlatformAdapter, bot: GatewayBotConfig): void {
+    const platform = platformOfAdapterId(adapter.id);
+    this.addBot(bot);
+    this.botAdapters.set(bot.botKey, adapter);
+    // First-adapter-per-platform, matching how the wiring builds
+    // `GatewayConfig.adapters`. A hot-added second Telegram bot must not
+    // repoint every agent-initiated `send_message` at itself.
+    if (!this.adapterRegistry.has(platform)) this.adapterRegistry.set(platform, adapter);
+    // ONE inbound wiring path. The adapter stamps its own `botKey` (exactly as
+    // it does on the cold-boot path in `apps/ethos/src/commands/boot.ts`), so
+    // nothing is pinned here — unlike the plugin-adapter path in the
+    // constructor, where the factory-built adapter has no botKey of its own.
+    adapter.onMessage((message: InboundMessage) => {
+      void this.handleMessage(message, adapter).catch((err: unknown) => {
+        this.observability?.recordSafetyBlock({
+          code: 'gateway.inbound_error',
+          cause: 'inbound message handling threw',
+          details: {
+            platform,
+            botKey: bot.botKey,
+            error: err instanceof Error ? err.message : String(err),
+          },
+        });
+      });
+    });
+  }
+
+  /**
+   * Deregister one bot and stop its adapter, leaving every other bot running.
+   *
+   * THE ORDER IS THE WHOLE POINT, and it is not "deregister, then drain".
+   * Queued work was accepted under this bot's routing entry and its loop
+   * wiring — the `session_start` bridge that lets an approval resolve back to
+   * this chat, the background-completion subscription — so tearing those out
+   * first would leave the drain running turns that no longer have the
+   * infrastructure they were admitted under. Instead the bot is marked
+   * RETIRING: `handleMessage` refuses new inbound for it immediately, while
+   * everything already queued keeps routing normally until it finishes.
+   *
+   * Only once the bot is idle does the teardown run: loop hooks, routing
+   * entry, lanes, and finally the transport. `shutdown()` cannot be reused for
+   * any of this — it assumes the whole process is going down and aborts every
+   * lane on the gateway.
+   *
+   * `drainTimeoutMs` bounds the wait so one wedged turn cannot block a config
+   * reconcile forever. On expiry the turn is ABORTED and then awaited (bounded
+   * by `abortGraceMs`, default {@link ABORT_GRACE_MS}) before the adapter
+   * stops — `SessionLane.abort()` only raises a signal, so stopping the
+   * transport the instant it is raised would tear the adapter out from under a
+   * turn that is still writing to it.
+   *
+   * IF THE ABORT GRACE ALSO EXPIRES, NOTHING IS TORN DOWN. The drain guarantee
+   * this method claims is not "wait a bit, then tear down anyway": a
+   * cancellation still running when its hooks, lanes, routing entry and
+   * transport are deleted is a use-after-stop — late `adapter.send` calls onto
+   * a stopped transport, approvals routing through a `session_start` bridge
+   * that no longer exists. So the bot is left QUARANTINED instead: it keeps its
+   * routing entry, its lanes and its loop wiring, it stays in `retiringBots`
+   * (so `handleMessage` admits no new inbound for it), its adapter is NOT
+   * stopped, and this rejects. The caller's applied-state ledger therefore
+   * never marks the unit retired, and the next config-reload poll calls this
+   * again — by which time the turn has almost always unwound and the teardown
+   * completes. The alternative — making cancellation awaitable and simply
+   * waiting — has no bound at all: `AgentLoop` promises no deadline for
+   * observing its abort signal, so one wedged turn would block every later
+   * reconcile forever. Retry-on-a-later-poll is the same discipline the rest
+   * of the reconciler already runs on.
+   */
+  async removeAdapter(
+    botKey: string,
+    opts: { drainTimeoutMs?: number; abortGraceMs?: number } = {},
+  ): Promise<void> {
+    const adapter = this.botAdapters.get(botKey);
+    const known = this.bots.has(botKey) || adapter !== undefined;
+    if (!known) return;
+
+    this.retiringBots.add(botKey);
+    let drained = await this.drainAdapter(
+      adapter,
+      botKey,
+      opts.drainTimeoutMs ?? DEFAULT_DRAIN_TIMEOUT_MS,
+    );
+    if (!drained) {
+      // Wedged. Tell it to stop, then wait for it to actually stop — an
+      // aborted turn still has to unwind, and its last `adapter.send` must
+      // not land after `adapter.stop()`.
+      for (const [laneKey, lane] of this.lanes) {
+        if (botKeyOfLaneKey(laneKey) === botKey) lane.abort();
+      }
+      drained = await this.drainAdapter(adapter, botKey, opts.abortGraceMs ?? ABORT_GRACE_MS);
+    }
+    if (!drained) {
+      // Quarantined, not retired. Everything stays exactly as it is — see the
+      // doc comment above — and the botKey stays in `retiringBots`, so the bot
+      // accepts no new work while its cancellation finishes.
+      this.observability?.recordSafetyBlock({
+        code: 'gateway.retirement_deferred',
+        cause: 'the bot was still busy after the abort grace',
+        details: { botKey },
+      });
+      throw new Error(
+        `Gateway: bot "${botKey}" is still busy after the abort grace — retirement deferred. ` +
+          'It accepts no new inbound; teardown is retried on the next reconcile.',
+      );
+    }
+
+    this.retiringBots.delete(botKey);
+    // Idle — NOW the bot stops existing.
+    this.bots.delete(botKey);
+    this.botAdapters.delete(botKey);
+    for (const undo of this.botCleanups.get(botKey) ?? []) undo();
+    this.botCleanups.delete(botKey);
+    this.defaultBotKey = this.bots.size === 1 ? ([...this.bots.keys()][0] ?? null) : null;
+    // Drop this bot's lanes so a later re-add of the same botKey starts
+    // clean instead of inheriting a stale queue.
+    for (const [laneKey, lane] of [...this.lanes]) {
+      if (botKeyOfLaneKey(laneKey) !== botKey) continue;
+      lane.abort();
+      this.lanes.delete(laneKey);
+    }
+    // An adapterless bot (a generic webhook route — see `addBot`) is fully
+    // deregistered at this point: there is no transport to unregister from a
+    // platform and nothing to stop.
+    if (!adapter) return;
+    for (const [platform, registered] of [...this.adapterRegistry]) {
+      if (registered !== adapter) continue;
+      // This adapter WAS the platform's outbound representative. If a sibling
+      // bot on the same platform is still live, promote it — otherwise every
+      // agent-initiated `send_message` to that platform would start failing
+      // because one of its bots left.
+      const survivor = [...this.botAdapters.values()].find(
+        (a) => platformOfAdapterId(a.id) === platform,
+      );
+      if (survivor) this.adapterRegistry.set(platform, survivor);
+      else this.adapterRegistry.delete(platform);
+    }
+    await adapter.stop();
+  }
+
+  /**
+   * Resolve once no turn is in flight for `adapter` and no message is queued
+   * on any of `botKey`'s lanes. `SessionLane.length` counts the processing
+   * item as well as the queue, so a lane at zero has genuinely finished.
+   *
+   * Returns whether it actually went idle: `false` means the timeout won, and
+   * the caller still has live work to deal with.
+   */
+  private async drainAdapter(
+    adapter: PlatformAdapter | undefined,
+    botKey: string,
+    timeoutMs: number,
+  ): Promise<boolean> {
+    const busy = (): boolean => {
+      // An adapterless bot has no turn to match on `adapter`; its work is
+      // visible on its lanes, which the loop below covers either way.
+      if (adapter) {
+        for (const turn of this.activeTurns.values()) if (turn.adapter === adapter) return true;
+      }
+      for (const [laneKey, lane] of this.lanes) {
+        if (botKeyOfLaneKey(laneKey) === botKey && lane.length > 0) return true;
+      }
+      return false;
+    };
+    if (!busy()) return true;
+    return await new Promise<boolean>((resolve) => {
+      const timer = setTimeout(() => {
+        this.drainWaiters.delete(check);
+        resolve(false);
+      }, timeoutMs);
+      timer.unref?.();
+      const check = (): void => {
+        if (busy()) return;
+        this.drainWaiters.delete(check);
+        clearTimeout(timer);
+        resolve(true);
+      };
+      this.drainWaiters.add(check);
+    });
+  }
+
+  /** Fired from `runTurn`'s `finally` — see {@link drainWaiters}. */
+  private notifyDrainWaiters(): void {
+    if (this.drainWaiters.size === 0) return;
+    // Deferred by one macrotask on purpose. `SessionLane` flips `processing`
+    // to false only after the turn's promise settles and its queue is empty,
+    // so a check run inside the turn's own `finally` — or in any microtask
+    // chained off it — would still see `lane.length > 0` and never resolve.
+    const timer = setTimeout(() => {
+      for (const waiter of [...this.drainWaiters]) waiter();
+    }, 0);
+    timer.unref?.();
   }
 
   // Both resolvers delegate to the SHARED resolution path in
@@ -1419,6 +1822,18 @@ export class Gateway {
       this.observability?.recordSafetyBlock({
         code: 'gateway.no_bot_available',
         details: { platform: message.platform, chatId: message.chatId, botKey },
+      });
+      return;
+    }
+
+    // Retiring (`removeAdapter` is draining it): the routing entry and the
+    // loop wiring are deliberately still here so work accepted BEFORE the
+    // removal finishes under them — but nothing new may be admitted, or the
+    // drain would chase a queue that keeps refilling.
+    if (this.retiringBots.has(bot.botKey)) {
+      this.observability?.recordSafetyBlock({
+        code: 'gateway.bot_retiring',
+        details: { platform: message.platform, chatId: message.chatId, botKey: bot.botKey },
       });
       return;
     }
@@ -2496,6 +2911,8 @@ export class Gateway {
       clearInterval(typingTimer);
       this.activeTurns.delete(laneKey);
       this.activeSinks.delete(laneKey);
+      // A `removeAdapter` may be parked waiting for exactly this turn.
+      this.notifyDrainWaiters();
 
       turnActive = false;
       // Don't deregister — keep the adapter alive to buffer offline notifications
@@ -2951,8 +3368,8 @@ export class Gateway {
       clearInterval(this.bgWakeSweepTimer);
       this.bgWakeSweepTimer = undefined;
     }
-    for (const unsub of this.bgWakeUnsubs) unsub();
-    this.bgWakeUnsubs.length = 0;
+    for (const undos of this.botCleanups.values()) for (const undo of undos) undo();
+    this.botCleanups.clear();
     this.pendingWakes.clear();
     for (const lane of this.lanes.values()) {
       lane.abort();

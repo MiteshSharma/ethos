@@ -1828,6 +1828,22 @@ export async function runGatewayStart(opts: GatewayStartOptions = {}): Promise<v
  * or a team coordinator loop (`createTeamAgentLoop`). The botKey
  * matches what adapters will stamp on inbound messages.
  */
+/**
+ * One bot's share of the flat lists on {@link BuildGatewayBotsResult}.
+ *
+ * The flat lists are what a caller registers; this is what it needs to
+ * DEREGISTER exactly one bot again. A caller that only ever tears the whole
+ * process down can ignore it — `ethos boot`'s live reconciler cannot, because
+ * replacing one bot has to undo that bot's registrations and no others
+ * (plan/phases/gateway-live-reload.md §2).
+ */
+export interface GatewayBotWiring {
+  messagingSetters: Array<(fn: MessagingSendFn) => void>;
+  notificationRouters: NotificationRouter[];
+  toolRegistries: ToolRegistry[];
+  refreshers: Array<() => Promise<void>>;
+}
+
 export interface BuildGatewayBotsResult {
   bots: GatewayBotConfig[];
   messagingSetters: Array<(fn: MessagingSendFn) => void>;
@@ -1844,6 +1860,9 @@ export interface BuildGatewayBotsResult {
    *  hot-dropped/edited personality reaches every loop's registry. Team loops
    *  have no personality registry and contribute none. */
   refreshers: Array<() => Promise<void>>;
+  /** The four lists above, attributed to the bot that produced each entry.
+   *  Aligned with `bots` — same order, same membership. */
+  perBot: Map<string, GatewayBotWiring>;
 }
 
 /**
@@ -1854,7 +1873,7 @@ export interface BuildGatewayBotsResult {
  * telegram/slack there is nothing to sha256 — the key is the explicit `id`
  * or a slug of the session directory.
  */
-function whatsAppBotKey(waCfg: WhatsAppConfig): string {
+export function whatsAppBotKey(waCfg: WhatsAppConfig): string {
   return (
     waCfg.id ??
     `wa-${(waCfg.session_dir ?? join(ethosDir(), 'whatsapp')).replace(/[^a-zA-Z0-9]/g, '').slice(-16)}`
@@ -1868,7 +1887,7 @@ function whatsAppBotKey(waCfg: WhatsAppConfig): string {
  * drift. Seed is the bot token, matching the pre-P5 adapter derivation so the
  * key value is stable across the change.
  */
-function discordBotKey(discordToken: string): string {
+export function discordBotKey(discordToken: string): string {
   return deriveBotKeyFromSeed(discordToken);
 }
 
@@ -1877,7 +1896,7 @@ function discordBotKey(discordToken: string): string {
  * `discordBotKey`. Seed is `<user>@<imapHost>`, matching the pre-P5 adapter
  * derivation.
  */
-function emailBotKey(user: string, imapHost: string): string {
+export function emailBotKey(user: string, imapHost: string): string {
   return deriveBotKeyFromSeed(`${user}@${imapHost}`);
 }
 
@@ -1904,6 +1923,28 @@ export async function buildGatewayBots(
   const routers: NotificationRouter[] = [];
   const registries: ToolRegistry[] = [];
   const refreshers: Array<() => Promise<void>> = [];
+  // Per-bot attribution, derived rather than collected: every construction
+  // below already pushes into the four flat lists, so the entries ONE bot
+  // contributed are exactly what those lists grew by while it was being built.
+  // Taking a mark and slicing keeps the flat lists byte-identical to what every
+  // existing caller already receives — there is no second bookkeeping path to
+  // drift from the first.
+  const perBot = new Map<string, GatewayBotWiring>();
+  const mark = (): [number, number, number, number] => [
+    setters.length,
+    routers.length,
+    registries.length,
+    refreshers.length,
+  ];
+  const record = (bot: GatewayBotConfig, at: [number, number, number, number]): void => {
+    out.push(bot);
+    perBot.set(bot.botKey, {
+      messagingSetters: setters.slice(at[0]),
+      notificationRouters: routers.slice(at[1]),
+      toolRegistries: registries.slice(at[2]),
+      refreshers: refreshers.slice(at[3]),
+    });
+  };
   const buildOne = async (bot: TelegramBotConfig | SlackAppConfig): Promise<GatewayBotConfig> => {
     const botKey = deriveBotKey(bot);
     let loop: AgentLoop;
@@ -1939,9 +1980,16 @@ export async function buildGatewayBots(
       ...(backgroundExecutor ? { backgroundExecutor } : {}),
     };
   };
-  for (const bot of config.telegram?.bots ?? []) out.push(await buildOne(bot));
-  for (const app of config.slack?.apps ?? []) out.push(await buildOne(app));
+  for (const bot of config.telegram?.bots ?? []) {
+    const at = mark();
+    record(await buildOne(bot), at);
+  }
+  for (const app of config.slack?.apps ?? []) {
+    const at = mark();
+    record(await buildOne(app), at);
+  }
   for (const waCfg of config.whatsapp ?? []) {
+    const at = mark();
     const botKey = whatsAppBotKey(waCfg);
     // WhatsApp bind is optional (unlike telegram/slack). A bind-less entry
     // falls back to the default personality — but make that visible so a
@@ -1973,70 +2021,85 @@ export async function buildGatewayBots(
       registries.push(result.toolRegistry);
       refreshers.push(result.refreshPersonalities);
     }
-    out.push({
-      botKey,
-      loop,
-      binding: { ...bind },
-      piiRedaction: waCfg.piiRedaction,
-      ...(jobStore ? { jobStore } : {}),
-      ...(backgroundExecutor ? { backgroundExecutor } : {}),
-    });
+    record(
+      {
+        botKey,
+        loop,
+        binding: { ...bind },
+        piiRedaction: waCfg.piiRedaction,
+        ...(jobStore ? { jobStore } : {}),
+        ...(backgroundExecutor ? { backgroundExecutor } : {}),
+      },
+      at,
+    );
   }
   // Inbound webhooks — each hookId becomes a first-class personality-bound bot
   // so POST /webhook/<hookId> drives the same gateway/session machinery as a
   // channel bot. botKey matches what the webhook server stamps on inbounds.
   for (const [hookId, hook] of Object.entries(config.webhooks ?? {})) {
+    const at = mark();
     const botKey = `webhook:${hookId}`;
     const result = await createAgentLoop(
       { ...config, personality: hook.personalityId },
       { ...loopOpts, originBotKey: botKey },
     );
-    out.push({
-      botKey,
-      loop: result.loop,
-      binding: { type: 'personality', name: hook.personalityId },
-      ...(result.jobStore ? { jobStore: result.jobStore } : {}),
-      ...(result.backgroundExecutor ? { backgroundExecutor: result.backgroundExecutor } : {}),
-    });
     setters.push(result.setMessagingSend);
     routers.push(result.notificationRouter);
     registries.push(result.toolRegistry);
     refreshers.push(result.refreshPersonalities);
+    record(
+      {
+        botKey,
+        loop: result.loop,
+        binding: { type: 'personality', name: hook.personalityId },
+        ...(result.jobStore ? { jobStore: result.jobStore } : {}),
+        ...(result.backgroundExecutor ? { backgroundExecutor: result.backgroundExecutor } : {}),
+      },
+      at,
+    );
   }
   // Legacy scalar Discord — register as a first-class bot bound to the default
   // personality so its inbound (stamped with the wiring-computed botKey)
   // resolves to a loop instead of dropping at the unknown-botKey gate. The
   // botKey MUST match what `buildAdapters` passes the DiscordAdapter.
   if (config.discordToken) {
+    const at = mark();
     const botKey = discordBotKey(config.discordToken);
     const result = await createAgentLoop(config, { ...loopOpts, originBotKey: botKey });
-    out.push({
-      botKey,
-      loop: result.loop,
-      binding: { type: 'personality', name: config.personality },
-      ...(result.jobStore ? { jobStore: result.jobStore } : {}),
-      ...(result.backgroundExecutor ? { backgroundExecutor: result.backgroundExecutor } : {}),
-    });
     setters.push(result.setMessagingSend);
     routers.push(result.notificationRouter);
     registries.push(result.toolRegistry);
     refreshers.push(result.refreshPersonalities);
+    record(
+      {
+        botKey,
+        loop: result.loop,
+        binding: { type: 'personality', name: config.personality },
+        ...(result.jobStore ? { jobStore: result.jobStore } : {}),
+        ...(result.backgroundExecutor ? { backgroundExecutor: result.backgroundExecutor } : {}),
+      },
+      at,
+    );
   }
   // Legacy scalar Email — same treatment as Discord.
   if (config.emailImapHost && config.emailUser && config.emailPassword && config.emailSmtpHost) {
+    const at = mark();
     const botKey = emailBotKey(config.emailUser, config.emailImapHost);
     const result = await createAgentLoop(config, { ...loopOpts, originBotKey: botKey });
-    out.push({
-      botKey,
-      loop: result.loop,
-      binding: { type: 'personality', name: config.personality },
-      ...(result.jobStore ? { jobStore: result.jobStore } : {}),
-      ...(result.backgroundExecutor ? { backgroundExecutor: result.backgroundExecutor } : {}),
-    });
     setters.push(result.setMessagingSend);
     routers.push(result.notificationRouter);
     registries.push(result.toolRegistry);
     refreshers.push(result.refreshPersonalities);
+    record(
+      {
+        botKey,
+        loop: result.loop,
+        binding: { type: 'personality', name: config.personality },
+        ...(result.jobStore ? { jobStore: result.jobStore } : {}),
+        ...(result.backgroundExecutor ? { backgroundExecutor: result.backgroundExecutor } : {}),
+      },
+      at,
+    );
   }
   return {
     bots: out,
@@ -2044,6 +2107,7 @@ export async function buildGatewayBots(
     notificationRouters: routers,
     toolRegistries: registries,
     refreshers,
+    perBot,
   };
 }
 
@@ -3765,6 +3829,10 @@ export interface BuildGatewayOptions {
   systemLoop: AgentLoop;
   /** Platform-keyed adapter registry for cross-platform `send_message`. */
   adapterMap: Map<string, PlatformAdapter>;
+  /** botKey-keyed adapter registry — the FULL set, backing
+   *  `Gateway.listAdapters()`. Optional: absent → the gateway reports only
+   *  adapters added later via `addAdapter`. */
+  botAdapters?: ReadonlyMap<string, PlatformAdapter>;
   deliveryLedger: GatewayConfig['deliveryLedger'];
   inboundDedup: GatewayConfig['inboundDedup'];
   resolveUserId: GatewayConfig['resolveUserId'];
@@ -3800,6 +3868,7 @@ export function buildGateway(opts: BuildGatewayOptions): Gateway {
     bots,
     systemLoop,
     adapterMap,
+    botAdapters,
     deliveryLedger,
     inboundDedup,
     resolveUserId,
@@ -3876,6 +3945,7 @@ export function buildGateway(opts: BuildGatewayOptions): Gateway {
     : new Gateway({
         bots,
         attachmentCache,
+        ...(botAdapters ? { botAdapters } : {}),
         // Reading cached attachment bytes: an inbound voice note is
         // transcribed from the audio itself, not from a path.
         storage,
