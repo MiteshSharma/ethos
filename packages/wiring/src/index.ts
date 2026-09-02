@@ -89,6 +89,14 @@ export interface WiringProviderConfig {
   /** Azure-only: REST API version (e.g. `2024-10-21`). Required when
    *  `provider === 'azure'`; ignored otherwise. */
   apiVersion?: string;
+  /** Bedrock-only: AWS region for the Bedrock runtime endpoint (e.g.
+   *  `us-west-2`). Defaults to `us-east-1`; ignored otherwise. */
+  region?: string;
+  /** Bedrock-only: named AWS profile from `~/.aws/config` (e.g. an SSO profile
+   *  after `aws sso login`), used when no static keys are configured; ignored
+   *  otherwise. Named `awsProfile`, not `profile`, because `profile` already
+   *  means a per-model `ModelProfile` (`models.*`) in this config. */
+  awsProfile?: string;
 }
 
 export interface WiringConfig {
@@ -139,6 +147,14 @@ export interface WiringConfig {
   /** Azure-only: REST API version (e.g. `2024-10-21`). Required when
    *  `provider === 'azure'`; ignored otherwise. */
   apiVersion?: string;
+  /** Bedrock-only: AWS region for the Bedrock runtime endpoint (e.g.
+   *  `us-west-2`). Defaults to `us-east-1`; ignored otherwise. */
+  region?: string;
+  /** Bedrock-only: named AWS profile from `~/.aws/config` (e.g. an SSO profile
+   *  after `aws sso login`), used when no static keys are configured; ignored
+   *  otherwise. Named `awsProfile`, not `profile`, because `profile` already
+   *  means a per-model `ModelProfile` (`models.*`) in this config. */
+  awsProfile?: string;
   /**
    * Lane 0 (eng review D4) — operator override for the primary model's served
    * context window (tokens). Wins over the probe and the catalog (precedence:
@@ -849,6 +865,8 @@ async function createLLMFromRegistry(
     apiKey: string;
     baseUrl?: string;
     apiVersion?: string;
+    region?: string;
+    awsProfile?: string;
   }): Promise<LLMProvider> => {
     // §4.B trust gate: plugin-contributed providers (pluginId/name) require
     // the plugin to be in the personality's allowed-plugins list.
@@ -986,6 +1004,8 @@ async function createLLMFromRegistry(
           apiKey: p.apiKey,
           ...(p.baseUrl !== undefined ? { baseUrl: p.baseUrl } : {}),
           ...(p.apiVersion !== undefined ? { apiVersion: p.apiVersion } : {}),
+          ...(p.region !== undefined ? { region: p.region } : {}),
+          ...(p.awsProfile !== undefined ? { awsProfile: p.awsProfile } : {}),
         }),
       ),
     );
@@ -1020,6 +1040,8 @@ async function createLLMFromRegistry(
     apiKey: config.apiKey,
     ...(config.baseUrl !== undefined ? { baseUrl: config.baseUrl } : {}),
     ...(config.apiVersion !== undefined ? { apiVersion: config.apiVersion } : {}),
+    ...(config.region !== undefined ? { region: config.region } : {}),
+    ...(config.awsProfile !== undefined ? { awsProfile: config.awsProfile } : {}),
   });
 }
 

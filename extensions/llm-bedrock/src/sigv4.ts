@@ -1,18 +1,32 @@
 import { createHash, createHmac } from 'node:crypto';
+import type { AwsCredentialIdentityProvider } from '@aws-sdk/types';
 import type { AuthSigner, AuthSignRequest, AuthSignResult } from '@ethosagent/types';
 
 export interface SigV4Config {
   region: string;
-  accessKeyId: string;
-  secretAccessKey: string;
-  sessionToken?: string;
+  credentials: AwsCredentialIdentityProvider;
+}
+
+/** Wraps a fixed credential triple as a provider, so callers with static keys
+ *  hand the signer the same shape as `fromNodeProviderChain()` does. */
+export function staticCredentials(
+  accessKeyId: string,
+  secretAccessKey: string,
+  sessionToken?: string,
+): AwsCredentialIdentityProvider {
+  return async () => ({
+    accessKeyId,
+    secretAccessKey,
+    ...(sessionToken !== undefined ? { sessionToken } : {}),
+  });
 }
 
 export class SigV4Signer implements AuthSigner {
   constructor(private readonly config: SigV4Config) {}
 
   async sign(request: AuthSignRequest): Promise<AuthSignResult> {
-    const { region, accessKeyId, secretAccessKey, sessionToken } = this.config;
+    const { region } = this.config;
+    const { accessKeyId, secretAccessKey, sessionToken } = await this.config.credentials();
     const service = 'bedrock';
     const now = new Date();
     const dateStamp = now.toISOString().slice(0, 10).replace(/-/g, '');

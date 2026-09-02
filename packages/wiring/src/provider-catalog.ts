@@ -2,7 +2,7 @@ export interface ProviderCatalogEntry {
   id: string;
   label: string;
   description: string;
-  authType: 'api-key' | 'self-hosted' | 'device-auth';
+  authType: 'api-key' | 'self-hosted' | 'device-auth' | 'iam-role';
   costType: 'api-billing' | 'pay-per-use' | 'local';
   recommended?: boolean;
   comingSoon?: boolean;
@@ -55,6 +55,14 @@ export const PROVIDER_CATALOG: ProviderCatalogEntry[] = [
     authType: 'api-key',
     costType: 'api-billing',
     signupUrl: 'https://portal.azure.com',
+  },
+  {
+    id: 'bedrock',
+    label: 'AWS Bedrock',
+    description: 'Claude and other models via your AWS account — IAM role, SSO, or profile',
+    authType: 'iam-role',
+    costType: 'api-billing',
+    signupUrl: 'https://console.aws.amazon.com/bedrock',
   },
   // Coming soon
   {

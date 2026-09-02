@@ -14,7 +14,7 @@ describe('Lane 5 — setup provider hint', () => {
     expect(supportedProvidersHint()).toBe(fromCatalog.join(', '));
   });
 
-  it('pins the seven supported providers (catalog drift must be deliberate)', () => {
+  it('pins the eight supported providers (catalog drift must be deliberate)', () => {
     const fromCatalog = PROVIDER_CATALOG.filter((p) => !p.comingSoon).map((p) => p.id);
     expect(fromCatalog).toEqual([
       'anthropic',
@@ -22,6 +22,7 @@ describe('Lane 5 — setup provider hint', () => {
       'codex',
       'openrouter',
       'azure',
+      'bedrock',
       'ollama',
       'vllm',
     ]);

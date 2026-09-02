@@ -1,11 +1,13 @@
 import { describe, expect, it } from 'vitest';
-import { SigV4Signer } from '../sigv4';
+import { SigV4Signer, staticCredentials } from '../sigv4';
 
 describe('SigV4Signer', () => {
   const signer = new SigV4Signer({
     region: 'us-east-1',
-    accessKeyId: 'AKIAIOSFODNN7EXAMPLE',
-    secretAccessKey: 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY',
+    credentials: staticCredentials(
+      'AKIAIOSFODNN7EXAMPLE',
+      'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY',
+    ),
   });
 
   it('produces Authorization header with correct format', async () => {
@@ -27,9 +29,11 @@ describe('SigV4Signer', () => {
   it('includes session token header when provided', async () => {
     const signerWithToken = new SigV4Signer({
       region: 'us-west-2',
-      accessKeyId: 'AKIAIOSFODNN7EXAMPLE',
-      secretAccessKey: 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY',
-      sessionToken: 'FwoGZXIvYXdzEBYaDHqa0AP',
+      credentials: staticCredentials(
+        'AKIAIOSFODNN7EXAMPLE',
+        'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY',
+        'FwoGZXIvYXdzEBYaDHqa0AP',
+      ),
     });
     const result = await signerWithToken.sign({
       method: 'POST',

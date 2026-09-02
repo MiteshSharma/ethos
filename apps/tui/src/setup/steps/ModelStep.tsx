@@ -169,6 +169,9 @@ function CatalogModelStep() {
   const providerId = answers.provider ?? 'anthropic';
   const models = getModelsForProvider(providerId);
   const defaultModel = getDefaultModel(providerId);
+  // Providers whose model ids are account- or region-specific (bedrock) carry
+  // no catalog rows — fall back to free-text entry instead of an empty list.
+  const isManual = models.length === 0;
 
   const [selected, setSelected] = useState(() => {
     const idx = models.findIndex(
@@ -176,8 +179,26 @@ function CatalogModelStep() {
     );
     return Math.max(0, idx);
   });
+  const [manual, setManual] = useState(answers.model ?? '');
 
-  useInput((_input, key) => {
+  useInput((input, key) => {
+    if (isManual) {
+      if (key.escape) {
+        dispatch({ type: 'back' });
+        return;
+      }
+      if (key.return) {
+        const m = manual.trim();
+        if (m) dispatch({ type: 'next', patch: { model: m } });
+        return;
+      }
+      if (key.backspace || key.delete) {
+        setManual((v) => v.slice(0, -1));
+        return;
+      }
+      if (!key.ctrl && !key.meta && input) setManual((v) => v + input);
+      return;
+    }
     if (key.upArrow) setSelected((s) => Math.max(0, s - 1));
     if (key.downArrow) setSelected((s) => Math.min(models.length - 1, s + 1));
     if (key.return) {
@@ -186,6 +207,26 @@ function CatalogModelStep() {
     }
     if (key.escape) dispatch({ type: 'back' });
   });
+
+  if (isManual) {
+    return (
+      <Box flexDirection="column" gap={1}>
+        <Text color={DESIGN.textPrimary} bold>
+          Enter a model ID:
+        </Text>
+        <Text color={DESIGN.textTertiary}>
+          {'  No preset models for this provider — IDs are account-specific.'}
+        </Text>
+        <Box flexDirection="row" gap={1} marginTop={1}>
+          <Text color={DESIGN.textPrimary}>{`  ${GLYPHS.prompt} `}</Text>
+          <Text color={manual ? DESIGN.textPrimary : DESIGN.textTertiary}>
+            {manual || 'e.g. us.anthropic.claude-sonnet-4-20250514-v1:0'}
+          </Text>
+        </Box>
+        <Text color={DESIGN.textTertiary}>{'  Enter confirm   Esc back'}</Text>
+      </Box>
+    );
+  }
 
   const selectedModel = models[selected];
   const showWarning = selectedModel && selectedModel.contextWindow < MIN_CONTEXT_WINDOW;
@@ -224,14 +265,6 @@ function CatalogModelStep() {
         <Text
           color={DESIGN.warning}
         >{`  ! ${selectedModel.contextWindow / 1_000}k ctx — researcher / engineer personalities work better at ≥64k`}</Text>
-      )}
-      {models.length === 0 && (
-        <Box flexDirection="column">
-          <Text color={DESIGN.textTertiary}>
-            {'  No known models for this provider. Enter a model ID:'}
-          </Text>
-          <Text color={DESIGN.textTertiary}>{'  (free-form entry coming soon)'}</Text>
-        </Box>
       )}
       <Text color={DESIGN.textTertiary}>{'  ↑↓ select   Enter confirm   Esc back'}</Text>
     </Box>

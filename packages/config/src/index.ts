@@ -733,6 +733,14 @@ export interface ProviderConfig {
   /** Azure-only: REST API version (e.g. `2024-10-21`). Required when
    *  `provider === 'azure'`; ignored otherwise. */
   apiVersion?: string;
+  /** Bedrock-only: AWS region for the Bedrock runtime endpoint (e.g.
+   *  `us-west-2`). Defaults to `us-east-1`; ignored otherwise. */
+  region?: string;
+  /** Bedrock-only: named AWS profile from `~/.aws/config` (e.g. an SSO profile
+   *  after `aws sso login`), used when no static keys are configured; ignored
+   *  otherwise. Named `awsProfile`, not `profile`, because `profile` already
+   *  means a per-model `ModelProfile` (`models.*`) in this config. */
+  awsProfile?: string;
 }
 
 /**
@@ -1170,6 +1178,14 @@ export interface EthosConfig {
   /** Azure-only: REST API version (e.g. `2024-10-21`). Required when
    *  `provider === 'azure'`; ignored otherwise. */
   apiVersion?: string;
+  /** Bedrock-only: AWS region for the Bedrock runtime endpoint (e.g.
+   *  `us-west-2`). Defaults to `us-east-1`; ignored otherwise. */
+  region?: string;
+  /** Bedrock-only: named AWS profile from `~/.aws/config` (e.g. an SSO profile
+   *  after `aws sso login`), used when no static keys are configured; ignored
+   *  otherwise. Named `awsProfile`, not `profile`, because `profile` already
+   *  means a per-model `ModelProfile` (`models.*`) in this config. */
+  awsProfile?: string;
   /**
    * Lane 0 (eng review D4) — operator override for the model's served context
    * window, in tokens. A window FACT (how many tokens the server accepts) —
@@ -2417,6 +2433,8 @@ export async function writeConfig(
   }
   if (config.baseUrl) lines.push(`baseUrl: ${config.baseUrl}`);
   if (config.apiVersion) lines.push(`apiVersion: ${config.apiVersion}`);
+  if (config.region) lines.push(`region: ${config.region}`);
+  if (config.awsProfile) lines.push(`awsProfile: ${config.awsProfile}`);
   if (config.contextWindow !== undefined) lines.push(`contextWindow: ${config.contextWindow}`);
   if (config.toolOrder !== undefined) lines.push(`toolOrder: ${config.toolOrder}`);
   if (config.requestTimeoutMs !== undefined)
@@ -2833,6 +2851,8 @@ export async function writeConfig(
       if (p.model) lines.push(`providers.${i}.model: ${p.model}`);
       if (p.baseUrl) lines.push(`providers.${i}.baseUrl: ${p.baseUrl}`);
       if (p.apiVersion) lines.push(`providers.${i}.apiVersion: ${p.apiVersion}`);
+      if (p.region) lines.push(`providers.${i}.region: ${p.region}`);
+      if (p.awsProfile) lines.push(`providers.${i}.awsProfile: ${p.awsProfile}`);
     }
   }
   if (config.auxiliary?.compression) {
@@ -4075,6 +4095,8 @@ function parseConfigYaml(src: string): EthosConfig {
         model: p.model,
         baseUrl: p.baseUrl,
         apiVersion: p.apiVersion,
+        region: p.region,
+        awsProfile: p.awsProfile,
       };
     })
     .filter((p): p is ProviderConfig => p !== null);
@@ -4401,6 +4423,8 @@ function parseConfigYaml(src: string): EthosConfig {
             : undefined,
     baseUrl: kv.baseUrl,
     apiVersion: kv.apiVersion,
+    region: kv.region,
+    awsProfile: kv.awsProfile,
     // Lane 0 (D4) — a window is a positive integer token count; anything else
     // (zero, negative, non-numeric) is dropped so a typo cannot poison the
     // provider's maxContextTokens.

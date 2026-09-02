@@ -149,6 +149,9 @@ export function AuthStep() {
   const provider = PROVIDER_CATALOG.find((p) => p.id === answers.provider);
   const isDeviceAuth = provider?.authType === 'device-auth';
   const isSelfHosted = provider?.authType === 'self-hosted';
+  // Bedrock signs requests with SigV4 off the ambient AWS credential chain —
+  // there is no key to type, probe, or store.
+  const isIamRole = provider?.authType === 'iam-role';
   // Azure needs both an endpoint and an API key — the endpoint is the user's
   // resource URL (e.g. https://my-resource.openai.azure.com), not a default.
   const isAzure = answers.provider === 'azure';
@@ -165,7 +168,7 @@ export function AuthStep() {
   // W2.2 — provider-key probe phase machine (normal api-key path only; azure,
   // device-auth, and self-hosted keep their existing flow). The probe applies
   // the W1.2 liveness split: 401/403 → re-enter; unreachable → save-with-warning.
-  const probeEligible = !isAzure && !isDeviceAuth && !isSelfHosted;
+  const probeEligible = !isAzure && !isDeviceAuth && !isSelfHosted && !isIamRole;
   const [phase, setPhase] = useState<AuthPhase>('input');
   const [validation, setValidation] = useState<AuthValidation | null>(null);
 
@@ -261,6 +264,11 @@ export function AuthStep() {
         dispatch({ type: 'next', patch: { apiKey: apiKeyValue } });
         return;
       }
+      if (isIamRole) {
+        // No key at all — the AWS SDK resolves credentials at request time.
+        dispatch({ type: 'next', patch: { apiKey: '' } });
+        return;
+      }
       if (!isSelfHosted && !apiKeyValue) {
         setError('API key is required');
         return;
@@ -350,6 +358,28 @@ export function AuthStep() {
             ? '  Enter confirm   Esc back to provider'
             : '  Enter confirm   Esc edit endpoint'}
         </Text>
+      </Box>
+    );
+  }
+
+  if (isIamRole) {
+    return (
+      <Box flexDirection="column" gap={1}>
+        <Text color={DESIGN.textPrimary} bold>
+          {`${provider?.label ?? answers.provider} uses your AWS credentials:`}
+        </Text>
+        <Box flexDirection="column">
+          <Text color={DESIGN.textSecondary}>
+            {'  No API key — requests are signed from the AWS credential chain'}
+          </Text>
+          <Text color={DESIGN.textTertiary}>
+            {'  (IAM role, aws sso login, or a named profile via AWS_PROFILE).'}
+          </Text>
+          <Text color={DESIGN.textTertiary}>
+            {'  Region defaults to us-east-1 — set region: in ~/.ethos/config.yaml.'}
+          </Text>
+        </Box>
+        <Text color={DESIGN.textTertiary}>{'  Enter confirm   Esc back'}</Text>
       </Box>
     );
   }
