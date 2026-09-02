@@ -50,6 +50,8 @@ describe('GET /documents/download', () => {
           name: 'Writer',
           fs_reach: { workdir: '${ETHOS_HOME}/workspace/${self}' },
         } as PersonalityConfig,
+        // No `fs_reach` at all — Documents is unconfigured for it.
+        { id: 'drifter', name: 'Drifter' } as PersonalityConfig,
       ]),
       chatDefaults: { model: 'claude-test', provider: 'anthropic' },
     }).app;
@@ -72,13 +74,13 @@ describe('GET /documents/download', () => {
     app.request(`/documents/download?${query}`, { headers: { cookie } });
 
   it('401s without a credential', async () => {
-    const res = await app.request('/documents/download?path=notes.md');
+    const res = await app.request('/documents/download?root=0&path=notes.md');
     expect(res.status).toBe(401);
     expect((await res.json()) as { code: string }).toMatchObject({ code: 'UNAUTHORIZED' });
   });
 
   it('streams the file with attachment headers', async () => {
-    const res = await get('personality=writer&path=notes.md');
+    const res = await get('personality=writer&root=0&path=notes.md');
     expect(res.status).toBe(200);
     expect(res.headers.get('content-type')).toBe('text/markdown; charset=utf-8');
     expect(res.headers.get('content-length')).toBe('8');
@@ -88,7 +90,7 @@ describe('GET /documents/download', () => {
 
   it('encodes a non-ASCII filename', async () => {
     const res = await get(
-      `personality=writer&path=${encodeURIComponent('rapport financier — été.txt')}`,
+      `personality=writer&root=0&path=${encodeURIComponent('rapport financier — été.txt')}`,
     );
     expect(res.status).toBe(200);
     const disposition = res.headers.get('content-disposition') ?? '';
@@ -100,16 +102,36 @@ describe('GET /documents/download', () => {
 
   it('refuses traversal, absolute paths, and symlinks', async () => {
     for (const path of ['../../../etc/passwd', '/etc/passwd', 'link.txt']) {
-      const res = await get(`personality=writer&path=${encodeURIComponent(path)}`);
+      const res = await get(`personality=writer&root=0&path=${encodeURIComponent(path)}`);
       expect(res.status, path).toBe(403);
       expect((await res.json()) as { code: string }).toMatchObject({ code: 'FORBIDDEN' });
     }
   });
 
   it('400s without a path', async () => {
-    const res = await get('personality=writer');
+    const res = await get('personality=writer&root=0');
     expect(res.status).toBe(400);
     expect((await res.json()) as { code: string }).toMatchObject({ code: 'INVALID_INPUT' });
+  });
+
+  it('400s without a root', async () => {
+    const res = await get('personality=writer&path=notes.md');
+    expect(res.status).toBe(400);
+    expect((await res.json()) as { code: string }).toMatchObject({ code: 'INVALID_INPUT' });
+  });
+
+  it('400s for a root id the personality does not declare', async () => {
+    const res = await get('personality=writer&root=7&path=notes.md');
+    expect(res.status).toBe(400);
+    expect((await res.json()) as { code: string }).toMatchObject({ code: 'INVALID_INPUT' });
+  });
+
+  it('400s for a personality with no declared workdir', async () => {
+    const res = await get('personality=drifter&root=0&path=notes.md');
+    expect(res.status).toBe(400);
+    expect((await res.json()) as { code: string }).toMatchObject({
+      code: 'WORKDIR_NOT_CONFIGURED',
+    });
   });
 });
 

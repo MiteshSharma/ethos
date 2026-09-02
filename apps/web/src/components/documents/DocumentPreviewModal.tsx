@@ -16,12 +16,14 @@ import { DocumentPreviewBody, type PreviewContent } from './DocumentPreviewBody'
 
 interface Props {
   personalityId: string;
+  /** The declared root the entry was listed from — an id from `documents.root`. */
+  root: string;
   entry: DocumentEntry;
   onClose: () => void;
 }
 
-export function DocumentPreviewModal({ personalityId, entry, onClose }: Props) {
-  const href = documentDownloadHref(personalityId, entry.path);
+export function DocumentPreviewModal({ personalityId, root, entry, onClose }: Props) {
+  const href = documentDownloadHref(personalityId, root, entry.path);
   const plan = documentPreviewPlan(entry.name, entry.size);
   // Depend on the primitive, not on `plan` — a fresh object every render would
   // re-fetch the file on every render.

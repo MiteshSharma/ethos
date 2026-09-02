@@ -1,7 +1,7 @@
 // biome-ignore-all lint/suspicious/noTemplateCurlyInString: fs_reach substitution
 // tokens (`${ETHOS_HOME}` etc.) are literal markers resolved at runtime, not JS
 // template strings.
-import { join, resolve } from 'node:path';
+import { basename, join, resolve } from 'node:path';
 import type { PersonalityConfig } from '@ethosagent/types';
 
 /**
@@ -64,6 +64,31 @@ export function substitute(template: string, vars: FsReachVars): string {
   return out;
 }
 
+/**
+ * The RAW, unsubstituted `fs_reach.workdir` entries a personality declares, in
+ * declaration order. `[]` means "declares none" — including the `workdir: []`
+ * case, which is truthy as a bare value but declares nothing.
+ *
+ * Empty entries are dropped. `workdir: ''` is the established "clear this"
+ * convention (see the registry's update patch), and an empty entry that
+ * survived would `resolve('')` to the process's launch directory — reinstating,
+ * one array slot at a time, exactly the `process.cwd()` fallback the Documents
+ * surface exists without.
+ *
+ * Every consumer that reaches for `personality.fs_reach?.workdir` needs this
+ * `string | string[] | undefined` normalization, and each hand-rolled copy is a
+ * chance to silently read only the first entry where every entry matters (the
+ * constitution's `allowedMountRoots` check, an export bundle's disclosed
+ * reach). Callers that want the RESOLVED, substituted paths want
+ * `deriveFsReachPaths` (first entry only, the agent's single `${CWD}`) or
+ * `deriveDocumentsRoots` (every entry) instead.
+ */
+export function declaredWorkdirs(personality: PersonalityConfig): string[] {
+  const declared = personality.fs_reach?.workdir;
+  if (declared === undefined) return [];
+  return (Array.isArray(declared) ? declared : [declared]).filter(Boolean);
+}
+
 /** Trailing slashes are a prefix-matching artifact, not part of the identity. */
 const trimSlash = (path: string): string => (path.length > 1 ? path.replace(/\/+$/, '') : path);
 
@@ -84,6 +109,12 @@ function withWorkdir(paths: string[], workdir: string): string[] {
  * for the rest of the derivation — the workdir IS the personality's cwd, so
  * `${CWD}` in a read/write entry and the `cwd` entry in the defaults both mean
  * the workdir.
+ *
+ * `fs_reach.workdir` may declare MULTIPLE roots (`string[]`) for the Documents
+ * surface (see `deriveDocumentsRoots` below) — but this function keeps its
+ * existing single-root contract for the agent's own `${CWD}`/cwd purposes, so
+ * only the FIRST declared entry is used here. Callers that need every declared
+ * root (the Documents service) must call `deriveDocumentsRoots` instead.
  *
  * Declared `fs_reach.read` / `fs_reach.write` win when non-empty; each entry is
  * substituted. When a list is absent or empty the defaults apply:
@@ -107,7 +138,7 @@ export function deriveFsReachPaths(
   vars: FsReachVars,
 ): { read: string[]; write: string[]; workdir: string } {
   const reach = personality.fs_reach;
-  const declaredWorkdir = reach?.workdir;
+  const declaredWorkdir = declaredWorkdirs(personality)[0];
   const workdir = declaredWorkdir ? resolve(substitute(declaredWorkdir, vars)) : vars.cwd;
   const effective: FsReachVars = { ...vars, cwd: workdir };
 
@@ -143,7 +174,37 @@ export function deriveFsReachPaths(
  */
 export function personalityAssetDir(personality: PersonalityConfig, vars: FsReachVars): string {
   const { workdir } = deriveFsReachPaths(personality, vars);
-  return personality.fs_reach?.workdir
-    ? workdir
-    : join(vars.ethosHome, 'personalities', vars.self, 'files');
+  // First entry only, the same normalization `deriveFsReachPaths` applies.
+  const declaredWorkdir = declaredWorkdirs(personality)[0];
+  return declaredWorkdir ? workdir : join(vars.ethosHome, 'personalities', vars.self, 'files');
+}
+
+/**
+ * Every Documents root a personality declares, each substituted and resolved
+ * independently. Unlike `deriveFsReachPaths` (single `${CWD}`, first entry
+ * only), this is the derivation the Documents service needs: every declared
+ * `fs_reach.workdir` entry becomes its own browsable/writable root.
+ *
+ * Each entry substitutes against `vars` UNCHANGED — never against another
+ * entry's resolved path. A workdir entry referencing `${CWD}` would be
+ * self-referential (there is no "the" workdir once there can be several), so
+ * this deliberately does NOT do what `deriveFsReachPaths` does for its
+ * read/write lists (substituting against the *computed* workdir); every root
+ * is resolved the same way the single entry always was, independently of its
+ * siblings. In practice a workdir entry declaring `${CWD}` is unusual.
+ *
+ * Returns `[]` when `fs_reach.workdir` is unset — this is the "Documents
+ * unconfigured" case. Unlike `deriveFsReachPaths`, there is NO fallback to
+ * `vars.cwd` here: falling back would silently root Documents at the server
+ * process's launch directory, which is exactly what the Documents surface
+ * must not do (see `DocumentsService.resolve`).
+ */
+export function deriveDocumentsRoots(
+  personality: PersonalityConfig,
+  vars: FsReachVars,
+): Array<{ label: string; workdir: string }> {
+  return declaredWorkdirs(personality).map((template) => {
+    const workdir = resolve(substitute(template, vars));
+    return { label: basename(workdir), workdir };
+  });
 }

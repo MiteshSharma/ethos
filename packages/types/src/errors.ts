@@ -76,6 +76,10 @@ export type EthosErrorCode =
   | 'SESSION_NOT_FOUND'
   | 'PERSONALITY_EXISTS'
   | 'PERSONALITY_READ_ONLY'
+  // Documents (Documents upload + folders)
+  | 'WORKDIR_NOT_CONFIGURED'
+  | 'DOCUMENT_EXISTS'
+  | 'PAYLOAD_TOO_LARGE'
   // Catch-all
   | 'INTERNAL';
 

@@ -11,8 +11,9 @@ import { createHash, createHmac, randomBytes } from 'node:crypto';
 import { existsSync, lstatSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { ethosDir } from '@ethosagent/config';
+import { declaredWorkdirs } from '@ethosagent/core';
 import { createPersonalityRegistry } from '@ethosagent/personalities';
-import type { BundleManifest, ExportStamp } from '@ethosagent/types';
+import type { BundleManifest, ExportStamp, PersonalityConfig } from '@ethosagent/types';
 import { getStorage } from '../wiring';
 import { type Entry, writeTarGz } from './backup';
 
@@ -606,21 +607,19 @@ function buildBundleManifest(
   personalityDir: string,
   dataDir: string,
   entries: Entry[],
-  personality: {
-    toolset?: string[];
-    fs_reach?: { read?: string[]; write?: string[]; workdir?: string };
-    budgetCapUsd?: number;
-    mcp_servers?: string[];
-    plugins?: string[];
-  },
+  personality: PersonalityConfig,
   withMemory: boolean,
 ): BundleManifest {
   const toolset = personality.toolset ?? [];
-  const workdir = personality.fs_reach?.workdir;
+  // Every declared root is disclosed. A single one stays a bare string — the
+  // shape every bundle written before multi-root support carries — so an
+  // importer reading older and newer bundles sees no gratuitous change.
+  const workdirs = declaredWorkdirs(personality);
+  const workdir = workdirs.length === 1 ? workdirs[0] : workdirs.length > 1 ? workdirs : undefined;
   const fsReach: BundleManifest['declared']['fsReach'] = {
     read: personality.fs_reach?.read ?? [],
     write: personality.fs_reach?.write ?? [],
-    ...(workdir ? { workdir } : {}),
+    ...(workdir !== undefined ? { workdir } : {}),
   };
 
   // MCP servers

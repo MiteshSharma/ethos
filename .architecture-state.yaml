@@ -228,7 +228,7 @@ register_anchors:
     - { path: packages/core/src/scoped/scoped-attachments.ts, line: 22, contains: "a.ref === att.ref" }
 
   G-FS:
-    - { path: packages/core/src/fs-reach.ts, line: 105, contains: "export function deriveFsReachPaths" }
+    - { path: packages/core/src/fs-reach.ts, line: 136, contains: "export function deriveFsReachPaths" }
     - { path: packages/core/src/scoped/scoped-fs.ts, line: 102, contains: "private checkReach(" }
     - { path: packages/core/src/scoped/scoped-fs.ts, line: 136, contains: "through a symbolic link" }
     - { path: packages/storage-fs/src/scoped-storage.ts, line: 79, contains: "private check(rawPath" }

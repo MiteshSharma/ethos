@@ -399,9 +399,10 @@ const PersonalityCreateInput = z.object({
     .object({
       read: z.array(z.string()).optional(),
       write: z.array(z.string()).optional(),
-      /** Declared working directory. Tokens (`${ETHOS_HOME}`, `${self}`,
-       *  `${CWD}`) are stored verbatim and resolved at turn setup. */
-      workdir: z.string().optional(),
+      /** Declared working director(ies). Tokens (`${ETHOS_HOME}`, `${self}`,
+       *  `${CWD}`) are stored verbatim and resolved at turn setup. A list
+       *  declares several Documents roots; a bare string is one. */
+      workdir: z.union([z.string(), z.array(z.string())]).optional(),
     })
     .optional(),
   skill_evolution: z
@@ -442,13 +443,13 @@ const PersonalityUpdateInput = z.object({
   capabilities: z.array(z.string()).optional(),
   provider: ProviderIdSchema.or(z.literal('')).optional(),
   /** Sub-keys are shallow-merged onto the stored block, so a patch carrying
-   *  only `read`/`write` leaves an existing `workdir` in place. `''` clears
-   *  the workdir. */
+   *  only `read`/`write` leaves an existing `workdir` in place. `''` (or an
+   *  empty list) clears the workdir; a list declares several Documents roots. */
   fs_reach: z
     .object({
       read: z.array(z.string()).optional(),
       write: z.array(z.string()).optional(),
-      workdir: z.string().optional(),
+      workdir: z.union([z.string(), z.array(z.string())]).optional(),
     })
     .optional(),
   /** Idle-time dreaming controls. `enable` toggles dreaming; idleMinutes /
@@ -4078,22 +4079,44 @@ const DocumentEntrySchema = z.object({
 /** Omitted `personalityId` means the configured default personality. */
 const DocumentsPersonalityInput = z.object({ personalityId: z.string().min(1).optional() });
 
-const DocumentsRootOutput = z.object({ root: z.string(), personalityId: z.string() });
+/**
+ * Every root the personality declares. `id` is opaque to the client — feed it
+ * back as `root` on list/delete/createFolder and on the download/upload routes.
+ *
+ * An EMPTY `roots` array is the "Documents unconfigured" answer, not an error:
+ * the personality declares no `fs_reach.workdir` at all, so there is nothing to
+ * browse. Every other procedure fails with `WORKDIR_NOT_CONFIGURED` in that
+ * state; `root` is the discovery call that lets the UI say so plainly.
+ */
+const DocumentsRootOutput = z.object({
+  roots: z.array(z.object({ id: z.string(), path: z.string() })),
+  personalityId: z.string(),
+});
 
-const DocumentsListInput = DocumentsPersonalityInput.extend({
+/** Which declared root the operation addresses — an `id` from `documents.root`. */
+const DocumentsRootInput = DocumentsPersonalityInput.extend({ root: z.string().min(1) });
+
+const DocumentsListInput = DocumentsRootInput.extend({
   /** Subdirectory relative to the root. Omitted = the root itself. */
   path: z.string().optional(),
 });
 const DocumentsListOutput = z.object({ entries: z.array(DocumentEntrySchema) });
 
-const DocumentsDeleteInput = DocumentsPersonalityInput.extend({ path: z.string().min(1) });
+const DocumentsDeleteInput = DocumentsRootInput.extend({ path: z.string().min(1) });
 const DocumentsDeleteOutput = z.object({ ok: z.literal(true) });
+
+/** Creates exactly ONE directory — the parent must already exist. */
+const DocumentsCreateFolderInput = DocumentsRootInput.extend({ path: z.string().min(1) });
 
 /** @experimental */
 const documents = {
   root: oc.input(DocumentsPersonalityInput).output(DocumentsRootOutput),
   list: oc.input(DocumentsListInput).output(DocumentsListOutput),
   delete: oc.input(DocumentsDeleteInput).output(DocumentsDeleteOutput),
+  // No `upload` here on purpose — bytes never travel over RPC (see the
+  // namespace note above). Upload is `POST /documents/upload`, a raw
+  // cookie-authed Hono route, exactly as download is a raw GET.
+  createFolder: oc.input(DocumentsCreateFolderInput).output(DocumentEntrySchema),
 };
 
 // ---------------------------------------------------------------------------

@@ -8,6 +8,7 @@ import {
   resolveModelDisplay,
 } from '@ethosagent/types';
 import { parseLivingSoul } from './living-soul';
+import { normalizeWorkdir } from './workdirs';
 
 // The generated character sheet — the "tight character sheet" promise from
 // SOUL.md made into a real artifact. One Markdown screen per personality:
@@ -409,6 +410,10 @@ function guaranteeRows(
   const reach = config.fs_reach;
   const readCount = reach?.read?.length ?? 0;
   const writeCount = reach?.write?.length ?? 0;
+  // `, `-joined, the same form `renderConfigYaml` writes and `parseCsv` reads
+  // back. An empty array declares nothing, so it reads as an absent workdir
+  // rather than a dangling label.
+  const workdirs = normalizeWorkdir(reach?.workdir);
   const fs: GuaranteeRow = reach
     ? {
         status: 'narrowed',
@@ -416,7 +421,9 @@ function guaranteeRows(
           `declared reach: ${readCount} read / ${writeCount} write prefix${
             readCount + writeCount === 1 ? '' : 'es'
           } (see Filesystem reach)`,
-          reach.workdir ? `workdir ${reach.workdir}` : '',
+          workdirs.length > 0
+            ? `workdir${workdirs.length === 1 ? '' : 's'} ${workdirs.join(', ')}`
+            : '',
         ]),
       }
     : {
@@ -788,7 +795,12 @@ export function renderCharacterSheet(
       '- (default — read: own directory, ~/.ethos/skills/, working directory; write: own directory, working directory)',
     );
   }
-  if (reach?.workdir) lines.push(`- Workdir: ${reach.workdir}`);
+  // Same `, `-joined form and same "empty array declares nothing" rule as the
+  // G-FS row above; the label pluralises the way the web sheet's does.
+  const workdirs = normalizeWorkdir(reach?.workdir);
+  if (workdirs.length > 0) {
+    lines.push(`- Workdir${workdirs.length === 1 ? '' : 's'}: ${workdirs.join(', ')}`);
+  }
 
   // §4.7 — the register's per-personality state, directly under the reach it
   // summarises and BEFORE the conditional sections, so adding a posture or a

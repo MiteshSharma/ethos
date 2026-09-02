@@ -1,4 +1,5 @@
 import { join } from 'node:path';
+import { declaredWorkdirs } from '@ethosagent/core';
 import {
   type CharacterSheetBoundary,
   type CharacterSheetModelFit,
@@ -766,6 +767,7 @@ function toWirePersonalitySkill(record: PersonalitySkillRecord): PersonalitySkil
 
 function toWire(d: DescribedPersonality): Personality {
   const c = d.config;
+  const workdirs = declaredWorkdirs(c);
   return {
     id: c.id,
     name: c.name,
@@ -781,7 +783,17 @@ function toWire(d: DescribedPersonality): Personality {
       ? {
           read: c.fs_reach.read ?? null,
           write: c.fs_reach.write ?? null,
-          workdir: c.fs_reach.workdir ?? null,
+          // EVERY declared root, in declaration order — not just the first.
+          // The web config editor writes back what it was given on every save,
+          // so surfacing one entry of several silently collapsed a multi-root
+          // personality to a single root the next time anyone pressed Save.
+          // `deriveFsReachPaths`'s first-entry-only normalization is a
+          // different question (the agent's single `${CWD}`) and stays where
+          // it is.
+          //
+          // `null` rather than `[]` for "declares none", matching every other
+          // nullable list on this wire type.
+          workdir: workdirs.length > 0 ? workdirs : null,
         }
       : null,
     ...(c.dreaming

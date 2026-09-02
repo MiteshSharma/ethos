@@ -101,9 +101,17 @@ export const PersonalitySchema = z.object({
     .object({
       read: z.array(z.string()).nullable(),
       write: z.array(z.string()).nullable(),
-      /** Declared working directory, substitution tokens unresolved. null =
-       *  undeclared (the agent falls back to the process working directory). */
-      workdir: z.string().nullable(),
+      /**
+       * Every declared working directory, substitution tokens unresolved, in
+       * declaration order. `null` = undeclared.
+       *
+       * A LIST, not a string, because `fs_reach.workdir` accepts several roots
+       * (the Documents surface browses each as its own root) and this is the
+       * shape the config editor round-trips. Surfacing only the first entry
+       * here made saving a multi-root personality from the web UI collapse it
+       * to one root — the editor writes back what it was given.
+       */
+      workdir: z.array(z.string()).nullable(),
     })
     .nullable(),
   /** Idle-time dreaming state. Optional (omitted when unset) so the editor

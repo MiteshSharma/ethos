@@ -43,6 +43,18 @@ function substitute(
     .replace(/\$\{CWD\}/g, vars.cwd);
 }
 
+/**
+ * Every RAW declared `fs_reach.workdir` entry. Mirrors `declaredWorkdirs` in
+ * `packages/core/src/fs-reach.ts` (replicated, not imported, for the same layer
+ * reason as `substitute` above — this extension depends on `@ethosagent/types`
+ * alone).
+ */
+function declaredWorkdirs(p: PersonalityConfig): string[] {
+  const declared = p.fs_reach?.workdir;
+  if (declared === undefined) return [];
+  return Array.isArray(declared) ? declared : [declared];
+}
+
 function isPlainObject(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
 }
@@ -248,10 +260,13 @@ export function enforceConstitution(args: EnforceArgs): { enforcement: Constitut
 
     // (1d) A2 fs_reach within allowedMountRoots. workdir counts: it is injected
     // into both derived reach lists, so an unbounded workdir is unbounded reach.
+    // EVERY declared workdir counts — `workdir` may be a list (the Documents
+    // surface browses each entry as its own root), and checking only the first
+    // would leave every sibling root unbounded.
     const reachPaths = [
       ...(p.fs_reach?.read ?? []),
       ...(p.fs_reach?.write ?? []),
-      ...(p.fs_reach?.workdir ? [p.fs_reach.workdir] : []),
+      ...declaredWorkdirs(p),
     ];
     if (
       reachPaths.length > 0 &&

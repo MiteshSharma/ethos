@@ -3,8 +3,12 @@ import { Empty, Popconfirm, Spin, Table, Tag, Tooltip, Typography } from 'antd';
 import { useEffect, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import { DocumentPreviewModal } from '../components/documents/DocumentPreviewModal';
+import { DocumentsUnconfigured } from '../components/documents/DocumentsUnconfigured';
+import { NewFolderPrompt } from '../components/documents/NewFolderPrompt';
+import { RootSwitcher } from '../components/documents/RootSwitcher';
+import { UploadDocumentModal } from '../components/documents/UploadDocumentModal';
 import { PersonalitySelect } from '../components/personality/PersonalitySelect';
-import { useDocumentDelete } from '../features/documents/api/mutations';
+import { useCreateFolder, useDocumentDelete } from '../features/documents/api/mutations';
 import {
   type DocumentEntry,
   useDocumentsList,
@@ -15,7 +19,10 @@ import { formatBytes } from '../lib/attachments';
 import {
   documentCrumbs,
   documentDownloadHref,
+  documentRootOptions,
   documentRowActions,
+  joinDocumentPath,
+  newFolderNameError,
   sortDocumentEntries,
 } from '../lib/documents';
 import { resolvePersonalityId } from '../lib/favouritePersonality';
@@ -97,18 +104,35 @@ export function Documents() {
 
 function Browser({ personalityId }: { personalityId: string }) {
   const [path, setPath] = useState('');
+  // Which declared root is being browsed. `null` means "whatever the first
+  // declared root turns out to be" — the roots are not known until
+  // `documents.root` answers, and defaulting there rather than in an effect
+  // avoids a render pass against a root that does not exist.
+  const [selectedRoot, setSelectedRoot] = useState<string | null>(null);
   // The row being previewed. Rendered conditionally rather than kept mounted
   // with `open={false}` so closing unmounts the modal, which is what revokes
   // any object URL it created.
   const [preview, setPreview] = useState<DocumentEntry | null>(null);
+  const [uploadOpen, setUploadOpen] = useState(false);
+  const [folderOpen, setFolderOpen] = useState(false);
+  const [folderName, setFolderName] = useState('');
+  const [folderError, setFolderError] = useState<string | null>(null);
 
   const rootQuery = useDocumentsRoot(personalityId);
-  const listQuery = useDocumentsList(personalityId, path);
-  const deleteMut = useDocumentDelete(personalityId);
+  const roots = rootQuery.data?.roots ?? [];
+  // A stale id (the personality's config changed under us) falls back to the
+  // first declared root rather than asking for a root the backend will refuse.
+  const activeRoot = roots.find((r) => r.id === selectedRoot) ?? roots[0] ?? null;
+  const rootId = activeRoot?.id ?? '';
 
-  const root = rootQuery.data?.root ?? '';
+  const listQuery = useDocumentsList(personalityId, activeRoot ? rootId : null, path);
+  const deleteMut = useDocumentDelete(personalityId, rootId);
+  const createFolder = useCreateFolder(personalityId, rootId);
+
+  const root = activeRoot?.path ?? '';
+  const rootLabel = documentRootOptions(roots).find((o) => o.id === rootId)?.label ?? 'root';
   const entries = sortDocumentEntries(listQuery.data?.entries ?? []);
-  const crumbs = documentCrumbs(path, basename(root) || 'root');
+  const crumbs = documentCrumbs(path, rootLabel || 'root');
 
   if (rootQuery.isLoading) {
     return (
@@ -123,6 +147,33 @@ function Browser({ personalityId }: { personalityId: string }) {
         Failed to resolve the workdir: {(rootQuery.error as Error).message}
       </Typography.Text>
     );
+  }
+  // An empty roots list is the "unconfigured" answer, not an error and not an
+  // empty folder — every other Documents call refuses with
+  // WORKDIR_NOT_CONFIGURED in this state, so there is nothing to browse.
+  if (!activeRoot) {
+    return (
+      <DocumentsUnconfigured
+        personalityId={personalityId}
+        identityHref={`/p/${personalityId}/identity`}
+      />
+    );
+  }
+
+  function submitFolder() {
+    const invalid = newFolderNameError(folderName);
+    if (invalid) {
+      setFolderError(invalid);
+      return;
+    }
+    setFolderError(null);
+    createFolder.mutate(joinDocumentPath(path, folderName.trim()), {
+      onSuccess: () => {
+        setFolderOpen(false);
+        setFolderName('');
+      },
+      onError: (err) => setFolderError((err as Error).message),
+    });
   }
 
   const columns = [
@@ -192,7 +243,7 @@ function Browser({ personalityId }: { personalityId: string }) {
             {actions.canDownload ? (
               <a
                 className="documents-action"
-                href={documentDownloadHref(personalityId, entry.path)}
+                href={documentDownloadHref(personalityId, rootId, entry.path)}
                 download={entry.name}
               >
                 Download
@@ -220,8 +271,35 @@ function Browser({ personalityId }: { personalityId: string }) {
 
   return (
     <>
+      <RootSwitcher
+        roots={roots}
+        value={rootId}
+        onChange={(id) => {
+          setSelectedRoot(id);
+          // The browsed path belongs to the root it was browsed in — carrying
+          // it across would point at a subdirectory the new root need not have.
+          setPath('');
+          setFolderOpen(false);
+        }}
+      />
+
       <div className="documents-rootline">
         <span className="documents-mono">{root}</span>
+        <div className="documents-toolbar">
+          <button
+            type="button"
+            className="documents-action"
+            onClick={() => {
+              setFolderError(null);
+              setFolderOpen(true);
+            }}
+          >
+            New folder
+          </button>
+          <button type="button" className="documents-action" onClick={() => setUploadOpen(true)}>
+            Upload
+          </button>
+        </div>
       </div>
 
       <nav className="documents-breadcrumb" aria-label="Directory path">
@@ -240,6 +318,27 @@ function Browser({ personalityId }: { personalityId: string }) {
           ),
         )}
       </nav>
+
+      {folderOpen ? (
+        <div className="documents-newfolder-slot">
+          <NewFolderPrompt
+            value={folderName}
+            onChange={(value) => {
+              setFolderName(value);
+              setFolderError(null);
+            }}
+            onSubmit={submitFolder}
+            onCancel={() => {
+              setFolderOpen(false);
+              setFolderName('');
+              setFolderError(null);
+            }}
+            busy={createFolder.isPending}
+            error={folderError}
+            parentLabel={path}
+          />
+        </div>
+      ) : null}
 
       {/* The breadcrumb stays mounted through a directory change — it is the
           only way back to the root, so it must not vanish behind a spinner. */}
@@ -290,19 +389,23 @@ function Browser({ personalityId }: { personalityId: string }) {
         <DocumentPreviewModal
           key={preview.path}
           personalityId={personalityId}
+          root={rootId}
           entry={preview}
           onClose={() => setPreview(null)}
         />
       ) : null}
+
+      {uploadOpen ? (
+        <UploadDocumentModal
+          personalityId={personalityId}
+          root={rootId}
+          rootLabel={rootLabel}
+          initialPath={path}
+          onClose={() => setUploadOpen(false)}
+        />
+      ) : null}
     </>
   );
-}
-
-/** Last segment of an absolute path — the root crumb's label. */
-function basename(absolutePath: string): string {
-  const trimmed = absolutePath.replace(/\/+$/, '');
-  const idx = trimmed.lastIndexOf('/');
-  return idx === -1 ? trimmed : trimmed.slice(idx + 1);
 }
 
 /** `YYYY-MM-DD HH:MM` in local time — same shape the Memory timeline uses. */

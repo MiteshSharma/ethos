@@ -56,6 +56,7 @@ import { PersonalityMark } from '../components/ui/PersonalityMark';
 import { PersonalityRingAvatar } from '../components/ui/PersonalityRingAvatar';
 import { useCreateFlag } from '../hooks/useCreateFlag';
 import { toolAffordance } from '../lib/execution-posture';
+import { wizardFsReach } from '../lib/personalityFsReach';
 import {
   CATEGORY_META,
   CATEGORY_ORDER,
@@ -394,7 +395,7 @@ interface WizardState {
   capabilities: string[];
   fsReachRead: string[];
   fsReachWrite: string[];
-  fsReachWorkdir: string;
+  fsReachWorkdir: string[];
   toolset: string[];
   soulMd: string;
   skills: string[];
@@ -439,7 +440,7 @@ function CreateWizard({ existingIds, onClose }: { existingIds: Set<string>; onCl
     capabilities: [],
     fsReachRead: [],
     fsReachWrite: [],
-    fsReachWorkdir: '',
+    fsReachWorkdir: [],
     toolset: ['memory_read', 'memory_write', 'session_search', 'cron'],
     soulMd: SOUL_TEMPLATE,
     skills: [],
@@ -470,17 +471,7 @@ function CreateWizard({ existingIds, onClose }: { existingIds: Set<string>; onCl
             : {}),
         ...(state.provider ? { provider: state.provider as ProviderId } : {}),
         ...(state.capabilities.length > 0 ? { capabilities: state.capabilities } : {}),
-        ...(state.fsReachRead.length > 0 ||
-        state.fsReachWrite.length > 0 ||
-        state.fsReachWorkdir !== ''
-          ? {
-              fs_reach: {
-                read: state.fsReachRead,
-                write: state.fsReachWrite,
-                ...(state.fsReachWorkdir ? { workdir: state.fsReachWorkdir } : {}),
-              },
-            }
-          : {}),
+        ...wizardFsReach(state),
         ...(state.plugins.length > 0 ? { plugins: state.plugins } : {}),
         toolset: state.toolset,
         soulMd: state.soulMd,
@@ -1298,11 +1289,14 @@ function WizardConfigTab({
           onChange={(val) => setState((s) => ({ ...s, fsReachWrite: val }))}
         />
       </Form.Item>
-      <Form.Item label="Working directory" extra={FS_REACH_WORKDIR_HELP}>
-        <Input
+      <Form.Item label="Working directories" extra={FS_REACH_WORKDIR_HELP}>
+        <Select
+          mode="tags"
+          allowClear
           placeholder={FS_REACH_WORKDIR_PLACEHOLDER}
+          tokenSeparators={[',']}
           value={state.fsReachWorkdir}
-          onChange={(e) => setState((s) => ({ ...s, fsReachWorkdir: e.target.value }))}
+          onChange={(val) => setState((s) => ({ ...s, fsReachWorkdir: val }))}
         />
       </Form.Item>
     </Form>
@@ -1809,7 +1803,7 @@ const FS_REACH_READ_HELP = 'Directories this personality may read from.';
 const FS_REACH_WRITE_HELP = 'Directories this personality may write to.';
 
 const FS_REACH_WORKDIR_HELP =
-  'The one folder bare filenames land in — the output home for this personality, and what the Documents tab lists for download and deletion. Recommended: without it, output goes to whatever directory the server was started in.';
+  'Where bare filenames land — the output home for this personality, and what the Documents tab lists for download and deletion. Declare several to give Documents several roots; the first is also the agent’s own working directory. Recommended: without one, the Documents tab has nothing to show.';
 
 export function ConfigEditor({ id, personality }: { id: string; personality: Personality }) {
   const qc = useQueryClient();
@@ -1825,7 +1819,7 @@ export function ConfigEditor({ id, personality }: { id: string; personality: Per
     capabilities: string[];
     fsReachRead: string[];
     fsReachWrite: string[];
-    fsReachWorkdir: string;
+    fsReachWorkdir: string[];
     dreaming: boolean;
     dreamingIdleMinutes: number;
     dreamingMaxPerDay: number;
@@ -1874,7 +1868,7 @@ export function ConfigEditor({ id, personality }: { id: string; personality: Per
       capabilities: personality.capabilities ?? [],
       fsReachRead: personality.fs_reach?.read ?? [],
       fsReachWrite: personality.fs_reach?.write ?? [],
-      fsReachWorkdir: personality.fs_reach?.workdir ?? '',
+      fsReachWorkdir: personality.fs_reach?.workdir ?? [],
       dreaming: personality.dreaming?.enable ?? false,
       dreamingIdleMinutes: personality.dreaming?.idleMinutes ?? 60,
       dreamingMaxPerDay: personality.dreaming?.maxPerDay ?? 1,
@@ -1920,7 +1914,7 @@ export function ConfigEditor({ id, personality }: { id: string; personality: Per
       capabilities: string[];
       fsReachRead: string[];
       fsReachWrite: string[];
-      fsReachWorkdir: string;
+      fsReachWorkdir: string[];
       dreaming: boolean;
       dreamingIdleMinutes: number;
       dreamingMaxPerDay: number;
@@ -1956,9 +1950,13 @@ export function ConfigEditor({ id, personality }: { id: string; personality: Per
         model,
         provider: values.provider || '',
         capabilities: values.capabilities,
-        // `workdir` is always sent, empty string included: the registry
+        // `workdir` is always sent, the empty LIST included: the registry
         // shallow-merges fs_reach sub-keys, so omitting it would preserve the
         // stored value and make the field impossible to clear from here.
+        //
+        // A list, not a string. The editor round-trips every declared root, so
+        // saving a multi-root personality from this form no longer collapses
+        // it to the first one.
         fs_reach: {
           read: values.fsReachRead,
           write: values.fsReachWrite,
@@ -2021,7 +2019,7 @@ export function ConfigEditor({ id, personality }: { id: string; personality: Per
           capabilities: values.capabilities ?? [],
           fsReachRead: values.fsReachRead ?? [],
           fsReachWrite: values.fsReachWrite ?? [],
-          fsReachWorkdir: values.fsReachWorkdir ?? '',
+          fsReachWorkdir: values.fsReachWorkdir ?? [],
           dreaming: values.dreaming ?? false,
           dreamingIdleMinutes: values.dreamingIdleMinutes ?? 60,
           dreamingMaxPerDay: values.dreamingMaxPerDay ?? 1,
@@ -2349,8 +2347,13 @@ export function ConfigEditor({ id, personality }: { id: string; personality: Per
       <Form.Item label="Write paths" name="fsReachWrite" extra={FS_REACH_WRITE_HELP}>
         <Select mode="tags" allowClear placeholder="e.g. /data/output" tokenSeparators={[',']} />
       </Form.Item>
-      <Form.Item label="Working directory" name="fsReachWorkdir" extra={FS_REACH_WORKDIR_HELP}>
-        <Input placeholder={FS_REACH_WORKDIR_PLACEHOLDER} />
+      <Form.Item label="Working directories" name="fsReachWorkdir" extra={FS_REACH_WORKDIR_HELP}>
+        <Select
+          mode="tags"
+          allowClear
+          placeholder={FS_REACH_WORKDIR_PLACEHOLDER}
+          tokenSeparators={[',']}
+        />
       </Form.Item>
       <Form.Item>
         <Button type="primary" htmlType="submit" loading={mut.isPending}>

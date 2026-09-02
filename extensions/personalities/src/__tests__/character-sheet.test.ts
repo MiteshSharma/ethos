@@ -746,3 +746,86 @@ describe('renderCharacterSheet — ## Boundary section (§4.7)', () => {
     expect(row(sheet, 'G-CHAN')).toContain('unconfigured platform is ungated');
   });
 });
+
+describe('renderCharacterSheet — fs_reach.workdir', () => {
+  // `fs_reach.workdir` widened from `string` to `string | string[]`
+  // (plan/phases/documents-upload-and-folders.md). Both places the sheet names
+  // it used to interpolate the raw value, which turns a list into
+  // `/srv/a,/srv/b` via `Array.prototype.toString` — no space, and
+  // inconsistent with the `, `-joined form `renderConfigYaml` writes and
+  // `parseCsv` reads back. An empty list declares nothing, and used to render
+  // a dangling label because `[]` is truthy.
+  const base: PersonalityConfig = { id: 'writer', name: 'Writer' };
+  const soul = '# Writer\n\nA writer.\n';
+
+  /** The `- Workdir(s): …` line of `## Filesystem reach`, or `null`. */
+  function workdirLine(sheet: string): string | null {
+    return sheet.split('\n').find((l) => l.startsWith('- Workdir')) ?? null;
+  }
+
+  /** The G-FS register row, which repeats the workdir in its detail cell. */
+  function gfsRow(sheet: string): string {
+    const line = sheet.split('\n').find((l) => l.startsWith('| G-FS '));
+    if (!line) throw new Error('no G-FS row in the sheet');
+    return line;
+  }
+
+  it('renders a single workdir as the bare path it always did', () => {
+    const sheet = renderCharacterSheet(
+      { ...base, fs_reach: { read: ['/srv/app'], write: ['/srv/app'], workdir: '/srv/app' } },
+      soul,
+    );
+    expect(workdirLine(sheet)).toBe('- Workdir: /srv/app');
+    expect(gfsRow(sheet)).toContain('workdir /srv/app');
+  });
+
+  it('renders a one-entry LIST identically to the bare string form', () => {
+    const sheet = renderCharacterSheet(
+      { ...base, fs_reach: { read: ['/srv/app'], write: ['/srv/app'], workdir: ['/srv/app'] } },
+      soul,
+    );
+    expect(workdirLine(sheet)).toBe('- Workdir: /srv/app');
+    expect(gfsRow(sheet)).toContain('workdir /srv/app');
+  });
+
+  it('joins several workdirs with ", " and pluralises the label', () => {
+    const sheet = renderCharacterSheet(
+      {
+        ...base,
+        fs_reach: { read: ['/srv/a'], write: ['/srv/a'], workdir: ['/srv/a', '/srv/b'] },
+      },
+      soul,
+    );
+    // The form `renderConfigYaml` writes and `parseCsv` round-trips — NOT
+    // `Array.prototype.toString`'s comma-with-no-space.
+    expect(workdirLine(sheet)).toBe('- Workdirs: /srv/a, /srv/b');
+    expect(sheet).not.toContain('/srv/a,/srv/b');
+    expect(gfsRow(sheet)).toContain('workdirs /srv/a, /srv/b');
+  });
+
+  it('treats an empty list as undeclared — no dangling label', () => {
+    const sheet = renderCharacterSheet(
+      { ...base, fs_reach: { read: ['/srv/a'], write: ['/srv/a'], workdir: [] } },
+      soul,
+    );
+    expect(workdirLine(sheet)).toBeNull();
+    expect(gfsRow(sheet)).not.toContain('workdir');
+  });
+
+  it("drops empty entries, the same way the `workdir: ''` clear convention does", () => {
+    const sheet = renderCharacterSheet(
+      { ...base, fs_reach: { read: ['/srv/a'], write: ['/srv/a'], workdir: ['', '/srv/b'] } },
+      soul,
+    );
+    expect(workdirLine(sheet)).toBe('- Workdir: /srv/b');
+  });
+
+  it('omits the line entirely when no workdir is declared', () => {
+    const sheet = renderCharacterSheet(
+      { ...base, fs_reach: { read: ['/srv/a'], write: ['/srv/a'] } },
+      soul,
+    );
+    expect(workdirLine(sheet)).toBeNull();
+    expect(sheet).not.toContain('undefined');
+  });
+});

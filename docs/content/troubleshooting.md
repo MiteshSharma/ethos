@@ -344,6 +344,9 @@ The full list of registered codes. Every code shipped in `@ethosagent/types` `Et
 | `NOT_FOUND` | A web API resource id does not resolve. | Refresh the list and re-select. |
 | `NOT_CONFIGURED` | The server was started without a piece the route needs (LLM, storage, memory). | Restart the server with that component configured. |
 | `SESSION_NOT_FOUND` | The session id passed to the web API does not exist. | Refresh the session list. |
+| `WORKDIR_NOT_CONFIGURED` | The personality has no declared `fs_reach.workdir`, so Documents has no root to browse or write to. | Set `fs_reach.workdir` in the personality's `config.yaml`. |
+| `DOCUMENT_EXISTS` | A Documents upload targeted a path that already has a file, and `overwrite` was not set. | Pick a different filename, or retry with overwrite enabled. |
+| `PAYLOAD_TOO_LARGE` | An upload body exceeded the route's size cap (100MB for a Documents upload). | Upload a smaller file. |
 | `INTERNAL` | An unexpected error escaped to the surface. | Re-run. If repeated, file an issue with the printed `details`. |
 
 ## Getting help {#getting-help}

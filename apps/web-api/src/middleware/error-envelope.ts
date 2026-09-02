@@ -39,6 +39,9 @@ const STATUS_BY_CODE: Partial<Record<EthosErrorCode, number>> = {
   SKILL_EXISTS: 409,
   PERSONALITY_EXISTS: 409,
   PERSONALITY_READ_ONLY: 403,
+  WORKDIR_NOT_CONFIGURED: 400,
+  DOCUMENT_EXISTS: 409,
+  PAYLOAD_TOO_LARGE: 413,
   PROVIDER_AUTH_FAILED: 502,
   LLM_ERROR: 502,
   STREAM_TIMEOUT: 504,
@@ -71,7 +74,7 @@ export function errorHandler(err: Error, c: Context): Response {
   if (isEthosError(err)) {
     return c.json(
       { ...toEnvelope(err), ...(requestId ? { requestId } : {}) },
-      statusFor(err.code) as 400 | 401 | 403 | 404 | 409 | 500 | 502 | 504,
+      statusFor(err.code) as 400 | 401 | 403 | 404 | 409 | 413 | 500 | 502 | 504,
     );
   }
   // Anything else is a bug (uncaught raw Error). Log the full error server-side

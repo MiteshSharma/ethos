@@ -839,8 +839,12 @@ export async function runPersonalityImport(argv: string[]): Promise<void> {
       // A declared workdir is read AND write reachable, so it belongs in the
       // reach the operator is being asked to trust — the counts above do not
       // include it.
-      if (manifest.declared.fsReach.workdir) {
-        console.log(`    Workdir:     ${manifest.declared.fsReach.workdir} (read + write)`);
+      // A bundle may disclose several workdirs; print each on its own line so
+      // an operator reads the full grant rather than a squashed join.
+      const declaredWorkdir = manifest.declared.fsReach.workdir;
+      const workdirs = declaredWorkdir === undefined ? [] : [declaredWorkdir].flat();
+      for (const workdir of workdirs) {
+        console.log(`    Workdir:     ${workdir} (read + write)`);
       }
       console.log(`    Toolset:     ${manifest.declared.toolset.length} tool(s)`);
       if (manifest.mcpServers.length > 0) {

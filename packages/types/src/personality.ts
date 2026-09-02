@@ -375,10 +375,18 @@ export interface PersonalityConfig {
    * working directory is the process cwd and read/write derive exactly as
    * before.
    *
-   * Counts as ONE field for the schema-freeze gate (the nested shape is
-   * a leaf type).
+   * `workdir` accepts a single path OR an array of paths. An array declares
+   * MULTIPLE Documents roots — every entry becomes its own top-level root in
+   * the Documents surface (`apps/web-api/src/services/documents.service.ts`),
+   * each with its own independent containment boundary. `${CWD}` substitution
+   * — both for this personality's own agent working directory and for the
+   * `${CWD}` token injected into `read`/`write` entries — uses ONLY the FIRST
+   * declared entry; later entries exist for Documents only and never become
+   * the agent's cwd. This is a WIDENING of an existing field's type, not a
+   * new field, so it still counts as ONE field for the schema-freeze gate
+   * (the nested shape is a leaf type).
    */
-  fs_reach?: { read?: string[]; write?: string[]; workdir?: string };
+  fs_reach?: { read?: string[]; write?: string[]; workdir?: string | string[] };
   /**
    * MCP servers this personality can reach. Server configs stay global in
    * ~/.ethos/mcp.json; this is a per-role allowlist keyed by server name.

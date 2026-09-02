@@ -95,7 +95,7 @@ describe('personalities RPC — fs_reach.workdir', () => {
     expect(await reachOf(res)).toEqual({
       read: ['/data'],
       write: ['/data/out'],
-      workdir: WORKDIR,
+      workdir: [WORKDIR],
     });
     expect(await configYaml()).toContain(`fs_reach.workdir: ${WORKDIR}`);
   });
@@ -113,9 +113,76 @@ describe('personalities RPC — fs_reach.workdir', () => {
     expect(await reachOf(res)).toEqual({
       read: ['/data', '/more'],
       write: ['/data/out'],
-      workdir: WORKDIR,
+      workdir: [WORKDIR],
     });
     expect(await configYaml()).toContain(`fs_reach.workdir: ${WORKDIR}`);
+  });
+
+  // The narrowing this suite exists to prevent, in its multi-root form: the
+  // wire used to surface only the FIRST declared workdir while the config
+  // editor sent `workdir` back on every save, so opening a two-root
+  // personality in the editor and pressing Save silently deleted the second
+  // root. Both halves are asserted — what comes back, and what survives a
+  // round trip through a save that never touched the field.
+  it('surfaces every declared workdir, not just the first', async () => {
+    const res = await call('create', {
+      id: 'writer',
+      name: 'Writer',
+      toolset: ['write_file'],
+      soulMd: '# Writer\n',
+      fs_reach: { read: ['/data'], write: ['/data/out'], workdir: [WORKDIR, '/srv/shared'] },
+    });
+    expect(res.status).toBe(200);
+    expect(await reachOf(res)).toEqual({
+      read: ['/data'],
+      write: ['/data/out'],
+      workdir: [WORKDIR, '/srv/shared'],
+    });
+    expect(await configYaml()).toContain(`fs_reach.workdir: ${WORKDIR}, /srv/shared`);
+  });
+
+  it('a multi-root personality survives a save from the config editor', async () => {
+    expect(
+      (
+        await call('create', {
+          id: 'writer',
+          name: 'Writer',
+          toolset: ['write_file'],
+          soulMd: '# Writer\n',
+          fs_reach: { read: ['/data'], write: ['/data/out'], workdir: [WORKDIR, '/srv/shared'] },
+        })
+      ).status,
+    ).toBe(200);
+
+    // Exactly what the editor sends: the whole fs_reach block rebuilt from the
+    // form, `workdir` included, echoing back what the wire handed it.
+    const res = await call('update', {
+      id: 'writer',
+      fs_reach: { read: ['/data'], write: ['/data/out'], workdir: [WORKDIR, '/srv/shared'] },
+    });
+    expect(res.status).toBe(200);
+    expect(await reachOf(res)).toEqual({
+      read: ['/data'],
+      write: ['/data/out'],
+      workdir: [WORKDIR, '/srv/shared'],
+    });
+    expect(await configYaml()).toContain(`fs_reach.workdir: ${WORKDIR}, /srv/shared`);
+  });
+
+  it('an empty workdir list clears it, the same way an empty string does', async () => {
+    expect((await createWriter()).status).toBe(200);
+
+    const res = await call('update', {
+      id: 'writer',
+      fs_reach: { read: ['/data'], write: ['/data/out'], workdir: [] },
+    });
+    expect(res.status).toBe(200);
+    expect(await reachOf(res)).toEqual({
+      read: ['/data'],
+      write: ['/data/out'],
+      workdir: null,
+    });
+    expect(await configYaml()).not.toContain('fs_reach.workdir');
   });
 
   it('an explicit empty workdir clears it', async () => {

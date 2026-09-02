@@ -65,7 +65,9 @@ export function CharacterSheetView({ personality }: { personality: Personality }
   const plugins = personality.plugins ?? [];
   const read = personality.fs_reach?.read ?? [];
   const write = personality.fs_reach?.write ?? [];
-  const workdir = personality.fs_reach?.workdir;
+  // Every declared root, in declaration order — a personality may name more
+  // than one, and Documents browses each as its own root.
+  const workdir = personality.fs_reach?.workdir ?? [];
 
   const posture = sheet?.posture ?? null;
 
@@ -211,7 +213,7 @@ export function CharacterSheetView({ personality }: { personality: Personality }
             )}
           </div>
         )}
-        {workdir ? (
+        {workdir.length > 0 ? (
           <div
             style={{
               display: 'grid',
@@ -221,8 +223,16 @@ export function CharacterSheetView({ personality }: { personality: Personality }
               fontSize: 13,
             }}
           >
-            <Typography.Text type="secondary">Workdir</Typography.Text>
-            <span style={{ fontFamily: MONO, fontSize: 12.5 }}>{workdir}</span>
+            <Typography.Text type="secondary">
+              {workdir.length === 1 ? 'Workdir' : 'Workdirs'}
+            </Typography.Text>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+              {workdir.map((p) => (
+                <span key={p} style={{ fontFamily: MONO, fontSize: 12.5 }}>
+                  {p}
+                </span>
+              ))}
+            </div>
           </div>
         ) : null}
       </section>

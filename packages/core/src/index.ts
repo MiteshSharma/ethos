@@ -106,6 +106,8 @@ export { SessionManager } from './execution/session-manager';
 // (app) and the docker backend's bind mounts (OS) — consume this; a second
 // copy would drift into silent data loss (writes permitted but never mounted).
 export {
+  declaredWorkdirs,
+  deriveDocumentsRoots,
   deriveFsReachPaths,
   EmptySubstitutionError,
   type FsReachVars,

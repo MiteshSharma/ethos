@@ -85,8 +85,12 @@ export interface BundleManifest {
     /** `workdir` is optional so bundles exported before it existed still
      *  validate. It is disclosed alongside read/write because a declared
      *  workdir is injected into BOTH derived reach lists — omitting it
-     *  understates the filesystem reach the importer is being asked to grant. */
-    fsReach: { read: string[]; write: string[]; workdir?: string };
+     *  understates the filesystem reach the importer is being asked to grant.
+     *  For the same reason it carries EVERY declared entry when a personality
+     *  declares several (`string[]`), never just the first: disclosing one of
+     *  three roots understates the grant exactly as omitting it would. Older
+     *  bundles carry the bare string a single-root export always wrote. */
+    fsReach: { read: string[]; write: string[]; workdir?: string | string[] };
     toolset: string[];
     budgetCapUsd?: number;
   };

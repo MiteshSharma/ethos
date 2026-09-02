@@ -1,6 +1,6 @@
 import { EthosError } from '@ethosagent/types';
-import type { Context } from 'hono';
 import { Hono } from 'hono';
+import { readBodyWithCap } from '../lib/read-body-with-cap';
 import type { PersonalitiesService } from '../services/personalities.service';
 
 // `POST|GET|DELETE /api/personalities/:id/avatar` — upload, serve, and
@@ -51,7 +51,7 @@ export function personalityAvatarRoutes(opts: PersonalityAvatarRoutesOptions): H
         action: `Upload one of: ${[...ALLOWED_MIME_TYPES].join(', ')}.`,
       });
     }
-    const bytes = await readBodyWithCap(c, AVATAR_MAX_BYTES);
+    const bytes = await readBodyWithCap(c, AVATAR_MAX_BYTES, { subject: 'Avatar upload' });
     if (bytes.byteLength === 0) {
       throw new EthosError({
         code: 'INVALID_INPUT',
@@ -104,53 +104,4 @@ export function personalityAvatarRoutes(opts: PersonalityAvatarRoutesOptions): H
   });
 
   return app;
-}
-
-/**
- * Read the request body into memory, refusing to buffer past `capBytes`.
- *
- * Checks `Content-Length` first so an honest oversized client is rejected
- * before any read happens at all; then reads the stream chunk-by-chunk and
- * cancels it the moment the running total crosses the cap, so a client that
- * omits (or lies about) `Content-Length` still cannot force an unbounded
- * buffer — the cap is enforced during the read, not just checked after a full
- * `arrayBuffer()`.
- */
-async function readBodyWithCap(c: Context, capBytes: number): Promise<Uint8Array> {
-  const contentLength = c.req.header('content-length');
-  if (contentLength !== undefined && Number(contentLength) > capBytes) {
-    throw new EthosError({
-      code: 'INVALID_INPUT',
-      cause: `Avatar upload exceeds the ${capBytes}-byte limit (declared Content-Length: ${contentLength}).`,
-      action: `Upload an image smaller than ${Math.floor(capBytes / (1024 * 1024))}MB.`,
-    });
-  }
-
-  const reader = c.req.raw.body?.getReader();
-  if (!reader) return new Uint8Array(0);
-
-  const chunks: Uint8Array[] = [];
-  let total = 0;
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    total += value.byteLength;
-    if (total > capBytes) {
-      await reader.cancel();
-      throw new EthosError({
-        code: 'INVALID_INPUT',
-        cause: `Avatar upload exceeds the ${capBytes}-byte limit.`,
-        action: `Upload an image smaller than ${Math.floor(capBytes / (1024 * 1024))}MB.`,
-      });
-    }
-    chunks.push(value);
-  }
-
-  const out = new Uint8Array(total);
-  let offset = 0;
-  for (const chunk of chunks) {
-    out.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-  return out;
 }

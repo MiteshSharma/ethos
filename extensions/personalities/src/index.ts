@@ -48,6 +48,8 @@ export {
   renderCharacterSheet,
 } from './character-sheet';
 
+import { normalizeWorkdir } from './workdirs';
+
 export const SYSTEM_PERSONALITY_IDS: ReadonlySet<string> = new Set([
   'personality-architect',
   'team-architect',
@@ -624,7 +626,7 @@ export interface CreatePersonalityInput {
   capabilities?: string[];
   mcp_servers?: string[];
   plugins?: string[];
-  fs_reach?: { read?: string[]; write?: string[]; workdir?: string };
+  fs_reach?: { read?: string[]; write?: string[]; workdir?: string | string[] };
   skill_evolution?: {
     enabled?: boolean;
     min_tool_calls?: number;
@@ -689,7 +691,7 @@ export interface UpdatePersonalityPatch {
   plugins?: string[];
   capabilities?: string[];
   provider?: string;
-  fs_reach?: { read?: string[]; write?: string[]; workdir?: string };
+  fs_reach?: { read?: string[]; write?: string[]; workdir?: string | string[] };
   /** Partial dreaming config — shallow-merged onto the existing dreaming block
    *  so a patch that carries only `enable` (or only a cadence number) never
    *  drops sibling fields. */
@@ -1096,11 +1098,11 @@ export class FilePersonalityRegistry implements PersonalityRegistry {
       if (patch.fs_reach !== undefined) {
         // workdir is validated by the same predicate — it lands in both derived
         // reach lists, so an unchecked one would be a hole straight through this
-        // guard.
+        // guard. EVERY entry is checked: `workdir` may be a list.
         const allPaths = [
           ...(patch.fs_reach.read ?? []),
           ...(patch.fs_reach.write ?? []),
-          ...(patch.fs_reach.workdir ? [patch.fs_reach.workdir] : []),
+          ...normalizeWorkdir(patch.fs_reach.workdir),
         ];
         for (const p of allPaths) {
           if (/[\n\r,]/.test(p) || p.includes('\0')) {
@@ -1651,13 +1653,18 @@ export class FilePersonalityRegistry implements PersonalityRegistry {
         ? Number.parseInt(cfg.streamingTimeoutMs, 10)
         : undefined;
 
-    // fs_reach.read / fs_reach.write are comma-separated path lists;
-    // fs_reach.workdir is a single path. Substitutions (${ETHOS_HOME},
-    // ${self}, ${CWD}) are resolved by the AgentLoop at turn construction
-    // time — the registry only surfaces the raw strings.
+    // fs_reach.read / fs_reach.write are comma-separated path lists.
+    // fs_reach.workdir is the same comma-separated form: ONE path stays a bare
+    // string (the shape every existing config.yaml and every single-root
+    // consumer expects), several become a list — each one its own Documents
+    // root. Substitutions (${ETHOS_HOME}, ${self}, ${CWD}) are resolved by the
+    // AgentLoop at turn construction time — the registry only surfaces the raw
+    // strings.
     const fsReachRead = parseCsv(cfg['fs_reach.read']);
     const fsReachWrite = parseCsv(cfg['fs_reach.write']);
-    const fsReachWorkdir = cfg['fs_reach.workdir']?.trim() || undefined;
+    const workdirs = parseCsv(cfg['fs_reach.workdir']);
+    const fsReachWorkdir: string | string[] | undefined =
+      workdirs === undefined ? undefined : workdirs.length === 1 ? workdirs[0] : workdirs;
     const fsReach: PersonalityConfig['fs_reach'] | undefined =
       fsReachRead || fsReachWrite || fsReachWorkdir
         ? {
@@ -2383,8 +2390,11 @@ function renderConfigYaml(input: RenderConfigInput): string {
   if (input.fs_reach?.write !== undefined && input.fs_reach.write.length > 0) {
     lines.push(`fs_reach.write: ${input.fs_reach.write.join(', ')}`);
   }
-  if (input.fs_reach?.workdir) {
-    lines.push(`fs_reach.workdir: ${input.fs_reach.workdir}`);
+  // Comma-separated, the same form `parseCsv` reads back — a single workdir
+  // still renders as the bare path it always did.
+  const workdirs = normalizeWorkdir(input.fs_reach?.workdir);
+  if (workdirs.length > 0) {
+    lines.push(`fs_reach.workdir: ${workdirs.join(', ')}`);
   }
   if (input.streamingTimeoutMs !== undefined) {
     lines.push(`streamingTimeoutMs: ${input.streamingTimeoutMs}`);

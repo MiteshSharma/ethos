@@ -1,6 +1,6 @@
 // biome-ignore-all lint/suspicious/noTemplateCurlyInString: `${ETHOS_HOME}` /
 // `${self}` are literal fs_reach substitution tokens, not JS template strings.
-import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { personalityAssetDir } from '@ethosagent/core';
@@ -16,7 +16,7 @@ import { makeStubPersonalityRegistry } from '../test-helpers';
 // ScopedStorage allowlist for traversal, and the lstat walk for symlinks —
 // which ScopedStorage structurally cannot catch, because Storage follows links.
 
-function personality(workdir: string): PersonalityConfig {
+function personality(workdir: string | string[]): PersonalityConfig {
   return {
     id: 'writer',
     name: 'Writer',
@@ -51,19 +51,19 @@ describe('DocumentsService', () => {
 
   it('roots at the personality declared workdir', async () => {
     const got = await service.root();
-    expect(got).toEqual({ root: workdir, personalityId: 'writer' });
+    expect(got).toEqual({ roots: [{ id: '0', path: workdir }], personalityId: 'writer' });
   });
 
   it('lists nested subdirectories with size and mtime', async () => {
     await mkdir(join(workdir, 'reports'));
     await writeFile(join(workdir, 'reports', 'q1.md'), '# Q1\n');
 
-    const top = await service.list({});
+    const top = await service.list({ root: '0' });
     expect(top.entries).toEqual([
       { name: 'reports', path: 'reports', isDir: true, isSymlink: false },
     ]);
 
-    const nested = await service.list({ path: 'reports' });
+    const nested = await service.list({ root: '0', path: 'reports' });
     const entry = nested.entries[0];
     expect(entry?.name).toBe('q1.md');
     expect(entry?.path).toBe(join('reports', 'q1.md'));
@@ -73,33 +73,33 @@ describe('DocumentsService', () => {
   });
 
   it('lists an empty workdir rather than failing', async () => {
-    expect(await service.list({})).toEqual({ entries: [] });
+    expect(await service.list({ root: '0' })).toEqual({ entries: [] });
   });
 
   it('refuses a traversal path', async () => {
-    await expect(service.list({ path: '../../../etc/passwd' })).rejects.toMatchObject({
+    await expect(service.list({ root: '0', path: '../../../etc/passwd' })).rejects.toMatchObject({
       code: 'FORBIDDEN',
     });
-    await expect(service.resolveDownload({ path: '../../../etc/passwd' })).rejects.toMatchObject({
-      code: 'FORBIDDEN',
-    });
-    await expect(service.delete({ path: '../outside/secret.txt' })).rejects.toMatchObject({
-      code: 'FORBIDDEN',
-    });
+    await expect(
+      service.resolveDownload({ root: '0', path: '../../../etc/passwd' }),
+    ).rejects.toMatchObject({ code: 'FORBIDDEN' });
+    await expect(
+      service.delete({ root: '0', path: '../outside/secret.txt' }),
+    ).rejects.toMatchObject({ code: 'FORBIDDEN' });
   });
 
   it('refuses an absolute path', async () => {
-    await expect(service.resolveDownload({ path: '/etc/passwd' })).rejects.toMatchObject({
-      code: 'FORBIDDEN',
-    });
-    await expect(service.delete({ path: join(outside, 'secret.txt') })).rejects.toMatchObject({
-      code: 'FORBIDDEN',
-    });
+    await expect(service.resolveDownload({ root: '0', path: '/etc/passwd' })).rejects.toMatchObject(
+      { code: 'FORBIDDEN' },
+    );
+    await expect(
+      service.delete({ root: '0', path: join(outside, 'secret.txt') }),
+    ).rejects.toMatchObject({ code: 'FORBIDDEN' });
   });
 
   it('never leaks an absolute path in the refusal message', async () => {
     const err = await service
-      .resolveDownload({ path: '/etc/passwd' })
+      .resolveDownload({ root: '0', path: '/etc/passwd' })
       .then(() => null)
       .catch((e: unknown) => e);
     expect(err).toBeInstanceOf(EthosError);
@@ -111,15 +111,15 @@ describe('DocumentsService', () => {
   it('flags a symlink in the listing and refuses it on download and delete', async () => {
     await symlink(join(outside, 'secret.txt'), join(workdir, 'link.txt'));
 
-    const listed = await service.list({});
+    const listed = await service.list({ root: '0' });
     expect(listed.entries).toContainEqual(
       expect.objectContaining({ name: 'link.txt', isSymlink: true }),
     );
 
-    await expect(service.resolveDownload({ path: 'link.txt' })).rejects.toMatchObject({
+    await expect(service.resolveDownload({ root: '0', path: 'link.txt' })).rejects.toMatchObject({
       code: 'FORBIDDEN',
     });
-    await expect(service.delete({ path: 'link.txt' })).rejects.toMatchObject({
+    await expect(service.delete({ root: '0', path: 'link.txt' })).rejects.toMatchObject({
       code: 'FORBIDDEN',
     });
   });
@@ -130,32 +130,36 @@ describe('DocumentsService', () => {
     await symlink(outside, join(workdir, 'escape'));
 
     await expect(
-      service.resolveDownload({ path: join('escape', 'secret.txt') }),
+      service.resolveDownload({ root: '0', path: join('escape', 'secret.txt') }),
     ).rejects.toMatchObject({ code: 'FORBIDDEN' });
-    await expect(service.list({ path: 'escape' })).rejects.toMatchObject({ code: 'FORBIDDEN' });
+    await expect(service.list({ root: '0', path: 'escape' })).rejects.toMatchObject({
+      code: 'FORBIDDEN',
+    });
   });
 
   it('deletes a file and reports a missing one', async () => {
     await writeFile(join(workdir, 'draft.md'), 'x');
-    expect(await service.delete({ path: 'draft.md' })).toEqual({ ok: true });
-    expect(await service.list({})).toEqual({ entries: [] });
+    expect(await service.delete({ root: '0', path: 'draft.md' })).toEqual({ ok: true });
+    expect(await service.list({ root: '0' })).toEqual({ entries: [] });
 
-    await expect(service.delete({ path: 'draft.md' })).rejects.toMatchObject({
+    await expect(service.delete({ root: '0', path: 'draft.md' })).rejects.toMatchObject({
       code: 'FILE_NOT_FOUND',
     });
   });
 
   it('refuses to delete a directory or the root itself', async () => {
     await mkdir(join(workdir, 'reports'));
-    await expect(service.delete({ path: 'reports' })).rejects.toMatchObject({
+    await expect(service.delete({ root: '0', path: 'reports' })).rejects.toMatchObject({
       code: 'INVALID_INPUT',
     });
-    await expect(service.delete({ path: '.' })).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+    await expect(service.delete({ root: '0', path: '.' })).rejects.toMatchObject({
+      code: 'INVALID_INPUT',
+    });
   });
 
   it('resolves download metadata for a real file', async () => {
     await writeFile(join(workdir, 'notes.md'), 'hello');
-    const got = await service.resolveDownload({ path: 'notes.md' });
+    const got = await service.resolveDownload({ root: '0', path: 'notes.md' });
     expect(got).toEqual({
       absolutePath: join(workdir, 'notes.md'),
       filename: 'notes.md',
@@ -167,6 +171,11 @@ describe('DocumentsService', () => {
     await expect(service.root('nope')).rejects.toMatchObject({
       code: 'PERSONALITY_NOT_FOUND',
     });
+  });
+
+  it('rejects an unknown root id for a known personality', async () => {
+    await expect(service.list({ root: '1' })).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+    await expect(service.list({ root: 'nope' })).rejects.toMatchObject({ code: 'INVALID_INPUT' });
   });
 
   // The point of unifying the asset folder with the workdir: what the render
@@ -181,22 +190,22 @@ describe('DocumentsService', () => {
 
     await writeFile(join(assetDir, 'chart.png'), 'PNG');
 
-    const listed = await service.list({});
+    const listed = await service.list({ root: '0' });
     expect(listed.entries).toContainEqual(
       expect.objectContaining({ name: 'chart.png', path: 'chart.png', isDir: false }),
     );
 
-    expect(await service.resolveDownload({ path: 'chart.png' })).toEqual({
+    expect(await service.resolveDownload({ root: '0', path: 'chart.png' })).toEqual({
       absolutePath: join(workdir, 'chart.png'),
       filename: 'chart.png',
       size: 3,
     });
 
-    expect(await service.delete({ path: 'chart.png' })).toEqual({ ok: true });
-    expect(await service.list({})).toEqual({ entries: [] });
+    expect(await service.delete({ root: '0', path: 'chart.png' })).toEqual({ ok: true });
+    expect(await service.list({ root: '0' })).toEqual({ entries: [] });
   });
 
-  it('falls back to process.cwd() when no workdir is declared', async () => {
+  it('has no roots and throws WORKDIR_NOT_CONFIGURED when no workdir is declared', async () => {
     const undeclared = new DocumentsService({
       personalities: makeStubPersonalityRegistry([
         { id: 'plain', name: 'Plain' } as PersonalityConfig,
@@ -204,6 +213,196 @@ describe('DocumentsService', () => {
       dataDir,
       storage: new FsStorage(),
     });
-    expect((await undeclared.root()).root).toBe(process.cwd());
+    expect(await undeclared.root()).toEqual({ roots: [], personalityId: 'plain' });
+    await expect(undeclared.list({ root: '0' })).rejects.toMatchObject({
+      code: 'WORKDIR_NOT_CONFIGURED',
+    });
+    await expect(undeclared.delete({ root: '0', path: 'x' })).rejects.toMatchObject({
+      code: 'WORKDIR_NOT_CONFIGURED',
+    });
+    await expect(undeclared.resolveDownload({ root: '0', path: 'x' })).rejects.toMatchObject({
+      code: 'WORKDIR_NOT_CONFIGURED',
+    });
+    await expect(undeclared.createFolder(undefined, '0', 'x')).rejects.toMatchObject({
+      code: 'WORKDIR_NOT_CONFIGURED',
+    });
+    await expect(
+      undeclared.write(undefined, '0', 'x', Buffer.from('x'), { overwrite: false }),
+    ).rejects.toMatchObject({ code: 'WORKDIR_NOT_CONFIGURED' });
+  });
+
+  describe('multiple declared roots', () => {
+    let multi: DocumentsService;
+    let rootA: string;
+    let rootB: string;
+
+    beforeEach(async () => {
+      rootA = join(dataDir, 'workspace', 'writer');
+      rootB = join(dataDir, 'archive');
+      await mkdir(rootB, { recursive: true });
+
+      multi = new DocumentsService({
+        personalities: makeStubPersonalityRegistry([
+          personality(['${ETHOS_HOME}/workspace/${self}', join(dataDir, 'archive')]),
+        ]),
+        dataDir,
+        storage: new FsStorage(),
+      });
+    });
+
+    it('lists both roots with stable index ids', async () => {
+      const got = await multi.root();
+      expect(got).toEqual({
+        roots: [
+          { id: '0', path: rootA },
+          { id: '1', path: rootB },
+        ],
+        personalityId: 'writer',
+      });
+    });
+
+    it('resolves each root independently — a write to one never touches the other', async () => {
+      await writeFile(join(rootA, 'a.md'), 'in A');
+      await writeFile(join(rootB, 'b.md'), 'in B');
+
+      expect(await multi.list({ root: '0' })).toEqual({
+        entries: [
+          {
+            name: 'a.md',
+            path: 'a.md',
+            isDir: false,
+            size: 4,
+            mtimeMs: expect.any(Number),
+            isSymlink: false,
+          },
+        ],
+      });
+      expect(await multi.list({ root: '1' })).toEqual({
+        entries: [
+          {
+            name: 'b.md',
+            path: 'b.md',
+            isDir: false,
+            size: 4,
+            mtimeMs: expect.any(Number),
+            isSymlink: false,
+          },
+        ],
+      });
+
+      // A path traversal from root 0 cannot reach into root 1's directory —
+      // ScopedStorage for root 0 only ever allows rootA's prefix.
+      await expect(
+        multi.resolveDownload({ root: '0', path: '../archive/b.md' }),
+      ).rejects.toMatchObject({ code: 'FORBIDDEN' });
+    });
+  });
+
+  describe('createFolder', () => {
+    it('creates a folder and returns its entry', async () => {
+      const entry = await service.createFolder(undefined, '0', 'reports');
+      expect(entry).toEqual({
+        name: 'reports',
+        path: 'reports',
+        isDir: true,
+        mtimeMs: expect.any(Number),
+        isSymlink: false,
+      });
+      expect(await service.list({ root: '0' })).toEqual({
+        entries: [{ name: 'reports', path: 'reports', isDir: true, isSymlink: false }],
+      });
+    });
+
+    it('rejects when the parent does not exist', async () => {
+      await expect(
+        service.createFolder(undefined, '0', join('missing-parent', 'child')),
+      ).rejects.toMatchObject({ code: 'FILE_NOT_FOUND' });
+    });
+
+    it('rejects a name collision with an existing file or folder', async () => {
+      await writeFile(join(workdir, 'taken.md'), 'x');
+      await expect(service.createFolder(undefined, '0', 'taken.md')).rejects.toMatchObject({
+        code: 'DOCUMENT_EXISTS',
+      });
+
+      await mkdir(join(workdir, 'reports'));
+      await expect(service.createFolder(undefined, '0', 'reports')).rejects.toMatchObject({
+        code: 'DOCUMENT_EXISTS',
+      });
+    });
+
+    it('refuses traversal and symlink escapes the same way as the other methods', async () => {
+      await expect(
+        service.createFolder(undefined, '0', '../outside/new-dir'),
+      ).rejects.toMatchObject({ code: 'FORBIDDEN' });
+
+      await symlink(outside, join(workdir, 'escape'));
+      await expect(
+        service.createFolder(undefined, '0', join('escape', 'new-dir')),
+      ).rejects.toMatchObject({ code: 'FORBIDDEN' });
+    });
+  });
+
+  describe('write', () => {
+    it('writes a new file and returns its entry', async () => {
+      const entry = await service.write(undefined, '0', 'notes.md', Buffer.from('hello'), {
+        overwrite: false,
+      });
+      expect(entry).toEqual({
+        name: 'notes.md',
+        path: 'notes.md',
+        isDir: false,
+        size: 5,
+        mtimeMs: expect.any(Number),
+        isSymlink: false,
+      });
+      expect(await readFile(join(workdir, 'notes.md'), 'utf-8')).toBe('hello');
+    });
+
+    it('rejects a collision when overwrite is false', async () => {
+      await writeFile(join(workdir, 'notes.md'), 'old');
+      await expect(
+        service.write(undefined, '0', 'notes.md', Buffer.from('new'), { overwrite: false }),
+      ).rejects.toMatchObject({ code: 'DOCUMENT_EXISTS' });
+      expect(await readFile(join(workdir, 'notes.md'), 'utf-8')).toBe('old');
+    });
+
+    it('clobbers an existing file when overwrite is true', async () => {
+      await writeFile(join(workdir, 'notes.md'), 'old');
+      const entry = await service.write(undefined, '0', 'notes.md', Buffer.from('new content'), {
+        overwrite: true,
+      });
+      expect(entry.size).toBe('new content'.length);
+      expect(await readFile(join(workdir, 'notes.md'), 'utf-8')).toBe('new content');
+    });
+
+    it('rejects when the parent does not exist', async () => {
+      await expect(
+        service.write(undefined, '0', join('missing-parent', 'notes.md'), Buffer.from('x'), {
+          overwrite: false,
+        }),
+      ).rejects.toMatchObject({ code: 'FILE_NOT_FOUND' });
+    });
+
+    it('rejects writing over an existing directory', async () => {
+      await mkdir(join(workdir, 'reports'));
+      await expect(
+        service.write(undefined, '0', 'reports', Buffer.from('x'), { overwrite: true }),
+      ).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+    });
+
+    it('accepts a ReadableStream body', async () => {
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode('streamed'));
+          controller.close();
+        },
+      });
+      const entry = await service.write(undefined, '0', 'stream.md', stream, {
+        overwrite: false,
+      });
+      expect(entry.size).toBe('streamed'.length);
+      expect(await readFile(join(workdir, 'stream.md'), 'utf-8')).toBe('streamed');
+    });
   });
 });

@@ -4,7 +4,7 @@ description: "Every field in a personality's config.yaml and toolset.yaml — mo
 kind: reference
 audience: user
 slug: personality-yaml
-updated: 2026-08-14
+updated: 2026-09-02
 ---
 
 A [personality](../../getting-started/glossary.md#personality) is a directory at `~/.ethos/personalities/<id>/` with three files:
@@ -128,7 +128,7 @@ Per-personality filesystem allowlist for the `read_file` / `write_file` tools. T
 |---|---|
 | `${ETHOS_HOME}` | `~/.ethos` |
 | `${self}` | This personality's id. |
-| `${CWD}` | The personality's working directory — [`fs_reach.workdir`](#fs-reach-workdir) when declared, otherwise the process working directory. |
+| `${CWD}` | The personality's working directory — the **first** [`fs_reach.workdir`](#fs-reach-workdir) entry when declared, otherwise the process working directory. |
 
 When unset, the fallback is:
 
@@ -152,22 +152,28 @@ Notes:
 
 ## fs_reach.workdir {#fs-reach-workdir}
 
-Type: single absolute path · Default: the process working directory
+Type: one or more comma-separated absolute paths · Default: unset (the process working directory)
 
-The personality's working directory. It takes the same substitution tokens as `fs_reach.read` / `fs_reach.write`, resolves to an absolute path, and becomes `${CWD}` for the rest of the `fs_reach` derivation. Every tool in the personality's toolset stands here: a bare relative path passed to `read_file` or `write_file` resolves against it, and the `terminal` tool runs its commands in it under both the local and the container execution posture.
+The personality's working directory. Each entry takes the same substitution tokens as `fs_reach.read` / `fs_reach.write` and resolves to an absolute path. The **first** entry is the personality's working directory and becomes `${CWD}` for the rest of the `fs_reach` derivation: every tool in the personality's toolset stands there, a bare relative path passed to `read_file` or `write_file` resolves against it, and the `terminal` tool runs its commands in it under both the local and the container execution posture.
 
 ```yaml
 fs_reach.workdir: ${ETHOS_HOME}/workspace/${self}
 ```
 
+Declare several to give the [Documents tab](../how-to/retrieve-agent-files.md) several roots. Each entry becomes its own browsable root with its own containment boundary:
+
+```yaml
+fs_reach.workdir: ${ETHOS_HOME}/workspace/${self}, /srv/reports
+```
+
 Notes:
 
-- A declared workdir is added to both the derived read list and the derived write list, so it stays reachable even when `fs_reach.write` is declared and therefore replaces the defaults.
-- One path, not a list. The dotted key is the only accepted syntax — an indented `fs_reach:` block is refused at load with `Top-level key "fs_reach" cannot be a nested object in personality config`.
+- The first declared entry is added to both the derived read list and the derived write list, so it stays reachable even when `fs_reach.write` is declared and therefore replaces the defaults. Later entries are **not** — a second root is browsable from Documents but out of the agent's own reach until it is listed in `fs_reach.read` / `fs_reach.write` too.
+- The dotted key is the only accepted syntax — an indented `fs_reach:` block is refused at load with `Top-level key "fs_reach" cannot be a nested object in personality config`.
 - A token that resolves to an empty string refuses the turn with `FS_REACH_INVALID` rather than synthesizing a path at the filesystem root.
-- Unset changes nothing: the working directory is the process working directory and the read/write lists derive exactly as they did before this field existed.
+- Unset leaves the derivation untouched: the working directory is the process working directory and the read/write lists derive exactly as they did before this field existed. The Documents tab, which has no such fallback, shows the personality as unconfigured — see [`WORKDIR_NOT_CONFIGURED`](../../troubleshooting.md#error-reference).
 - `ethos personality show <id>` prints the declared value (tokens unresolved) as a `Workdir` line under **Filesystem reach**.
-- Files written here are retrievable from a browser — see [Retrieve files the agent wrote](../how-to/retrieve-agent-files.md).
+- Files written here are retrievable from a browser — see [Retrieve files the agent wrote](../how-to/retrieve-agent-files.md). Files can be uploaded into the same directory — see [Upload a file into the agent's folder](../how-to/upload-agent-files.md).
 
 ## mcp_servers {#mcp-servers}
 

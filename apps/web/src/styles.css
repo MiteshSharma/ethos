@@ -6557,8 +6557,112 @@ textarea {
 
 /* ── Documents tab — the operator's file surface ──────────────────── */
 
-.documents-rootline {
+.documents-roots {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
   padding: 12px 24px 0;
+}
+
+.documents-root-tab {
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  padding: 0 0 4px;
+  cursor: pointer;
+  font-family: "Geist Mono", ui-monospace, monospace;
+  font-size: 13px;
+  color: var(--ethos-text-dim);
+  transition:
+    color var(--motion-fast, 80ms) ease,
+    border-color var(--motion-fast, 80ms) ease;
+}
+
+.documents-root-tab:hover {
+  color: var(--ethos-text);
+}
+
+.documents-root-tab--current {
+  color: var(--ethos-text);
+  border-bottom-color: var(--accent, var(--ethos-info));
+}
+
+.documents-rootline {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px 24px 0;
+}
+
+.documents-toolbar {
+  display: flex;
+  gap: 16px;
+  /* A declared workdir is an absolute path and can be long. Without this the
+     toolbar is the thing that shrinks, and "New folder" wraps to two lines
+     inside a 33px box. The path wraps instead — it is the part that reflows
+     readably. */
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+.documents-newfolder-slot {
+  padding: 0 24px 12px;
+}
+
+.documents-newfolder-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.documents-newfolder-input {
+  flex: 1;
+  min-width: 0;
+  padding: 4px 8px;
+  border: 1px solid var(--ethos-border);
+  border-radius: 4px;
+  background: var(--ethos-bg-elevated);
+  color: var(--ethos-text);
+  font-family: "Geist Mono", ui-monospace, monospace;
+  font-size: 13px;
+}
+
+.documents-newfolder-error {
+  margin: 6px 0 0;
+  font-size: 12px;
+  color: var(--ethos-error);
+}
+
+.documents-upload {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.documents-upload-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.documents-upload-label {
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ethos-text-tertiary);
+}
+
+.documents-unconfigured {
+  padding: 12px 24px;
+  max-width: 640px;
+}
+
+.documents-unconfigured-line {
+  margin: 0 0 8px;
+  font-size: 14px;
+  color: var(--ethos-text-dim);
 }
 
 .documents-breadcrumb {
@@ -6639,6 +6743,14 @@ textarea {
 
 .documents-action--danger:hover {
   color: var(--ethos-error);
+}
+
+/* The upload modal's "New folder here" action. As a flex item it would
+   otherwise stretch to the full column width and centre its own label — a
+   stray centred element in a left-aligned form (DESIGN.md anti-slop:
+   left-aligned, not centred). Shrink it to its text, on the form's left edge. */
+.documents-upload > .documents-action {
+  align-self: flex-start;
 }
 
 .documents-row--previewable {

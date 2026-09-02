@@ -4,6 +4,7 @@
 import type { PersonalityConfig } from '@ethosagent/types';
 import { describe, expect, it } from 'vitest';
 import {
+  deriveDocumentsRoots,
   deriveFsReachPaths,
   EmptySubstitutionError,
   type FsReachVars,
@@ -104,6 +105,85 @@ describe('deriveFsReachPaths — workdir', () => {
       expect(err).toBeInstanceOf(EmptySubstitutionError);
       expect((err as EmptySubstitutionError).variable).toBe('${ETHOS_HOME}');
     }
+  });
+
+  // Multi-root workdir (widened `fs_reach.workdir: string | string[]`). This
+  // function keeps its existing single-root contract: only the FIRST declared
+  // entry becomes `${CWD}` / the returned `workdir`. Every declared entry is
+  // `deriveDocumentsRoots`'s job (below).
+  describe('an array workdir uses only the first entry', () => {
+    it('resolves workdir/read/write against the first entry only', () => {
+      const { read, write, workdir } = deriveFsReachPaths(
+        personality({ workdir: ['/srv/documents', '/srv/archive'] }),
+        VARS,
+      );
+      expect(workdir).toBe('/srv/documents');
+      expect(read).toEqual([OWN_DIR, '/home/tester/.ethos/skills/', '/srv/documents']);
+      expect(write).toEqual([OWN_DIR, '/srv/documents']);
+      expect(read).not.toContain('/srv/archive');
+      expect(write).not.toContain('/srv/archive');
+    });
+
+    it('substitutes the first entry the same way a single string would', () => {
+      const { workdir } = deriveFsReachPaths(
+        personality({ workdir: ['${ETHOS_HOME}/workspace/${self}', '/srv/archive'] }),
+        VARS,
+      );
+      expect(workdir).toBe('/home/tester/.ethos/workspace/workdir-bot');
+    });
+
+    it('an empty array behaves like an undeclared workdir', () => {
+      const { workdir } = deriveFsReachPaths(personality({ workdir: [] }), VARS);
+      expect(workdir).toBe(VARS.cwd);
+    });
+  });
+});
+
+describe('deriveDocumentsRoots', () => {
+  it('returns [] when fs_reach.workdir is unset — no vars.cwd fallback', () => {
+    expect(deriveDocumentsRoots(personality(), VARS)).toEqual([]);
+    expect(deriveDocumentsRoots(personality({ read: ['/data'] }), VARS)).toEqual([]);
+  });
+
+  it('returns [] for an empty declared array', () => {
+    expect(deriveDocumentsRoots(personality({ workdir: [] }), VARS)).toEqual([]);
+  });
+
+  it('wraps a single declared string as one root', () => {
+    expect(deriveDocumentsRoots(personality({ workdir: '/srv/documents' }), VARS)).toEqual([
+      { label: 'documents', workdir: '/srv/documents' },
+    ]);
+  });
+
+  it('returns every declared entry as its own root, substituted independently', () => {
+    const roots = deriveDocumentsRoots(
+      personality({ workdir: ['${ETHOS_HOME}/workspace/${self}', '/srv/archive'] }),
+      VARS,
+    );
+    expect(roots).toEqual([
+      { label: 'workdir-bot', workdir: '/home/tester/.ethos/workspace/workdir-bot' },
+      { label: 'archive', workdir: '/srv/archive' },
+    ]);
+  });
+
+  it('substitutes each entry against the SAME vars, never against a sibling entry', () => {
+    // If entry[1] were (incorrectly) resolved with cwd rewritten to entry[0]'s
+    // resolved path, a `${CWD}`-referencing entry would silently point inside
+    // entry[0] instead of resolving independently.
+    const roots = deriveDocumentsRoots(personality({ workdir: ['${CWD}/a', '${CWD}/b'] }), VARS);
+    expect(roots).toEqual([
+      { label: 'a', workdir: '/work/project/a' },
+      { label: 'b', workdir: '/work/project/b' },
+    ]);
+  });
+
+  it('throws EmptySubstitutionError when an entry references an empty var', () => {
+    expect(() =>
+      deriveDocumentsRoots(personality({ workdir: ['${ETHOS_HOME}/workspace'] }), {
+        ...VARS,
+        ethosHome: '',
+      }),
+    ).toThrow(EmptySubstitutionError);
   });
 });
 

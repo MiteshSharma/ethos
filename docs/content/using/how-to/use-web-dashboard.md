@@ -5,7 +5,7 @@ kind: how-to
 audience: user
 slug: use-web-dashboard
 time: "10 min"
-updated: 2026-08-14
+updated: 2026-09-02
 ---
 
 ## Task
@@ -53,7 +53,7 @@ The sidebar shows eight tabs:
 | **Chat** | Interactive chat with the active personality. |
 | **Personalities** | Create, edit, and inspect personality configurations. |
 | **Memory** | Browse and search personality memory (`MEMORY.md`) and user memory (`USER.md`). |
-| **Documents** | Browse, download, and delete the files a personality wrote in its working directory. See [Retrieve files the agent wrote](retrieve-agent-files.md). |
+| **Documents** | Browse, download, and delete the files a personality wrote in its working directories; create folders and upload files into them. See [Retrieve files the agent wrote](retrieve-agent-files.md) and [Upload a file into the agent's folder](upload-agent-files.md). |
 | **Cron** | View, manage, and test scheduled jobs. |
 | **MCP** | Add MCP servers, handle OAuth, manage tokens. |
 | **Dashboards** | View plugin data sources as customizable widget panels. |
