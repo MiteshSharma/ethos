@@ -2025,15 +2025,12 @@ export interface EthosConfig {
    * `pauseClockCorrection` above.
    *
    * Config format:
-   *   pauseLifecycle.http.enabled: true
    *   pauseLifecycle.http.url: https://orchestrator.example.com/tenants/<id>/idle
    *   pauseLifecycle.http.token: ${secrets:pauseLifecycle/http/token}
    *   pauseLifecycle.http.timeoutMs: 5000
    */
   pauseLifecycle?: {
     http?: {
-      /** Default false. */
-      enabled?: boolean;
       /** Orchestrator endpoint to notify. */
       url?: string;
       /** Bearer credential sent with the notification. Externalize via
@@ -3004,7 +3001,6 @@ export async function writeConfig(
   }
   if (config.pauseLifecycle?.http) {
     const plh = config.pauseLifecycle.http;
-    if (plh.enabled !== undefined) lines.push(`pauseLifecycle.http.enabled: ${plh.enabled}`);
     if (plh.url) lines.push(`pauseLifecycle.http.url: ${plh.url}`);
     if (plh.token) lines.push(`pauseLifecycle.http.token: ${plh.token}`);
     if (plh.timeoutMs !== undefined) lines.push(`pauseLifecycle.http.timeoutMs: ${plh.timeoutMs}`);
@@ -3925,7 +3921,7 @@ function parseConfigYaml(src: string): EthosConfig {
       continue;
     }
     // pauseLifecycle.http.<field>: <value>  (orchestrator idle notification; default OFF).
-    const plh = line.match(/^pauseLifecycle\.http\.(enabled|url|token|timeoutMs):\s*(.+)$/);
+    const plh = line.match(/^pauseLifecycle\.http\.(url|token|timeoutMs):\s*(.+)$/);
     if (plh) {
       pauseLifecycleHttpKv[plh[1]] = plh[2].trim().replace(/^["']|["']$/g, '');
       continue;
@@ -6227,7 +6223,6 @@ function buildPauseLifecycleHttp(
   kv: Record<string, string>,
 ): NonNullable<EthosConfig['pauseLifecycle']>['http'] | undefined {
   const result: NonNullable<NonNullable<EthosConfig['pauseLifecycle']>['http']> = {};
-  if (kv.enabled !== undefined) result.enabled = kv.enabled === 'true';
   if (kv.url) result.url = kv.url;
   if (kv.token) result.token = kv.token;
   const raw = kv.timeoutMs;

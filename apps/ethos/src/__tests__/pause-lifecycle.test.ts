@@ -69,35 +69,38 @@ describe('createPauseLifecycle', () => {
       vi.restoreAllMocks();
     });
 
-    it('yields an HttpPauseLifecycle when enabled with a url', () => {
+    it('yields an HttpPauseLifecycle when a url is configured', () => {
       const lifecycle = createPauseLifecycle({
         ...base,
-        pauseLifecycle: { http: { enabled: true, url: 'https://example.com/idle' } },
+        pauseLifecycle: { http: { url: 'https://example.com/idle' } },
       });
       expect(lifecycle).toBeInstanceOf(HttpPauseLifecycle);
       expect(lifecycle.hostSignalAvailable).toBe(true);
       expect(lifecycle).not.toBeInstanceOf(NoopPauseLifecycle);
     });
 
-    it('throws when enabled without a url', () => {
-      expect(() =>
-        createPauseLifecycle({
-          ...base,
-          pauseLifecycle: { http: { enabled: true } },
-        }),
-      ).toThrow();
+    it('logs and falls through to a NoopPauseLifecycle when http is configured without a url', () => {
+      const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+      try {
+        const lifecycle = createPauseLifecycle({ ...base, pauseLifecycle: { http: {} } });
+        expect(lifecycle).toBeInstanceOf(NoopPauseLifecycle);
+        expect(lifecycle).not.toBeInstanceOf(HttpPauseLifecycle);
+        expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('[pause-lifecycle]'));
+      } finally {
+        logSpy.mockRestore();
+      }
     });
 
-    it('yields a NoopPauseLifecycle when http is present but disabled', () => {
+    it('yields a NoopPauseLifecycle when http has only a token, no url', () => {
       expect(
-        createPauseLifecycle({ ...base, pauseLifecycle: { http: { enabled: false } } }),
+        createPauseLifecycle({ ...base, pauseLifecycle: { http: { token: 'x' } } }),
       ).toBeInstanceOf(NoopPauseLifecycle);
     });
 
     it('takes precedence over pauseClockCorrection when both are enabled', () => {
       const lifecycle = createPauseLifecycle({
         ...base,
-        pauseLifecycle: { http: { enabled: true, url: 'https://example.com/idle' } },
+        pauseLifecycle: { http: { url: 'https://example.com/idle' } },
         pauseClockCorrection: { enabled: true },
       });
       expect(lifecycle).toBeInstanceOf(HttpPauseLifecycle);

@@ -36,7 +36,6 @@ describe('pauseLifecycle config block', () => {
     const cfg = await load(
       [
         ...base,
-        'pauseLifecycle.http.enabled: true',
         'pauseLifecycle.http.url: https://orchestrator.example.com/tenants/t1/idle',
         'pauseLifecycle.http.token: secret-token',
         'pauseLifecycle.http.timeoutMs: 5000',
@@ -44,7 +43,6 @@ describe('pauseLifecycle config block', () => {
     );
     expect(cfg?.pauseLifecycle).toEqual({
       http: {
-        enabled: true,
         url: 'https://orchestrator.example.com/tenants/t1/idle',
         token: 'secret-token',
         timeoutMs: 5000,
@@ -53,15 +51,8 @@ describe('pauseLifecycle config block', () => {
   });
 
   it('accepts a partial block', async () => {
-    const cfg = await load([...base, 'pauseLifecycle.http.enabled: true'].join('\n'));
-    expect(cfg?.pauseLifecycle).toEqual({ http: { enabled: true } });
-  });
-
-  it('enabled with a junk value is false, never true', async () => {
-    for (const raw of ['yes', 'TRUE', '1', 'on', 'flase']) {
-      const cfg = await load([...base, `pauseLifecycle.http.enabled: ${raw}`].join('\n'));
-      expect(cfg?.pauseLifecycle).toEqual({ http: { enabled: false } });
-    }
+    const cfg = await load([...base, 'pauseLifecycle.http.token: secret-token'].join('\n'));
+    expect(cfg?.pauseLifecycle).toEqual({ http: { token: 'secret-token' } });
   });
 
   it('ignores a blank or non-positive timeoutMs rather than making it zero', async () => {
@@ -69,11 +60,11 @@ describe('pauseLifecycle config block', () => {
       const cfg = await load(
         [
           ...base,
-          'pauseLifecycle.http.enabled: true',
+          'pauseLifecycle.http.url: https://example.com/idle',
           `pauseLifecycle.http.timeoutMs: ${raw}`,
         ].join('\n'),
       );
-      expect(cfg?.pauseLifecycle).toEqual({ http: { enabled: true } });
+      expect(cfg?.pauseLifecycle).toEqual({ http: { url: 'https://example.com/idle' } });
     }
   });
 
@@ -110,7 +101,6 @@ describe('pauseLifecycle config block', () => {
         personality: 'p',
         pauseLifecycle: {
           http: {
-            enabled: true,
             url: 'https://orchestrator.example.com/tenants/t1/idle',
             token: 'secret-token',
             timeoutMs: 5000,
@@ -120,7 +110,6 @@ describe('pauseLifecycle config block', () => {
       secrets,
     );
     const raw = (await storage.read(join(ethosDir(), 'config.yaml'))) ?? '';
-    expect(raw).toContain('pauseLifecycle.http.enabled: true');
     expect(raw).toContain(
       'pauseLifecycle.http.url: https://orchestrator.example.com/tenants/t1/idle',
     );
@@ -130,7 +119,6 @@ describe('pauseLifecycle config block', () => {
     const resolved = await readConfig(storage, secrets);
     expect(resolved?.pauseLifecycle).toEqual({
       http: {
-        enabled: true,
         url: 'https://orchestrator.example.com/tenants/t1/idle',
         token: 'secret-token',
         timeoutMs: 5000,

@@ -53,6 +53,12 @@ class ObservableNoopPauseLifecycle extends NoopPauseLifecycle {
  *
  * `pauseLifecycle.http` is checked first — it's orthogonal to clock-drift
  * detection and no deployment needs both today, so first-match-wins is simplest.
+ * The presence of `url` is the switch: no separate `enabled` flag. A
+ * `pauseLifecycle.http` block configured without a `url` logs and falls
+ * through to the same clock-correction-or-noop selection below, rather than
+ * throwing — the actual self-suspend trigger is separately gated by
+ * `idleWatcher.enabled`, so a misconfigured `http` block should degrade
+ * gracefully, not take down boot.
  *
  * When clock-drift correction is enabled, the returned detector is already
  * STARTED: it has to be sampling the wall clock from boot for a later jump to
@@ -60,11 +66,17 @@ class ObservableNoopPauseLifecycle extends NoopPauseLifecycle {
  */
 export function createPauseLifecycle(config: EthosConfig): ManagedPauseLifecycle {
   const http = config.pauseLifecycle?.http;
-  if (http?.enabled === true) {
-    if (!http.url) {
-      throw new Error('pauseLifecycle.http.enabled is true but pauseLifecycle.http.url is not set');
+  if (http) {
+    if (http.url) {
+      return new HttpPauseLifecycle({
+        url: http.url,
+        token: http.token,
+        timeoutMs: http.timeoutMs,
+      });
     }
-    return new HttpPauseLifecycle({ url: http.url, token: http.token, timeoutMs: http.timeoutMs });
+    console.log(
+      '[pause-lifecycle] pauseLifecycle.http is configured without a url — orchestrator notification disabled',
+    );
   }
   if (config.pauseClockCorrection?.enabled !== true) return new ObservableNoopPauseLifecycle();
   const { thresholdMs } = config.pauseClockCorrection;
