@@ -39,6 +39,7 @@ import {
   KanbanTaskSchema,
   KanbanTaskStatusSchema,
   KanbanTeamSummarySchema,
+  KeyCategorySchema,
   McpAddServerInputSchema,
   McpAddServerOutputSchema,
   McpAttachInputSchema,
@@ -3885,7 +3886,8 @@ const NamedSecretNameSchema = z
 const NamedSecretViewSchema = z.object({
   provider: NamedSecretProviderSchema,
   name: z.string(),
-  /** Masked preview (e.g. `sk-…abc1`) — never the raw value. */
+  /** Masked preview (e.g. `…abc1`, or `<set>` / `<unset>`) — never the raw
+   *  value, and never both ends of one. See `redactSecretValue`. */
   preview: z.string(),
   kind: z.literal('web-search'),
 });
@@ -3910,6 +3912,88 @@ const namedSecrets = {
   testKey: oc
     .input(z.object({ provider: NamedSecretProviderSchema, name: NamedSecretNameSchema }))
     .output(z.object({ ok: z.boolean(), error: z.string().optional() })),
+};
+
+// ---------------------------------------------------------------------------
+// Keys — masked inventory of the WHOLE secrets vault, by category
+//
+// A third read path onto the same vault `namedSecrets` and `models` already
+// read, and deliberately so: it is the only one that shows everything. Its
+// catalog partitions the vault — every ref is either claimed by a catalog
+// entry or surfaces under `custom`, so nothing is silently hidden.
+//
+// Values are write-only, exactly as in `namedSecrets`: `list` returns masked
+// previews and a raw value never comes back. A row the catalog marks as a
+// reflection of a named secret is read-only here (`canSet`/`canClear` false) —
+// it is edited from the Security pane that owns it.
+// ---------------------------------------------------------------------------
+
+/**
+ * The complete set of fields a `blob` entry is allowed to expose — CLOSED, so
+ * an unknown key REJECTS the response at the contract boundary instead of being
+ * silently dropped or, worse, serialized. A `blob` ref holds a whole OAuth
+ * token document (codex: `accessToken`, `refreshToken`, `idToken`, `accountId`,
+ * `expiresAt`, `updatedAt`); three of those are bearer credentials, and an
+ * open `z.record` would have permitted every one of them through the contract.
+ *
+ * Defence in depth: `parseCodexTokens` in
+ * `apps/web-api/src/services/keys-catalog.ts` is the runtime allowlist that
+ * picks these same two fields out of the document, and `KeysService.viewFor`
+ * filters again to string values. This schema is the third and last gate — the
+ * one a parser refactor or an object spread on the server cannot get past.
+ * Changing either side means changing both.
+ */
+export const KeyBlobDetailsSchema = z.strictObject({
+  accountId: z.string().optional(),
+  expiresAt: z.string().optional(),
+});
+export type KeyBlobDetails = z.infer<typeof KeyBlobDetailsSchema>;
+
+const KeyFieldViewSchema = z.object({
+  key: z.string(),
+  label: z.string(),
+  /** The vault ref this field reads and writes. */
+  ref: z.string(),
+  /** Masked preview (e.g. `…abc1`, or `<set>` / `<unset>`) — never the raw
+   *  value, and never both ends of one. See `redactSecretValue`. */
+  preview: z.string(),
+  set: z.boolean(),
+});
+
+const KeyEntryViewSchema = z.object({
+  id: z.string(),
+  category: KeyCategorySchema,
+  label: z.string(),
+  shape: z.enum(['single', 'multi', 'blob']),
+  /** Empty for a `blob` entry — a blob has no editable fields. */
+  fields: z.array(KeyFieldViewSchema),
+  /** `blob` entries only. See `KeyBlobDetailsSchema` — CLOSED, so an unknown
+   *  key is rejected here rather than serialized. */
+  details: KeyBlobDetailsSchema.optional(),
+  set: z.boolean(),
+  canSet: z.boolean(),
+  canClear: z.boolean(),
+  getKeyUrl: z.string().optional(),
+  /** Present only where a real live probe exists today. */
+  probe: z.enum(['exa', 'tavily', 'brave']).optional(),
+});
+
+const KeyCategoryViewSchema = z.object({
+  id: KeyCategorySchema,
+  entries: z.array(KeyEntryViewSchema),
+});
+
+const KeysSetInput = z.object({
+  id: z.string().min(1),
+  /** fieldKey → raw value. 8 KiB cap per value, as in `namedSecrets`. */
+  values: z.record(z.string(), z.string().min(1).max(8192)),
+});
+
+/** @experimental */
+const keys = {
+  list: oc.output(z.object({ categories: z.array(KeyCategoryViewSchema) })),
+  set: oc.input(KeysSetInput).output(z.object({ ok: z.literal(true) })),
+  clear: oc.input(z.object({ id: z.string().min(1) })).output(z.object({ ok: z.literal(true) })),
 };
 
 // ---------------------------------------------------------------------------
@@ -4052,6 +4136,7 @@ export const contract = {
   deliveries,
   a2a,
   namedSecrets,
+  keys,
   toolSettings,
   documents,
 };

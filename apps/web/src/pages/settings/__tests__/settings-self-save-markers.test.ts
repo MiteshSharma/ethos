@@ -1,15 +1,18 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { KEY_CATEGORY_IDS } from '@ethosagent/web-contracts';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { Form } from 'antd';
 import { type ComponentType, createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { MemoryRouter, Outlet, Route, Routes } from 'react-router-dom';
 import { describe, expect, it } from 'vitest';
+import { vaultKeyKeys } from '../../../features/settings/api/keys';
 import { WakePanel } from '../../../features/voice/WakePanel';
 import { SETTINGS_INDEX } from '../lib/settings-index';
 import type { SettingsPaneContext } from '../pane-context';
 import { GeneralPane } from '../panes/general';
+import { KeysPane } from '../panes/keys';
 import { SecurityPane } from '../panes/security';
 
 // T10 — plan/phases/settings-navigation.md D11 / §6.4. Every `SETTINGS_INDEX`
@@ -115,6 +118,61 @@ function markup(pane: ComponentType): string {
   );
 }
 
+/**
+ * The Keys pane renders NOTHING until `rpc.keys.list()` resolves — its
+ * sections are the categories the vault actually holds, not a fixed list — so
+ * the response is seeded, the same way `seedToolSettingsSchema` seeds the
+ * web-search section into existence. It needs no `SettingsPaneContext`: every
+ * row saves through its own RPC and none is a `Form.Item`.
+ *
+ * The seed is built from `KEY_CATEGORY_IDS`, the one canonical category list
+ * (`@ethosagent/web-contracts`), so this test cannot fall behind the taxonomy
+ * or the service — a new category shows up here automatically.
+ */
+function keysPaneMarkup(): string {
+  const queryClient = new QueryClient();
+  queryClient.setQueryData(vaultKeyKeys.all(), {
+    categories: KEY_CATEGORY_IDS.map((id) => ({
+      id,
+      // `connections` holds `blob` entries, which the pane routes to
+      // `ConnectionRow` — no editor, but the section marker must still render.
+      entries: [id === 'connections' ? blobEntryView(id) : entryView(id)],
+    })),
+  });
+  return renderToStaticMarkup(
+    createElement(QueryClientProvider, { client: queryClient }, createElement(KeysPane)),
+  );
+}
+
+function entryView(category: string) {
+  const label = `${category} key`;
+  return {
+    id: `${category}.example`,
+    category,
+    label,
+    shape: 'single' as const,
+    fields: [
+      { key: 'apiKey', label, ref: `${category}/example/apiKey`, preview: '<unset>', set: false },
+    ],
+    set: false,
+    canSet: true,
+    canClear: true,
+  };
+}
+
+function blobEntryView(category: string) {
+  return {
+    id: `${category}.codex`,
+    category,
+    label: 'Codex (ChatGPT sign-in)',
+    shape: 'blob' as const,
+    fields: [],
+    set: false,
+    canSet: false,
+    canClear: true,
+  };
+}
+
 function wakePanelMarkup(): string {
   const queryClient = new QueryClient();
   return renderToStaticMarkup(
@@ -143,13 +201,16 @@ const SELF_SAVE_PAIRS = Array.from(
 // this: it only knows about `Form.Item` names, and self-save UI areas are, by
 // definition, not one.
 describe('SETTINGS_INDEX self-saving sections match what this test covers', () => {
-  it('is exactly the ten known (category, section) pairs', () => {
+  it('is exactly the known (category, section) pairs', () => {
     expect(SELF_SAVE_PAIRS).toEqual([
       'desktop/connection',
       'desktop/keychain-and-auth',
       'desktop/retention',
       'desktop/storage',
       'general/onboarding',
+      // Derived, not listed: the Keys pane has one self-saving section per
+      // canonical category.
+      ...[...KEY_CATEGORY_IDS].map((id) => `keys/${id}`).sort(),
       'security/a2a',
       'security/api-keys',
       'security/named-secrets',
@@ -172,6 +233,14 @@ describe('every self-saving section renders SelfSaveMarker', () => {
     const html = markup(SecurityPane);
 
     it.each(['named-secrets', 'web-search-defaults', 'api-keys', 'a2a'])('%s', (id) => {
+      expect(sectionBlock(html, id)).toContain(MARKER_TEXT);
+    });
+  });
+
+  describe('keys — KeysPane, checked per section', () => {
+    const html = keysPaneMarkup();
+
+    it.each([...KEY_CATEGORY_IDS])('%s', (id) => {
       expect(sectionBlock(html, id)).toContain(MARKER_TEXT);
     });
   });

@@ -2,6 +2,9 @@ import { describe, expect, it } from 'vitest';
 import {
   ApprovalRequestSchema,
   contract,
+  KEY_CATEGORY_IDS,
+  KeyBlobDetailsSchema,
+  KeyCategorySchema,
   ModelCatalogOutput,
   PersonalitySchema,
   SessionSchema,
@@ -292,6 +295,7 @@ describe('contract router', () => {
       'files',
       'goals',
       'kanban',
+      'keys',
       'mcp',
       'memory',
       'mesh',
@@ -319,5 +323,48 @@ describe('contract router', () => {
         expect(procedure, `${ns}.${name}`).not.toBeNull();
       }
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Keys — the blob `details` allowlist, enforced by the contract itself
+// ---------------------------------------------------------------------------
+
+describe('KeyBlobDetailsSchema', () => {
+  it('accepts the two fields the API may expose', () => {
+    expect(
+      KeyBlobDetailsSchema.parse({
+        accountId: 'acct_9f3c21',
+        expiresAt: '2030-01-01T00:00:00.000Z',
+      }),
+    ).toEqual({ accountId: 'acct_9f3c21', expiresAt: '2030-01-01T00:00:00.000Z' });
+    expect(KeyBlobDetailsSchema.parse({})).toEqual({});
+  });
+
+  // The point of the closed schema: a bearer token added by a future parse
+  // refactor or an object spread must FAIL here, not be quietly stripped. If
+  // this ever starts passing, the contract has stopped being a boundary.
+  it('REJECTS an unknown key rather than dropping it', () => {
+    for (const leak of ['accessToken', 'refreshToken', 'idToken', 'updatedAt']) {
+      const result = KeyBlobDetailsSchema.safeParse({
+        accountId: 'acct_9f3c21',
+        [leak]: 'secret-value',
+      });
+      expect(result.success, leak).toBe(false);
+    }
+  });
+
+  it('rejects a non-string value for an allowed key', () => {
+    expect(KeyBlobDetailsSchema.safeParse({ accountId: { nested: 'object' } }).success).toBe(false);
+  });
+});
+
+describe('KEY_CATEGORY_IDS', () => {
+  // Finding 3: one canonical list. The taxonomy, the settings index, the
+  // service's category order and this contract enum all derive from it.
+  it('is the contract enum, in order, with no duplicates', () => {
+    expect(new Set(KEY_CATEGORY_IDS).size).toBe(KEY_CATEGORY_IDS.length);
+    expect(KeyCategorySchema.options).toEqual([...KEY_CATEGORY_IDS]);
+    expect(KeyCategorySchema.safeParse('not-a-category').success).toBe(false);
   });
 });

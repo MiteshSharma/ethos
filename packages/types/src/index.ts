@@ -42,6 +42,7 @@ export * from './safety';
 export * from './sandbox';
 export {
   isValidSecretName,
+  redactSecretValue,
   SECRET_NAME_RE,
   SecretNotFoundError,
   type SecretRef,

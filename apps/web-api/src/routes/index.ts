@@ -116,6 +116,8 @@ export interface ServiceContainer {
   /** Browse / delete files under a personality's declared workdir. */
   documents: import('../services/documents.service').DocumentsService;
   namedSecrets: import('../services/named-secrets.service').NamedSecretsService;
+  /** Masked inventory of the whole secrets vault, by category. */
+  keys: import('../services/keys.service').KeysService;
   toolSettings: import('../services/tool-settings.service').ToolSettingsService;
   voice?: import('../services/voice.service').VoiceService;
   /** Durable per-conversation voice mode, shared with the gateway's lanes. */

@@ -1459,3 +1459,27 @@ export const A2aIdentityViewSchema = z.object({
   exposedSkills: z.array(z.string()),
 });
 export type A2aIdentityViewWire = z.infer<typeof A2aIdentityViewSchema>;
+
+// ---------------------------------------------------------------------------
+// Keys — the canonical category list
+//
+// THE single definition of the Keys-pane categories, in display order. It lives
+// here because it is the one thing both sides of the wire must agree on, and
+// both already import this package: `apps/web-api` (the catalog's `KeyCategory`
+// and the order `KeysService.list()` emits) and `apps/web` (the settings
+// taxonomy, the settings index, and the pane's own headings). Adding or
+// renaming a category is a one-line edit here; everything else derives.
+// ---------------------------------------------------------------------------
+
+export const KEY_CATEGORY_IDS = [
+  'tools',
+  'voice',
+  'gateway',
+  'settings',
+  'connections',
+  'custom',
+] as const;
+
+export type KeyCategoryId = (typeof KEY_CATEGORY_IDS)[number];
+
+export const KeyCategorySchema = z.enum(KEY_CATEGORY_IDS);

@@ -1,4 +1,4 @@
-// The Settings taxonomy — 11 categories in 3 groups, and the sections each one
+// The Settings taxonomy — 12 categories in 3 groups, and the sections each one
 // holds. plan/phases/settings-navigation.md §4.1, with the two owner amendments
 // folded in: `voice / how it talks` leads Voice (it selects pipeline-vs-realtime
 // and therefore gates everything under it), and `voice / barge-in` gains a third
@@ -10,6 +10,8 @@
 // This is the TAXONOMY only: categories → sections. The per-control index
 // (`SETTINGS_INDEX`, D8) that drives search, counts and callouts is Phase 2 and
 // deliberately does not live here.
+
+import { KEY_CATEGORIES } from './keys-categories';
 
 export type SettingsGroup = 'Agent' | 'Channels' | 'Machine';
 
@@ -156,6 +158,22 @@ export const SETTINGS_CATEGORIES: readonly SettingsCategory[] = [
       section('api-keys', 'API keys'),
       section('a2a', 'A2A'),
     ],
+  },
+  {
+    // The whole secrets vault, masked, read through `rpc.keys.*`. Next to
+    // Security & access because it is the same kind of decision, and NOT
+    // merged into it: that category's named-secrets table owns three refs the
+    // web_search picker binds by name, while this one is the inventory of
+    // every ref there is. Its sections are the service's own categories, in
+    // the service's own order, so the rail and the page cannot disagree about
+    // what exists.
+    slug: 'keys',
+    label: 'Keys & secrets',
+    group: 'Machine',
+    // Derived from `KEY_CATEGORIES`, which derives from the contract's
+    // `KEY_CATEGORY_IDS` — one canonical list, so the rail, the page and the
+    // service cannot disagree about which categories exist.
+    sections: KEY_CATEGORIES.map((c) => section(c.id, c.label)),
   },
   {
     slug: 'developer',

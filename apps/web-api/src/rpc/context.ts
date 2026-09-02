@@ -17,6 +17,7 @@ import type { DocumentsService } from '../services/documents.service';
 import type { EvolverService } from '../services/evolver.service';
 import type { GoalsService } from '../services/goals.service';
 import type { KanbanService } from '../services/kanban.service';
+import type { KeysService } from '../services/keys.service';
 import type { LabService } from '../services/lab.service';
 import type { McpService } from '../services/mcp.service';
 import type { MemoryService } from '../services/memory.service';
@@ -70,6 +71,8 @@ export interface RpcContext {
   documents: DocumentsService;
   /** Global named-secrets vault manager (Phase 2). */
   namedSecrets: NamedSecretsService;
+  /** Masked inventory of the whole secrets vault, by category. */
+  keys: KeysService;
   /** Generic per-personality tool settings (Phase 2). */
   toolSettings: ToolSettingsService;
   toolRegistry?: ToolRegistry;

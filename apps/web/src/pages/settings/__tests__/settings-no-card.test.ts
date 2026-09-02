@@ -31,6 +31,7 @@ const FILES = [
   'chat.tsx',
   'data.tsx',
   'security.tsx',
+  'keys.tsx',
   'developer.tsx',
   'desktop.tsx',
   'voice.tsx',

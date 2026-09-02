@@ -74,6 +74,7 @@ import { DocumentsService } from './services/documents.service';
 import { EvolverService } from './services/evolver.service';
 import { GoalsService } from './services/goals.service';
 import { KanbanService } from './services/kanban.service';
+import { KeysService } from './services/keys.service';
 import { LabService } from './services/lab.service';
 import { McpService } from './services/mcp.service';
 import { MemoryService } from './services/memory.service';
@@ -725,6 +726,8 @@ export function createWebApi(opts: CreateWebApiOptions): CreateWebApiResult {
   const apiKeysService = new ApiKeysService(opts.apiKeys ?? null);
   // Phase 2 — global named-secrets vault + generic per-tool settings surface.
   const namedSecretsService = new NamedSecretsService({ secrets });
+  // Keys pane — the whole vault, masked, partitioned by the static catalog.
+  const keysService = new KeysService({ secrets, namedSecrets: namedSecretsService });
   const toolSettingsService = new ToolSettingsService({
     config: configRepo,
     personalities: personalitiesService,
@@ -1333,6 +1336,7 @@ export function createWebApi(opts: CreateWebApiOptions): CreateWebApiResult {
       digest: digestService,
       documents: documentsService,
       namedSecrets: namedSecretsService,
+      keys: keysService,
       toolSettings: toolSettingsService,
       voice: voiceService,
       voiceLaneMode: voiceLaneModeService,

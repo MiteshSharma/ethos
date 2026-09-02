@@ -29,6 +29,7 @@ import { evalRouter } from './eval';
 import { evolverRouter } from './evolver';
 import { goalsRouter } from './goals';
 import { kanbanRouter } from './kanban';
+import { keysRouter } from './keys';
 import { mcpRouter } from './mcp';
 import { memoryRouter } from './memory';
 import { meshRouter } from './mesh';
@@ -104,6 +105,7 @@ export const apiRouter = {
   deliveries: deliveriesRouter,
   a2a: a2aRouter,
   namedSecrets: namedSecretsRouter,
+  keys: keysRouter,
   toolSettings: toolSettingsRouter,
   documents: documentsRouter,
 };

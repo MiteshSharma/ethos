@@ -25,6 +25,8 @@
 // is individually searchable — and so `voice.bargeIn.satellite.silenceMs` can
 // carry `status: 'unread'` while its `call` sibling does not.
 
+import { KEY_CATEGORIES } from './keys-categories';
+
 /** Which Save writes this control: the page's Save bar, or the control itself. */
 export type SettingSaves = 'page' | 'self';
 
@@ -940,6 +942,26 @@ export const SETTINGS_INDEX: readonly SettingEntry[] = [
   ...group('security', 'a2a', [
     { key: 'a2a.enabled', label: 'A2A enabled', saves: 'self', stateBacked: true },
   ]),
+  // Keys & secrets. One entry per section, `stateBacked` — the rows are read
+  // from `rpc.keys.list()` and vary with what the vault holds, so there is no
+  // fixed list of controls to enumerate and no `Form.Item` to name. They are
+  // in the table for the same reason the named-secrets table is: without them
+  // the rail would render a count of 0 over a page full of controls.
+  //
+  // Derived from `KEY_CATEGORIES` (which derives from the contract's
+  // `KEY_CATEGORY_IDS`), so a new category cannot appear in the rail without
+  // an index entry, or vice versa.
+  ...KEY_CATEGORIES.flatMap((c) =>
+    group('keys', c.id, [
+      {
+        key: null,
+        label: c.indexLabel,
+        saves: 'self',
+        stateBacked: true,
+        keyUnresolved: 'Secrets vault (rpc.keys.*) — a vault ref, not a ~/.ethos/config.yaml key.',
+      },
+    ]),
+  ),
   ...group('developer', 'debug', [
     { key: 'debugMode', formName: 'debugMode', label: 'Enable debug mode' },
     { key: 'display.debug_panel', formName: 'debugPanelEnabled', label: 'Show debug panel' },
