@@ -204,6 +204,27 @@ export interface WebhookUpdateInput {
   mode?: 'sync' | 'ack';
 }
 
+/**
+ * The `webhooks.<id>.<field>` leaves `WebhookUpdateInput` models — i.e. the
+ * complete set of keys the update path rewrites from the patch.
+ *
+ * Used as a DENYLIST when carrying a hook's other keys through the
+ * wipe-and-rebuild in `update`. Deliberately not an allowlist of the
+ * config-file-only fields (`events`, `deliver.<n>.*`, `hmac.*`,
+ * `rateLimit.*`): an allowlist has to be extended for every field added to
+ * `WebhookHookConfig`, and forgetting silently deletes that field on the next
+ * save — which is exactly the bug this set exists to prevent. Naming what this
+ * layer owns makes everything it does not own survive by default.
+ */
+const WEBHOOK_MODELLED_FIELDS = new Set([
+  'personalityId',
+  'secret',
+  'sessionKey',
+  'prefilter',
+  'prefilterTimeoutSeconds',
+  'mode',
+]);
+
 /** One `/name` quick command (`quick_commands.<name>.*`). */
 export type QuickCommandGetResult =
   | { type: 'exec'; command: string; gateway: boolean; channels: string[] }
@@ -2493,8 +2514,33 @@ export class ConfigService {
     }
     if (patch.webhooks !== undefined) {
       deletePrefix('webhooks.');
+      // `webhooks.<id>.*` carries fields this layer never models —
+      // `events`/`eventHeader`/`eventField`, `deliverOnly`/`deliver.<n>.*`,
+      // `hmac.*`, `rateLimit.*` — all config-file-only by design, with no UI.
+      // The prefix wipe above takes them too, so without this carry a save
+      // from the Triggers form silently deletes every one of them: the hook
+      // stops filtering, fanning out, verifying signatures and throttling,
+      // with no error shown. Same mechanism the write-only `secret` uses,
+      // generalized to "everything the patch does not speak for".
+      //
+      // Only hooks PRESENT in the patch are carried: a hook the operator
+      // removed is a real deletion, and resurrecting its keys would undo it.
+      const carryUnmodelledKeys = (hookId: string): void => {
+        // Exact-id prefix, not a fuzzy one: hook ids match [A-Za-z0-9_-]+
+        // (`checkRecordKey`, and the reader's own `^webhooks\.([^.]+)\.` parse)
+        // so they contain no '.'. `webhooks.ab.x` therefore cannot start with
+        // `webhooks.a.` — that would need a '.' as the second character of the
+        // id — and hook `a` can never pick up hook `ab`'s keys.
+        const prefix = `webhooks.${hookId}.`;
+        for (const [key, value] of Object.entries(currentPassthrough)) {
+          if (!key.startsWith(prefix)) continue;
+          if (WEBHOOK_MODELLED_FIELDS.has(key.slice(prefix.length))) continue;
+          passthroughPatch[key] = value;
+        }
+      };
       for (const [hookId, hook] of Object.entries(patch.webhooks)) {
         if (!hook) continue;
+        carryUnmodelledKeys(hookId);
         set(`webhooks.${hookId}.personalityId`, hook.personalityId);
         // Write-only secret: provided value wins, then the stored secret,
         // then a generated one for a brand-new hook. Never echoed back.

@@ -39,6 +39,7 @@ import {
   Gateway,
   type GatewayBotConfig,
   type GatewayConfig,
+  relayToTargets,
 } from '@ethosagent/gateway';
 import { registerGoalNotifications } from '@ethosagent/goal-runner';
 import { type BusySource, IdleWatcherManager } from '@ethosagent/idle-watcher';
@@ -128,7 +129,7 @@ import {
 import { notifyReady, startWatchdog } from '../sd-notify';
 import { createSipInboundHandler } from '../sip-inbound-dispatch';
 import { createSipWebhookServer } from '../sip-webhook-server';
-import { createWebhookServer, type PrefilterRunner } from '../webhook-server';
+import { createWebhookServer, type DeliveryRelay, type PrefilterRunner } from '../webhook-server';
 import {
   buildSystemTaskHandlers,
   createAgentLoop,
@@ -1410,6 +1411,25 @@ export async function runGatewayStart(opts: GatewayStartOptions = {}): Promise<v
         label: 'prefilter',
       },
     );
+  // Delivery fan-out for `deliver` / `deliverOnly` hooks. Injected as a seam
+  // for the same reason the prefilter is: `relayToTargets` lives in
+  // `@ethosagent/gateway`, which webhook-server.ts may not import. Its own
+  // adapter map — line ~3052 builds a different one, keyed by PLATFORM for
+  // send_message routing and scoped to another function. This one is keyed by
+  // the full `adapter.id`, which is what a `deliver` target names. The ledger
+  // is the gateway's existing instance, never a second one: one reliability
+  // mechanism, so the boot sweep redelivers a failed fan-out like any reply.
+  const webhookRelayAdapters = new Map(adapters.map((a) => [a.id, a as PlatformAdapter]));
+  const relayWebhookTargets: DeliveryRelay = (targets, content, ctx) =>
+    relayToTargets(targets, content, {
+      hookId: ctx.hookId,
+      sessionKey: ctx.sessionKey,
+      adaptersById: webhookRelayAdapters,
+      ledger: deliveryLedger,
+      // The relay takes the console as a seam — library code under
+      // `extensions/` may not own it. This file is the CLI, where it may.
+      log: (line) => console.log(line),
+    });
   const webhookServer =
     config.webhooks && Object.keys(config.webhooks).length > 0
       ? createWebhookServer(
@@ -1419,6 +1439,22 @@ export async function runGatewayStart(opts: GatewayStartOptions = {}): Promise<v
           config.webhooks,
           createCapturingAdapter,
           runWebhookPrefilter,
+          relayWebhookTargets,
+          {
+            // Refused webhook traffic lands in the same safety-block stream
+            // `sendTracked` writes to — one place an operator already looks,
+            // not a second alerting channel. `Gateway.observability` is
+            // private, so this uses the process accessor the Slack clarify
+            // surface below wires the identical way. The operator-facing
+            // warn line lives in webhook-server.ts, which sees every
+            // rejection path; duplicating it here would double every line.
+            onRejected: (hookId, reason) =>
+              getEthosObservability().recordSafetyBlock({
+                code: 'webhook.rejected',
+                cause: reason,
+                details: { hookId },
+              }),
+          },
         )
       : undefined;
   if (webhookServer && config.webhooks) {

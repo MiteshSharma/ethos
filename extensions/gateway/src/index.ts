@@ -112,6 +112,7 @@ export {
   type VoiceArtifactStoreOptions,
 } from './voice-artifacts';
 export { type CapturingAdapter, createCapturingAdapter } from './webhook-adapter';
+export { type DeliveryTargetConfig, type RelayResult, relayToTargets } from './webhook-relay';
 
 const noopLogger: Logger = {
   debug() {},

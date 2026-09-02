@@ -1,4 +1,5 @@
 import { join } from 'node:path';
+import { loadConfigStrict } from '@ethosagent/config';
 import { InMemorySecretsResolver, InMemoryStorage } from '@ethosagent/storage-fs';
 import { isEthosError } from '@ethosagent/types';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -1058,6 +1059,141 @@ describe('ConfigService — settings passthrough groups', () => {
     // config.yaml is the source of truth and was written first: the hook is gone.
     const written = await storage.read(join(DATA, 'config.yaml'));
     expect(written).not.toContain('webhooks.');
+  });
+
+  // --- webhook fields the update contract does not model -------------------
+  // `events`/`deliver`/`hmac`/`rateLimit` are config-file-only by design (no
+  // GUI). The update path wipes the whole `webhooks.` prefix and rebuilds from
+  // the patch, so without an explicit carry a save from the Triggers form
+  // deletes them all — silently.
+  const HMAC_REF = 'webhooks/alerts/hmac/secret';
+  const FILE_ONLY_HOOK_KEYS = [
+    'webhooks.alerts.events: push, pull_request',
+    'webhooks.alerts.eventHeader: x-github-event',
+    'webhooks.alerts.eventField: action',
+    'webhooks.alerts.deliver.0.type: platform',
+    'webhooks.alerts.deliver.0.adapterId: "telegram:tg-a"',
+    'webhooks.alerts.deliver.0.chatId: "-100123"',
+    'webhooks.alerts.deliver.0.threadId: "7"',
+    'webhooks.alerts.hmac.secret: hmac-material-1',
+    'webhooks.alerts.hmac.header: x-hub-signature-256',
+    'webhooks.alerts.hmac.algorithm: sha256',
+    'webhooks.alerts.rateLimit.maxPerMinute: 60',
+    'webhooks.alerts.rateLimit.lockoutSeconds: 300',
+  ];
+
+  it('webhooks: a save carries through the keys the update contract does not model', async () => {
+    await writeBase([
+      'webhooks.alerts.personalityId: researcher',
+      'webhooks.alerts.secret: hook-bearer-1',
+      'webhooks.alerts.mode: sync',
+      ...FILE_ONLY_HOOK_KEYS,
+    ]);
+
+    // What the Triggers form sends: the six modelled fields, nothing else.
+    await service.update({ webhooks: { alerts: { personalityId: 'researcher', mode: 'ack' } } });
+
+    const written = (await storage.read(join(DATA, 'config.yaml'))) ?? '';
+    expect(written).toContain('webhooks.alerts.events: push, pull_request');
+    expect(written).toContain('webhooks.alerts.eventHeader: x-github-event');
+    expect(written).toContain('webhooks.alerts.eventField: action');
+    expect(written).toContain('webhooks.alerts.deliver.0.type: platform');
+    expect(written).toContain('webhooks.alerts.deliver.0.adapterId: "telegram:tg-a"');
+    expect(written).toContain('webhooks.alerts.deliver.0.chatId: -100123');
+    expect(written).toContain('webhooks.alerts.deliver.0.threadId: 7');
+    expect(written).toContain('webhooks.alerts.hmac.header: x-hub-signature-256');
+    expect(written).toContain('webhooks.alerts.hmac.algorithm: sha256');
+    expect(written).toContain('webhooks.alerts.rateLimit.maxPerMinute: 60');
+    expect(written).toContain('webhooks.alerts.rateLimit.lockoutSeconds: 300');
+    // Preservation is not freezing: the modelled change the save was actually
+    // making still lands.
+    expect(written).toContain('webhooks.alerts.mode: ack');
+    // The carried hmac secret goes to the vault like every other credential
+    // leaf — carrying it must not reintroduce a plaintext write.
+    expect(written).toContain(`webhooks.alerts.hmac.secret: "${secretRef(HMAC_REF)}"`);
+    expect(written).not.toContain('hmac-material-1');
+    expect(await secrets.get(HMAC_REF)).toBe('hmac-material-1');
+  });
+
+  it('webhooks: a hook dropped from the patch loses its unmodelled keys too', async () => {
+    await writeBase([
+      'webhooks.alerts.personalityId: researcher',
+      'webhooks.alerts.secret: hook-bearer-1',
+      ...FILE_ONLY_HOOK_KEYS,
+      'webhooks.builds.personalityId: researcher',
+      'webhooks.builds.secret: hook-bearer-2',
+    ]);
+
+    // Removing a hook is a real deletion — the carry must not resurrect it.
+    await service.update({ webhooks: { builds: { personalityId: 'researcher' } } });
+
+    const written = (await storage.read(join(DATA, 'config.yaml'))) ?? '';
+    expect(written).not.toContain('webhooks.alerts.');
+    expect(written).toContain('webhooks.builds.personalityId: researcher');
+  });
+
+  it('webhooks: unmodelled keys do not leak onto a hook with a longer, similar id', async () => {
+    await writeBase([
+      'webhooks.a.personalityId: researcher',
+      'webhooks.a.secret: hook-bearer-a',
+      'webhooks.a.events: push',
+      'webhooks.a.rateLimit.maxPerMinute: 30',
+      'webhooks.ab.personalityId: researcher',
+      'webhooks.ab.secret: hook-bearer-ab',
+    ]);
+
+    await service.update({
+      webhooks: {
+        a: { personalityId: 'researcher' },
+        ab: { personalityId: 'researcher' },
+      },
+    });
+
+    const written = (await storage.read(join(DATA, 'config.yaml'))) ?? '';
+    expect(written).toContain('webhooks.a.events: push');
+    expect(written).toContain('webhooks.a.rateLimit.maxPerMinute: 30');
+    expect(written).not.toContain('webhooks.ab.events');
+    expect(written).not.toContain('webhooks.ab.rateLimit');
+  });
+
+  it('webhooks: the saved config still loads, with every preserved field intact', async () => {
+    await writeBase([
+      'webhooks.alerts.personalityId: researcher',
+      'webhooks.alerts.secret: hook-bearer-1',
+      'webhooks.alerts.mode: sync',
+      ...FILE_ONLY_HOOK_KEYS,
+    ]);
+
+    await service.update({ webhooks: { alerts: { personalityId: 'researcher', mode: 'ack' } } });
+
+    // The assertion that matters: not "the strings survived" but "the CLI
+    // loader still builds the same WebhookHookConfig from them".
+    const prev = process.env.ETHOS_STATE_DIR;
+    process.env.ETHOS_STATE_DIR = DATA;
+    try {
+      const loaded = await loadConfigStrict(storage, secrets);
+      expect(loaded?.parseErrors).toEqual([]);
+      expect(loaded?.config.webhooks?.alerts).toEqual({
+        personalityId: 'researcher',
+        secret: 'hook-bearer-1',
+        mode: 'ack',
+        events: ['push', 'pull_request'],
+        eventHeader: 'x-github-event',
+        eventField: 'action',
+        deliver: [
+          { type: 'platform', adapterId: 'telegram:tg-a', chatId: '-100123', threadId: '7' },
+        ],
+        hmac: {
+          secret: 'hmac-material-1',
+          header: 'x-hub-signature-256',
+          algorithm: 'sha256',
+        },
+        rateLimit: { maxPerMinute: 60, lockoutSeconds: 300 },
+      });
+    } finally {
+      if (prev === undefined) delete process.env.ETHOS_STATE_DIR;
+      else process.env.ETHOS_STATE_DIR = prev;
+    }
   });
 
   it('round-trips quick commands, channel toolsets, and retention with replace semantics', async () => {
