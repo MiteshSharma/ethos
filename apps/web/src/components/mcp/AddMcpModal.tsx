@@ -20,6 +20,7 @@ import {
 } from 'antd';
 import { useState } from 'react';
 import { useMcpCatalog } from '../../features/mcp/api/queries';
+import { authBadgeLabel, buildRemoteSubmission, groupByCategory } from '../../features/mcp/catalog';
 import { rpc } from '../../rpc';
 
 type Step = 'preset' | 'connecting' | 'done' | 'error';
@@ -29,26 +30,6 @@ type Step = 'preset' | 'connecting' | 'done' | 'error';
 // spawns child processes. `apps/web` importing it would pull that into the
 // browser bundle — plan gap G5, guarded by
 // `extensions/tools-mcp/src/__tests__/browser-boundary.test.ts`.
-
-/** Auth badge copy for a remote catalog entry. */
-export function authBadgeLabel(authType: McpRemotePresetInfo['authType']): string {
-  if (authType === 'oauth') return 'OAuth';
-  if (authType === 'none') return 'No auth';
-  return 'API key';
-}
-
-/** Bucket catalog entries by `category`, preserving the order the server sent. */
-export function groupByCategory<T extends { category: string }>(
-  items: readonly T[],
-): { category: string; items: T[] }[] {
-  const groups: { category: string; items: T[] }[] = [];
-  for (const item of items) {
-    const existing = groups.find((g) => g.category === item.category);
-    if (existing) existing.items.push(item);
-    else groups.push({ category: item.category, items: [item] });
-  }
-  return groups;
-}
 
 /**
  * POSIX single-quote: wrap in single quotes, and end/re-open the quote around
@@ -114,40 +95,6 @@ export function composeLocalPresetCommand(input: {
     if (trimmed) parts.push('--env', shellQuote(`${key}=${trimmed}`));
   }
   return parts.join(' ');
-}
-
-/** What a remote catalog entry submits, decided by its `authType`. */
-export function buildRemoteSubmission(
-  preset: McpRemotePresetInfo,
-  token: string,
-):
-  | { kind: 'oauth'; input: { url: string } }
-  | { kind: 'addServer'; input: Extract<McpAddServerInput, { transport: 'streamable-http' }> } {
-  if (preset.authType === 'oauth') {
-    return { kind: 'oauth', input: { url: preset.url } };
-  }
-  if (preset.authType === 'none') {
-    return {
-      kind: 'addServer',
-      input: {
-        name: preset.name,
-        url: preset.url,
-        transport: 'streamable-http',
-        authType: 'none',
-      },
-    };
-  }
-  const trimmed = token.trim();
-  return {
-    kind: 'addServer',
-    input: {
-      name: preset.name,
-      url: preset.url,
-      transport: 'streamable-http',
-      authType: 'bearer',
-      ...(trimmed ? { token: trimmed } : {}),
-    },
-  };
 }
 
 interface Props {

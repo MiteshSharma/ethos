@@ -15,6 +15,8 @@ import {
 import { useEffect, useMemo, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import { AddMcpModal } from '../components/mcp/AddMcpModal';
+import { McpCatalogSection } from '../components/mcp/McpCatalogSection';
+import { McpSectionLabel } from '../components/mcp/McpSectionLabel';
 import { McpServerActions } from '../components/mcp/McpServerActions';
 import { PersonalityMark } from '../components/ui/PersonalityMark';
 import { mcpKeys } from '../features/mcp/api/keys';
@@ -53,6 +55,9 @@ function LibraryMcpPage() {
     queryFn: () => rpc.plugins.list(),
   });
 
+  const mcpServers = pluginsData?.mcpServers ?? [];
+  const registeredNames = useMemo(() => new Set(mcpServers.map((s) => s.name)), [mcpServers]);
+
   if (error) {
     return (
       <Typography.Text type="danger">
@@ -60,8 +65,6 @@ function LibraryMcpPage() {
       </Typography.Text>
     );
   }
-
-  const mcpServers = pluginsData?.mcpServers ?? [];
 
   return (
     <div className="plugins-tab">
@@ -75,6 +78,7 @@ function LibraryMcpPage() {
           + New MCP Server
         </button>
       </header>
+      <McpCatalogSection registeredNames={registeredNames} />
       <McpTable servers={mcpServers} loading={isLoading} />
       <AddMcpModal open={addMcpOpen} onClose={() => setAddMcpOpen(false)} />
     </div>
@@ -120,6 +124,14 @@ function WorkspaceMcpPanel({ personalityId }: { personalityId: string }) {
     () =>
       splitByAttachment(globalServersQuery.data?.mcpServers ?? [], attachedNames, (s) => s.name),
     [globalServersQuery.data, attachedNames],
+  );
+
+  // Every globally registered server — the catalog section (below) filters
+  // out any preset that already matches one of these, whether or not it's
+  // attached to this personality (plan §2.3).
+  const registeredNames = useMemo(
+    () => new Set((globalServersQuery.data?.mcpServers ?? []).map((s) => s.name)),
+    [globalServersQuery.data],
   );
 
   // Shared query keys, not a dedicated round trip (P3's "Done when" bar):
@@ -210,25 +222,10 @@ function WorkspaceMcpPanel({ personalityId }: { personalityId: string }) {
               onToggle={(serverName) => attachMut.mutate(serverName)}
             />
           )}
+
+          <McpCatalogSection registeredNames={registeredNames} />
         </>
       )}
-    </div>
-  );
-}
-
-function McpSectionLabel({ children }: { children: React.ReactNode }) {
-  return (
-    <div
-      style={{
-        fontSize: 11,
-        fontWeight: 500,
-        color: 'var(--text-tertiary)',
-        textTransform: 'uppercase',
-        letterSpacing: '0.08em',
-        margin: '20px 0 10px',
-      }}
-    >
-      {children}
     </div>
   );
 }

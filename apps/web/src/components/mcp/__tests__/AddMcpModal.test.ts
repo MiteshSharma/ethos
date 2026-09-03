@@ -55,13 +55,7 @@ vi.mock('../../../rpc', () => ({
   },
 }));
 
-const {
-  AddMcpModal,
-  authBadgeLabel,
-  buildRemoteSubmission,
-  composeLocalPresetCommand,
-  shellQuote,
-} = await import('../AddMcpModal');
+const { AddMcpModal, composeLocalPresetCommand, shellQuote } = await import('../AddMcpModal');
 
 const CATALOG: McpCatalogOutput = {
   remote: [
@@ -447,12 +441,6 @@ describe('AddMcpModal — local preset tab', () => {
 });
 
 describe('AddMcpModal — pure helpers', () => {
-  it('maps every authType to its badge copy', () => {
-    expect(authBadgeLabel('oauth')).toBe('OAuth');
-    expect(authBadgeLabel('none')).toBe('No auth');
-    expect(authBadgeLabel('bearer')).toBe('API key');
-  });
-
   it('drops blank env values from the CLI command', () => {
     expect(
       composeLocalPresetCommand({
@@ -538,20 +526,5 @@ describe('AddMcpModal — pure helpers', () => {
     expect(shellQuote("it's")).toBe("'it'\\''s'");
     expect(shellQuote("a'b'c")).toBe("'a'\\''b'\\''c'");
     expect(shellQuote('$(id) `x` ; & | > <')).toBe("'$(id) `x` ; & | > <'");
-  });
-
-  it('omits a bearer token that was left blank', () => {
-    const wolfram = CATALOG.remote[2];
-    expect(wolfram).toBeDefined();
-    if (!wolfram) return;
-    expect(buildRemoteSubmission(wolfram, '   ')).toEqual({
-      kind: 'addServer',
-      input: {
-        name: 'wolfram',
-        url: 'https://mcp.wolframalpha.com/mcp',
-        transport: 'streamable-http',
-        authType: 'bearer',
-      },
-    });
   });
 });

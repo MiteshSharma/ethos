@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Alert, Button, List, Modal, Space, Spin, Steps, Tag, Typography } from 'antd';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useEffect, useState } from 'react';
+import { useMcpOAuthPopup } from '../../features/mcp/useMcpOAuthPopup';
 import { rpc } from '../../rpc';
 
 interface ConnectMcpModalProps {
@@ -11,11 +12,12 @@ interface ConnectMcpModalProps {
   onConnected: () => void;
 }
 
-type Step = 'select' | 'connecting' | 'oauth' | 'done';
+/** This modal's own "select a server, then done" steps — the "connecting" /
+ *  "oauth" steps in between are driven by `useMcpOAuthPopup`'s `phase`
+ *  (plan/phases/mcp-inline-catalog.md §6 step 3), not tracked here. */
+type LocalStep = 'select' | 'done';
 
-const OAUTH_POPUP_WIDTH = 520;
-const OAUTH_POPUP_HEIGHT = 720;
-const OAUTH_RETURN_KEY = 'ethos:mcp_oauth_return';
+type Step = LocalStep | 'connecting' | 'oauth';
 
 export function ConnectMcpModal({
   open,
@@ -25,13 +27,9 @@ export function ConnectMcpModal({
   onConnected,
 }: ConnectMcpModalProps) {
   const qc = useQueryClient();
-  const [step, setStep] = useState<Step>('select');
+  const [localStep, setLocalStep] = useState<LocalStep>('select');
   const [selected, setSelected] = useState<string | null>(null);
-  const [oauthState, setOauthState] = useState('');
   const [errorMsg, setErrorMsg] = useState('');
-  const popupRef = useRef<Window | null>(null);
-  const pollingRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const pollingStartRef = useRef<number>(0);
 
   // Fetch global server registry
   const { data: listData, isLoading: listLoading } = useQuery({
@@ -45,82 +43,27 @@ export function ConnectMcpModal({
     (s) => !existingServers.includes(s.name),
   );
 
-  const finishConnect = useCallback(() => {
-    setStep('done');
+  const finishConnect = () => {
+    setLocalStep('done');
     qc.invalidateQueries({ queryKey: ['mcp', 'personalityServers', personalityId] });
     qc.invalidateQueries({ queryKey: ['personalities', 'get', personalityId] });
     onConnected();
-  }, [qc, personalityId, onConnected]);
+  };
 
-  const stopPolling = useCallback(() => {
-    if (pollingRef.current) {
-      clearInterval(pollingRef.current);
-      pollingRef.current = null;
-    }
-  }, []);
-
-  const startPolling = useCallback(() => {
-    if (pollingRef.current) clearInterval(pollingRef.current);
-    pollingStartRef.current = Date.now();
-    pollingRef.current = setInterval(async () => {
-      try {
-        const result = await rpc.mcp.status();
-        if (result.status === 'connected') {
-          stopPolling();
-          finishConnect();
-        } else if (result.status === 'error') {
-          stopPolling();
-          setErrorMsg(result.error ?? 'Connection failed');
-          setStep('select');
-        } else if (result.status === 'expired') {
-          if (Date.now() - pollingStartRef.current >= 5 * 60 * 1000) {
-            stopPolling();
-            setErrorMsg('Authorization session expired. Please retry.');
-            setStep('select');
-          }
-        }
-      } catch {
-        // Keep polling
-      }
-    }, 2000);
-  }, [stopPolling, finishConnect]);
-
-  // Listen for BroadcastChannel message from OAuth callback
-  useEffect(() => {
-    if (step !== 'oauth') return;
-
-    const channel = new BroadcastChannel('ethos:mcp_oauth');
-
-    channel.onmessage = (event: MessageEvent) => {
-      const msg = event.data as Record<string, unknown> | null;
-      if (!msg || typeof msg !== 'object') return;
-
-      if (msg.type === 'ethos:mcp_oauth_success' && msg.state === oauthState) {
-        stopPolling();
-        finishConnect();
-      } else if (msg.type === 'ethos:mcp_oauth_error' && msg.state === oauthState) {
-        stopPolling();
-        const detail = typeof msg.detail === 'string' ? msg.detail : undefined;
-        const code = typeof msg.code === 'string' ? msg.code : undefined;
-        setErrorMsg(detail ?? code ?? 'OAuth failed');
-        setStep('select');
-      }
-    };
-
-    return () => channel.close();
-  }, [step, oauthState, stopPolling, finishConnect]);
-
-  // Cleanup polling on unmount
-  useEffect(() => {
-    return () => stopPolling();
-  }, [stopPolling]);
+  const oauth = useMcpOAuthPopup({
+    personalityId,
+    onSuccess: () => finishConnect(),
+    onError: (message) => {
+      setErrorMsg(message);
+      setLocalStep('select');
+    },
+  });
 
   // Reset state when modal opens
   useEffect(() => {
     if (open) {
-      setStep('select');
+      setLocalStep('select');
       setSelected(null);
-      setOauthState('');
       setErrorMsg('');
     }
   }, [open]);
@@ -132,7 +75,7 @@ export function ConnectMcpModal({
         id: personalityId,
         mcp_servers: [...existingServers, serverName],
       }),
-    onSuccess: async (_result, serverName) => {
+    onSuccess: (_result, serverName) => {
       // Check if this server needs OAuth
       const server = (listData?.servers ?? []).find((s) => s.name === serverName);
       // Non-OAuth servers (no url, or already authorized globally) -> done
@@ -141,42 +84,16 @@ export function ConnectMcpModal({
         return;
       }
       // OAuth server - start auth flow
-      setStep('connecting');
-      startOAuth(serverName, server.url);
+      oauth.start({
+        url: server.url,
+        name: serverName,
+        returnPath: `/personalities/${personalityId}`,
+      });
     },
     onError: (err) => {
       setErrorMsg(err instanceof Error ? err.message : String(err));
     },
   });
-
-  const startOAuth = async (serverName: string, url: string) => {
-    try {
-      const result = await rpc.mcp.start({ url, personalityId, name: serverName });
-      if (!result.ok) {
-        setErrorMsg('detail' in result ? (result.detail ?? result.code) : result.code);
-        setStep('select');
-        return;
-      }
-      setOauthState(result.state);
-      setStep('oauth');
-      const popup = window.open(
-        result.authorizeUrl,
-        '_blank',
-        `width=${OAUTH_POPUP_WIDTH},height=${OAUTH_POPUP_HEIGHT}`,
-      );
-      if (!popup || popup.closed) {
-        // Popup blocked - fall back to same-tab navigation
-        sessionStorage.setItem(OAUTH_RETURN_KEY, `/personalities/${personalityId}`);
-        window.location.href = result.authorizeUrl;
-        return;
-      }
-      popupRef.current = popup;
-      startPolling();
-    } catch (err) {
-      setErrorMsg(err instanceof Error ? err.message : String(err));
-      setStep('select');
-    }
-  };
 
   const handleSelect = (serverName: string) => {
     setSelected(serverName);
@@ -185,12 +102,12 @@ export function ConnectMcpModal({
   };
 
   const handleClose = () => {
-    stopPolling();
-    if (step === 'oauth' && oauthState) {
-      rpc.mcp.cancel({ state: oauthState }).catch(() => {});
-    }
+    oauth.cancel();
     onClose();
   };
+
+  const step: Step =
+    oauth.phase === 'waiting' ? 'oauth' : oauth.phase === 'connecting' ? 'connecting' : localStep;
 
   const currentStepIndex =
     step === 'select' ? 0 : step === 'connecting' || step === 'oauth' ? 1 : 2;
