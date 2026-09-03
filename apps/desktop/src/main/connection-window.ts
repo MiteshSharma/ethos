@@ -89,6 +89,7 @@ machine. Saved to the macOS keychain &#8212; you won&#8217;t be asked again.</p>
 </div>
 </main>
 <div class="actions">
+<button id="quit">Quit</button>
 <span id="result" class="res"></span>
 <button id="test">Test connection</button>
 <button id="go" class="p">Continue</button>
@@ -131,6 +132,7 @@ document.querySelectorAll('input[name=m]').forEach(function(r){
   r.addEventListener('change', sync);
 });
 $('url').addEventListener('input', sync);
+$('quit').addEventListener('click', function(){ signal('cancel'); });
 $('test').addEventListener('click', function(){ busy(); signal('test'); });
 $('go').addEventListener('click', function(){
   if (mode() === 'local') { signal('submit'); return; }
