@@ -28,6 +28,16 @@ vi.mock('electron-store', () => ({
   },
 }));
 
+// `satellite.ts` imports `./connection` to know whether a local backend exists
+// at all, which reaches `electron` (cookie jar, keychain) at module scope.
+vi.mock('electron', () => ({
+  session: { defaultSession: { cookies: { set: async () => {} } } },
+  safeStorage: {
+    encryptString: (s: string) => Buffer.from(s),
+    decryptString: (b: Buffer) => b.toString(),
+  },
+}));
+
 // The host reads the web token to build its auth cookie. Mocked so the test
 // neither touches ~/.ethos nor drags the whole web-api into the module graph
 // for a string.

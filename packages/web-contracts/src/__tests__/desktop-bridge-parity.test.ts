@@ -20,7 +20,7 @@ describe('EthosDesktopBridge gateway parity', () => {
   it('connection namespace has remote mode methods', () => {
     // Verifies the connection namespace (needed for remote bearer auth path) is present
     type ConnectionMethods = keyof EthosDesktopBridge['connection'];
-    const expected: ConnectionMethods[] = ['get', 'set', 'test'];
-    expect(expected).toHaveLength(3);
+    const expected: ConnectionMethods[] = ['get', 'set', 'test', 'reload'];
+    expect(expected).toHaveLength(4);
   });
 });

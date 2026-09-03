@@ -7,13 +7,23 @@ import { app, BrowserWindow, nativeTheme, session, type Tray } from 'electron';
 import type { SatelliteStatus } from '../shared/ipc-contract';
 import { initAutoUpdater } from './auto-update';
 import { restartBackendAsync, startBackend, startBackendAsync, stopBackend } from './backend';
+import {
+  applyRemoteAuthCookie,
+  getConnectionMode,
+  isConfigured,
+  remoteHost,
+  remoteOrigin,
+  resolveBackendBaseUrl,
+  wsOriginFor,
+} from './connection';
+import { showConnectionWindow } from './connection-window';
 import { showErrorWindow } from './error-window';
 import { registerGlobalShortcuts, unregisterGlobalShortcuts } from './global-shortcut';
 import { registerIpcHandlers } from './ipc';
+import { setKeychainValue } from './keychain';
 import { showMinimizeNotification } from './notifications';
 import { registerProtocolHandler } from './protocol-handler';
 import { registerQuickChatIpc, showQuickChat } from './quick-chat-window';
-import { syncRemoteAuth } from './remote-auth';
 import { onSatelliteStatus, setWakeEnabled, startSatellite, stopSatellite } from './satellite';
 import { isBackgroundMode, logBackgroundStartup } from './startup-mode';
 import { store } from './store';
@@ -26,6 +36,17 @@ let desktopActivated = false;
 
 function getDataDir(): string {
   return store.get('dataDir') ?? join(homedir(), '.ethos');
+}
+
+/**
+ * `onboardingComplete` tracks setup of the LOCAL backend, and only the
+ * `onboarding:complete` IPC flips it. A remote deployment is already set up —
+ * on its own server — so gating the window shape, the close-to-tray behaviour
+ * and tray activation on that flag alone would leave remote mode permanently
+ * in the onboarding window with no tray.
+ */
+export function needsLocalOnboarding(): boolean {
+  return getConnectionMode() === 'local' && !store.get('onboardingComplete', false);
 }
 
 async function loadSpaUrl(win: BrowserWindow, port: number): Promise<void> {
@@ -47,14 +68,27 @@ async function loadSpaUrl(win: BrowserWindow, port: number): Promise<void> {
   win.loadURL(baseUrl);
 }
 
-function setupSpaCsp(): void {
+/**
+ * In remote mode the SPA is served BY the remote origin, so a loopback
+ * `connect-src` would block every RPC and SSE call it makes. The rest of the
+ * policy is identical in both modes.
+ */
+function spaConnectSrc(): string {
+  if (getConnectionMode() === 'remote') {
+    const origin = remoteOrigin(store.get('remoteUrl') ?? '');
+    if (origin) return `'self' ${origin} ${wsOriginFor(origin)}`;
+  }
   const isDev = process.env.NODE_ENV === 'development';
   const localConnect = isDev ? ' http://localhost:* ws://localhost:*' : '';
+  return `'self' http://127.0.0.1:* ws://127.0.0.1:*${localConnect}`;
+}
+
+function setupSpaCsp(): void {
   const csp = [
     "default-src 'self'",
     "script-src 'self'",
     "style-src 'self' 'unsafe-inline'",
-    `connect-src 'self' http://127.0.0.1:* ws://127.0.0.1:*${localConnect}`,
+    `connect-src ${spaConnectSrc()}`,
     "img-src 'self' data: https:",
     "font-src 'self'",
   ].join('; ');
@@ -86,6 +120,104 @@ async function startBackendWithRetry(port: number): Promise<number> {
         throw err;
       }
     }
+  }
+}
+
+/**
+ * Remote mode is a THIN CLIENT: the window navigates to the remote server,
+ * which serves its own SPA same-origin. No local backend is started.
+ */
+async function loadRemoteUrl(win: BrowserWindow): Promise<void> {
+  await applyRemoteAuthCookie();
+  // Deliberately not awaited, same as `loadSpaUrl`: a failed load both rejects
+  // here and fires `did-fail-load`, which is where recovery lives. Awaiting
+  // would surface the same failure a second time as an unhandled rejection.
+  win.loadURL(resolveBackendBaseUrl());
+}
+
+let remoteRecoveryOpen = false;
+
+async function handleRemoteLoadFailure(reason: string): Promise<void> {
+  if (remoteRecoveryOpen) return;
+  remoteRecoveryOpen = true;
+  try {
+    const host = remoteHost(store.get('remoteUrl') ?? '') ?? 'the remote server';
+    const action = await showErrorWindow({
+      title: 'Connection Failed',
+      message: `Can't reach ${host} — ${reason}.`,
+      altLabel: 'Switch to local',
+    });
+    if (action === 'alt') {
+      store.set('connectionMode', 'local');
+      app.relaunch();
+      app.quit();
+      return;
+    }
+    if (action === 'quit') {
+      app.quit();
+      return;
+    }
+    const win = mainWindow;
+    if (win && !win.isDestroyed()) await loadRemoteUrl(win);
+  } finally {
+    remoteRecoveryOpen = false;
+  }
+}
+
+/**
+ * The saved web token stopped working — most often because someone signed into
+ * that server from a browser with a `?t=` URL, which rotates it. Ask for a
+ * fresh one rather than leaving the window on a SPA that cannot authenticate.
+ */
+async function handleRemoteAuthRejected(): Promise<void> {
+  if (remoteRecoveryOpen) return;
+  remoteRecoveryOpen = true;
+  try {
+    const choice = await showConnectionWindow({
+      ...(store.get('remoteUrl') ? { url: store.get('remoteUrl') } : {}),
+      message: 'This server no longer accepts the saved token. Paste a fresh one from ethos serve.',
+    });
+    if (!choice) {
+      app.quit();
+      return;
+    }
+    await persistConnectionChoice(choice);
+    app.relaunch();
+    app.quit();
+  } finally {
+    remoteRecoveryOpen = false;
+  }
+}
+
+function wireRemoteRecovery(win: BrowserWindow): void {
+  win.webContents.on('did-fail-load', (_e, errorCode, errorDescription, _url, isMainFrame) => {
+    // ERR_ABORTED (-3) is a superseded or cancelled navigation, not a failure.
+    if (!isMainFrame || errorCode === -3) return;
+    void handleRemoteLoadFailure(errorDescription || `error ${errorCode}`);
+  });
+
+  // A 401 never reaches a navigation event: web-api serves index.html
+  // UNAUTHENTICATED (`staticRoutes` is mounted after the auth middleware and
+  // owns `/*`), so the top-level document is always a 200 and the rejection
+  // only surfaces on the SPA's first `/rpc/*` call. `onCompleted` on that
+  // request is therefore the only signal that actually fires.
+  const origin = remoteOrigin(store.get('remoteUrl') ?? '');
+  if (!origin) return;
+  session.defaultSession.webRequest.onCompleted({ urls: [`${origin}/rpc/*`] }, (details) => {
+    if (details.statusCode === 401) void handleRemoteAuthRejected();
+  });
+}
+
+async function persistConnectionChoice(choice: {
+  mode: 'local' | 'remote';
+  url?: string;
+  token?: string;
+}): Promise<void> {
+  store.set('connectionMode', choice.mode);
+  if (choice.url) store.set('remoteUrl', choice.url);
+  if (choice.token) {
+    await setKeychainValue('remote-token', choice.token);
+    store.set('remoteTokenSavedAt', new Date().toISOString());
   }
 }
 
@@ -124,8 +256,7 @@ function trayStateForSatellite(status: SatelliteStatus): TrayState {
 function activateDesktop(): void {
   if (desktopActivated) return;
   desktopActivated = true;
-  const connMode = store.get('connectionMode') ?? 'local';
-  if (connMode !== 'remote') {
+  if (getConnectionMode() !== 'remote') {
     startBackend(3001);
   }
   trayInstance = createTray(() => mainWindow, createWindow);
@@ -192,7 +323,7 @@ function buildSplashHtml(): string {
 
 async function createWindow(): Promise<void> {
   const bounds = store.get('windowBounds');
-  const isOnboarding = !store.get('onboardingComplete', false);
+  const isOnboarding = needsLocalOnboarding();
 
   mainWindow = new BrowserWindow({
     width: isOnboarding ? 800 : (bounds?.width ?? 1200),
@@ -210,12 +341,16 @@ async function createWindow(): Promise<void> {
   });
 
   const splashHtml = buildSplashHtml();
-  await mainWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(splashHtml)}`);
+  try {
+    await mainWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(splashHtml)}`);
+  } catch (err) {
+    console.error('[ethos] splash screen failed to load, continuing without it:', err);
+  }
   mainWindow.show();
 
   mainWindow.on('close', (event: { preventDefault(): void }) => {
     if (isQuitting) return;
-    if (!store.get('onboardingComplete', false)) return; // allow close during onboarding
+    if (needsLocalOnboarding()) return; // allow close during onboarding
     event.preventDefault();
     const b = mainWindow?.getBounds();
     if (b) store.set('windowBounds', b);
@@ -236,10 +371,15 @@ async function createWindow(): Promise<void> {
     store.set('theme', isDark ? 'dark' : 'light');
   }
 
-  const port = store.get('backendPort', 3001);
-  const actualPort = await startBackendWithRetry(port);
-  store.set('backendPort', actualPort);
-  await loadSpaUrl(mainWindow, actualPort);
+  if (getConnectionMode() === 'remote') {
+    wireRemoteRecovery(mainWindow);
+    await loadRemoteUrl(mainWindow);
+  } else {
+    const port = store.get('backendPort', 3001);
+    const actualPort = await startBackendWithRetry(port);
+    store.set('backendPort', actualPort);
+    await loadSpaUrl(mainWindow, actualPort);
+  }
 
   registerQuickChatIpc(mainWindow);
   if (desktopActivated) {
@@ -247,89 +387,109 @@ async function createWindow(): Promise<void> {
   }
 }
 
-app.whenReady().then(async () => {
-  // Seed dataDir from --dir CLI arg (takes precedence; saved for subsequent launches)
-  const dirFlagIdx = process.argv.indexOf('--dir');
-  if (dirFlagIdx !== -1 && process.argv[dirFlagIdx + 1]) {
-    store.set('dataDir', process.argv[dirFlagIdx + 1]);
-  }
+app
+  .whenReady()
+  .then(async () => {
+    // Seed dataDir from --dir CLI arg (takes precedence; saved for subsequent launches)
+    const dirFlagIdx = process.argv.indexOf('--dir');
+    if (dirFlagIdx !== -1 && process.argv[dirFlagIdx + 1]) {
+      store.set('dataDir', process.argv[dirFlagIdx + 1]);
+    }
 
-  registerIpcHandlers();
-  await syncRemoteAuth();
+    registerIpcHandlers();
 
-  registerProtocolHandler({
-    getMainWindow: () => mainWindow,
-    onPluginOAuthCallback: async ({ pluginId, oauthRef, requestToken }) => {
-      try {
-        const port = store.get('backendPort', 3001);
-        await fetch(`http://localhost:${port}/rpc/plugins.completeOAuth`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ pluginId, oauthRef, requestToken }),
-        });
-      } catch {
-        // fail-open: OAuth completion errors are surfaced via panel refresh
+    // Asked once, before anything boots, so choosing remote never starts a local
+    // backend. An unset `connectionMode` is the only trigger.
+    if (!isConfigured()) {
+      const choice = await showConnectionWindow();
+      if (!choice) {
+        app.quit();
+        return;
       }
-      const win = mainWindow;
-      if (win && !win.isDestroyed()) {
-        win.webContents.send('plugin:oauthComplete', { oauthRef });
-      }
-    },
-  });
+      await persistConnectionChoice(choice);
+    }
 
-  setupSpaCsp();
+    await applyRemoteAuthCookie();
 
-  const hidden = isBackgroundMode();
+    registerProtocolHandler({
+      getMainWindow: () => mainWindow,
+      onPluginOAuthCallback: async ({ pluginId, oauthRef, requestToken }) => {
+        try {
+          await fetch(`${resolveBackendBaseUrl()}/rpc/plugins/completeOAuth`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', Origin: resolveBackendBaseUrl() },
+            body: JSON.stringify({ json: { pluginId, oauthRef, requestToken } }),
+          });
+        } catch {
+          // fail-open: OAuth completion errors are surfaced via panel refresh
+        }
+        const win = mainWindow;
+        if (win && !win.isDestroyed()) {
+          win.webContents.send('plugin:oauthComplete', { oauthRef });
+        }
+      },
+    });
 
-  if (hidden && store.get('onboardingComplete', false)) {
-    logBackgroundStartup();
-    activateDesktop();
-  } else {
-    await createWindow();
-    if (store.get('onboardingComplete', false)) {
+    setupSpaCsp();
+
+    const hidden = isBackgroundMode();
+
+    if (hidden && !needsLocalOnboarding()) {
+      logBackgroundStartup();
       activateDesktop();
-    }
-  }
-
-  (app as unknown as EventEmitter).on('ethos:onboarding-complete', () => {
-    activateDesktop();
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      const port = store.get('backendPort', 3001);
-      restartBackendAsync(port)
-        .then((actualPort) => {
-          store.set('backendPort', actualPort);
-          if (mainWindow && !mainWindow.isDestroyed()) {
-            loadSpaUrl(mainWindow, actualPort);
-          }
-        })
-        .catch((err: unknown) => {
-          console.error('[ethos] failed to restart backend after onboarding:', err);
-        });
-    }
-  });
-
-  if (process.env.NODE_ENV !== 'development') {
-    initAutoUpdater();
-  }
-
-  nativeTheme.on('updated', () => {
-    if (store.get('theme') === 'system') {
-      const resolved = nativeTheme.shouldUseDarkColors ? 'dark' : 'light';
-      mainWindow?.webContents.send('theme:changed', resolved);
-    }
-  });
-
-  app.on('activate', () => {
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.show();
-      mainWindow.focus();
     } else {
-      createWindow().catch((err: unknown) => {
-        console.error('[ethos] failed to create window on activate:', err);
-      });
+      await createWindow();
+      if (!needsLocalOnboarding()) {
+        activateDesktop();
+      }
     }
+
+    (app as unknown as EventEmitter).on('ethos:onboarding-complete', () => {
+      // Defence in depth: local onboarding must never boot a local backend the
+      // user declined by pointing this app at a remote server.
+      if (getConnectionMode() === 'remote') return;
+      activateDesktop();
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        const port = store.get('backendPort', 3001);
+        restartBackendAsync(port)
+          .then((actualPort) => {
+            store.set('backendPort', actualPort);
+            if (mainWindow && !mainWindow.isDestroyed()) {
+              loadSpaUrl(mainWindow, actualPort);
+            }
+          })
+          .catch((err: unknown) => {
+            console.error('[ethos] failed to restart backend after onboarding:', err);
+          });
+      }
+    });
+
+    if (process.env.NODE_ENV !== 'development') {
+      initAutoUpdater();
+    }
+
+    nativeTheme.on('updated', () => {
+      if (store.get('theme') === 'system') {
+        const resolved = nativeTheme.shouldUseDarkColors ? 'dark' : 'light';
+        mainWindow?.webContents.send('theme:changed', resolved);
+      }
+    });
+
+    app.on('activate', () => {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.show();
+        mainWindow.focus();
+      } else {
+        createWindow().catch((err: unknown) => {
+          console.error('[ethos] failed to create window on activate:', err);
+        });
+      }
+    });
+  })
+  .catch((err: unknown) => {
+    console.error('[ethos] fatal error during startup:', err);
+    app.quit();
   });
-});
 
 app.on('window-all-closed', () => {
   if (!desktopActivated) {

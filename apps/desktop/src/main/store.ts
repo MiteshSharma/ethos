@@ -30,6 +30,12 @@ export interface AppStoreType {
   dataDir?: string;
   connectionMode?: 'local' | 'remote';
   remoteUrl?: string;
+  /**
+   * ISO 8601 timestamp of the last remote web-token save. Exists so Settings
+   * can show WHEN the token was stored without ever reading the token itself —
+   * that value stays in the keychain and never reaches the renderer.
+   */
+  remoteTokenSavedAt?: string;
   useSpaMode: boolean;
   /**
    * Wake-word enabled state. Persisted because the mic indicator has to be

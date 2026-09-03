@@ -12,6 +12,10 @@
 export interface EthosConnection {
   mode: 'local' | 'remote';
   url?: string;
+  /** Whether a web token is stored in the OS keychain. The token never crosses the bridge. */
+  hasToken: boolean;
+  /** ISO timestamp of when that token was stored. */
+  tokenSavedAt?: string;
 }
 
 export interface DesktopConfig {
@@ -99,7 +103,7 @@ export interface EthosDesktopBridge {
       model: string;
       apiKey: string;
       personalityId: string;
-    }) => Promise<{ success: boolean }>;
+    }) => Promise<{ success: boolean; error?: string }>;
   };
 
   personalities: {
@@ -219,11 +223,17 @@ export interface EthosDesktopBridge {
       mode: 'local' | 'remote';
       url?: string;
       token?: string;
-    }) => Promise<{ ok: boolean }>;
+    }) => Promise<{ ok: boolean; relaunchRequired?: boolean; error?: string }>;
     test: (req: {
       url: string;
       token?: string;
-    }) => Promise<{ ok: boolean; latencyMs?: number; error?: string }>;
+    }) => Promise<{ ok: boolean; latencyMs?: number; version?: string; error?: string }>;
+    /** Clear the cached SPA and reload it from the configured server. */
+    reload: () => Promise<{ ok: boolean }>;
+  };
+
+  app: {
+    relaunch: () => Promise<{ ok: boolean }>;
   };
 
   codex: {

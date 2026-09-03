@@ -1048,7 +1048,7 @@ export const SETTINGS_INDEX: readonly SettingEntry[] = [
     },
     {
       key: null,
-      label: 'Remote URL',
+      label: 'Server URL',
       saves: 'self',
       stateBacked: true,
       keyUnresolved:
@@ -1056,11 +1056,19 @@ export const SETTINGS_INDEX: readonly SettingEntry[] = [
     },
     {
       key: null,
-      label: 'Remote token',
+      label: 'Web token',
       saves: 'self',
       stateBacked: true,
       keyUnresolved:
-        'macOS keychain entry `remote-token` via connection:set IPC; not a config.yaml key.',
+        "The remote server's web token, written to the OS keychain via connection:set IPC; not a config.yaml key, and never read back into the renderer.",
+    },
+    {
+      key: null,
+      label: 'Replace token',
+      saves: 'self',
+      stateBacked: true,
+      keyUnresolved:
+        'Action button; reveals the web-token field so the next connection:set overwrites the keychain entry. Writes nothing on its own.',
     },
     {
       key: null,
@@ -1071,10 +1079,27 @@ export const SETTINGS_INDEX: readonly SettingEntry[] = [
     },
     {
       key: null,
+      label: 'Reload app',
+      saves: 'self',
+      stateBacked: true,
+      keyUnresolved:
+        'Action button (connection:reload IPC); clears the cached app and reloads it from the server. Writes nothing.',
+    },
+    {
+      key: null,
       label: 'Save connection',
       saves: 'self',
       stateBacked: true,
-      keyUnresolved: 'Action button (connection:set IPC); writes the two keys above.',
+      keyUnresolved:
+        'Action button (connection:set IPC); writes the mode, the server URL and the web token.',
+    },
+    {
+      key: null,
+      label: 'Relaunch now',
+      saves: 'self',
+      stateBacked: true,
+      keyUnresolved:
+        'Action button (app:relaunch IPC); restarts Ethos so a saved connection change takes effect. Writes nothing.',
     },
     {
       key: null,

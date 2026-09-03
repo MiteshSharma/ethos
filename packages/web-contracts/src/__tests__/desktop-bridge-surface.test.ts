@@ -28,13 +28,14 @@ const EXPECTED_KEYS: BridgeKeys[] = [
   'file',
   'gateway',
   'connection',
+  'app',
   'codex',
   'platformTest',
 ];
 
 describe('EthosDesktopBridge stable surface', () => {
   it('has exactly the expected top-level keys', () => {
-    expect(EXPECTED_KEYS).toHaveLength(20);
+    expect(EXPECTED_KEYS).toHaveLength(21);
   });
 
   it('every key is a valid BridgeKeys member (compile-time guard)', () => {

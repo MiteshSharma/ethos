@@ -3,15 +3,21 @@ import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { FileSecretsResolver, FsStorage } from '@ethosagent/storage-fs';
-import { app, BrowserWindow, dialog, ipcMain, nativeTheme, shell } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, nativeTheme, session, shell } from 'electron';
 import type { RetentionValues } from '../shared/ipc-contract';
 import { IPC_CHANNELS } from '../shared/ipc-contract';
 import { restartBackend, startBackend } from './backend';
+import {
+  applyRemoteAuthCookie,
+  getConnectionMode,
+  normalizeRemoteUrl,
+  resolveBackendBaseUrl,
+  testConnection,
+} from './connection';
 import { getGatewayLogPath, getGatewayStatus, startGateway, stopGateway } from './gateway-control';
 import { getKeychainValue, setKeychainValue } from './keychain';
 import { getLoginItem, setLoginItem } from './login-item';
 import { testDiscord, testImap, testSmtp, testTelegram } from './platform-validator';
-import { syncRemoteAuth } from './remote-auth';
 import {
   getSatelliteStatus,
   probeSatellite,
@@ -323,6 +329,16 @@ export function registerIpcHandlers(): void {
         personalityId: string;
       },
     ) => {
+      // The preload is attached to the window, not to a URL, so the REMOTE
+      // server's SPA also sees `window.ethos`. Its onboarding wizard must not be
+      // able to write this Mac's ~/.ethos config or start a local backend.
+      if (getConnectionMode() === 'remote') {
+        return {
+          success: false,
+          error: 'Connected to a remote server — set up that server, not this Mac.',
+        };
+      }
+
       const validProviders = ['anthropic', 'openai', 'openrouter', 'azure', 'codex'];
       const validPersonalities = ['researcher', 'engineer', 'operator', 'coach'];
 
@@ -802,23 +818,20 @@ export function registerIpcHandlers(): void {
   // -------------------------------------------------------------------------
 
   const pluginFetch = async (rpcMethod: string, body: Record<string, unknown> = {}) => {
-    const connMode = store.get('connectionMode') ?? 'local';
-    let baseUrl: string;
     const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-    if (connMode === 'remote') {
-      const remoteUrl = store.get('remoteUrl');
-      if (!remoteUrl) throw new Error('Remote URL not configured');
-      baseUrl = remoteUrl.replace(/\/$/, '');
+    if (getConnectionMode() === 'remote') {
+      // The stored remote credential is a WEB token, so it goes on the
+      // `ethos_auth` cookie. As an `Authorization: Bearer` header it would be
+      // read as an `sk-ethos-` API key instead, and `dual-auth.ts` scope-gates
+      // those — the plugins namespace has no scope, so every call would 403.
       const remoteToken = await getKeychainValue('remote-token');
-      if (remoteToken) headers.Authorization = `Bearer ${remoteToken}`;
-    } else {
-      const port = store.get('backendPort', 3001);
-      baseUrl = `http://localhost:${port}`;
+      if (remoteToken) headers.Cookie = `ethos_auth=${remoteToken}`;
+      headers.Origin = resolveBackendBaseUrl();
     }
-    const res = await fetch(`${baseUrl}/rpc/${rpcMethod}`, {
+    const res = await fetch(`${resolveBackendBaseUrl()}/rpc/${rpcMethod.replace(/\./g, '/')}`, {
       method: 'POST',
       headers,
-      body: JSON.stringify(body),
+      body: JSON.stringify({ json: body }),
     });
     return res.json();
   };
@@ -926,51 +939,72 @@ export function registerIpcHandlers(): void {
   // Connection mode IPC handlers
   // -------------------------------------------------------------------------
 
-  ipcMain.handle(IPC_CHANNELS['connection:get'], () => {
-    const mode = store.get('connectionMode') ?? 'local';
+  // The token itself is never returned to the renderer — only whether one is
+  // stored, and when it was stored.
+  ipcMain.handle(IPC_CHANNELS['connection:get'], async () => {
     const url = store.get('remoteUrl');
-    return { mode, url };
+    const tokenSavedAt = store.get('remoteTokenSavedAt');
+    return {
+      mode: getConnectionMode(),
+      hasToken: (await getKeychainValue('remote-token')) !== null,
+      ...(url ? { url } : {}),
+      ...(tokenSavedAt ? { tokenSavedAt } : {}),
+    };
   });
 
   ipcMain.handle(
     IPC_CHANNELS['connection:set'],
     async (_event, req: { mode: 'local' | 'remote'; url?: string; token?: string }) => {
-      store.set('connectionMode', req.mode);
+      const previousMode = getConnectionMode();
+      const previousUrl = store.get('remoteUrl');
+
+      let url: string | undefined;
       if (req.url !== undefined) {
-        store.set('remoteUrl', req.url);
+        const normalized = normalizeRemoteUrl(req.url);
+        if (!normalized) return { ok: false, error: 'Enter an http:// or https:// server URL.' };
+        url = normalized;
       }
+      if (req.mode === 'remote' && !(url ?? previousUrl)) {
+        return { ok: false, error: 'A remote server needs a URL.' };
+      }
+
+      store.set('connectionMode', req.mode);
+      if (url) store.set('remoteUrl', url);
       if (req.token) {
         await setKeychainValue('remote-token', req.token);
+        store.set('remoteTokenSavedAt', new Date().toISOString());
       }
-      await syncRemoteAuth();
-      return { ok: true };
+      await applyRemoteAuthCookie();
+
+      // Which backend the window is pointed at is decided at navigation time,
+      // so a change of mode or address only takes effect on the next launch.
+      const relaunchRequired =
+        req.mode !== previousMode || (url !== undefined && url !== previousUrl);
+      return { ok: true, ...(relaunchRequired ? { relaunchRequired: true } : {}) };
     },
   );
 
   ipcMain.handle(
     IPC_CHANNELS['connection:test'],
     async (_event, req: { url: string; token?: string }) => {
-      const url = req.url.replace(/\/$/, '');
-      const headers: Record<string, string> = {};
+      // Falls back to the saved token so Settings can re-test an existing
+      // connection without making the user paste the token again.
       const token = req.token ?? (await getKeychainValue('remote-token'));
-      if (token) headers.Authorization = `Bearer ${token}`;
-      const start = Date.now();
-      try {
-        const res = await fetch(`${url}/healthz`, {
-          headers,
-          signal: AbortSignal.timeout(10000),
-        });
-        const latencyMs = Date.now() - start;
-        if (res.ok) {
-          return { ok: true, latencyMs };
-        }
-        return { ok: false, error: `Server returned ${res.status}`, latencyMs };
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        return { ok: false, error: message };
-      }
+      return testConnection(req.url, token ?? undefined);
     },
   );
+
+  ipcMain.handle(IPC_CHANNELS['connection:reload'], async () => {
+    await session.defaultSession.clearCache();
+    BrowserWindow.getAllWindows()[0]?.webContents.reload();
+    return { ok: true };
+  });
+
+  ipcMain.handle(IPC_CHANNELS['app:relaunch'], () => {
+    app.relaunch();
+    app.quit();
+    return { ok: true };
+  });
 
   // -------------------------------------------------------------------------
   // Gateway control IPC handlers

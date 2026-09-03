@@ -1,6 +1,6 @@
 import { join } from 'node:path';
 import { BrowserWindow, ipcMain, screen } from 'electron';
-import { store } from './store';
+import { resolveBackendBaseUrl } from './connection';
 
 let quickChatWindow: BrowserWindow | null = null;
 
@@ -56,8 +56,7 @@ function createQuickChatWindow(): BrowserWindow {
     },
   });
 
-  const port = store.get('backendPort');
-  win.loadURL(`http://127.0.0.1:${port}?mode=quickchat`);
+  win.loadURL(`${resolveBackendBaseUrl()}?mode=quickchat`);
 
   win.on('blur', () => {
     win.hide();

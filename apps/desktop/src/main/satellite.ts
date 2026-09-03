@@ -67,6 +67,7 @@ import {
 import { WebTokenRepository } from '@ethosagent/web-api';
 import { SATELLITE_SOCKET_PATH } from '@ethosagent/web-contracts';
 import type { SatelliteStatus } from '../shared/ipc-contract';
+import { getConnectionMode } from './connection';
 import { getPort } from './serve';
 import { store } from './store';
 
@@ -210,6 +211,17 @@ function missingCaptureDeviceProbe(): DoctorProbeRow {
 
 /** Reachability of this app's own in-process backend. */
 function defaultGatewayProbe(): Promise<{ ok: boolean; detail?: string }> {
+  if (getConnectionMode() === 'remote') {
+    // There is no in-process backend to reach: both this probe and the
+    // satellite socket address `127.0.0.1:<backendPort>`, which nothing is
+    // listening on. Refuse by name here so `start` degrades with a reason a
+    // person can act on, instead of surfacing a connection-refused from a
+    // socket the user never asked to open.
+    return Promise.resolve({
+      ok: false,
+      detail: 'Wake requires a local backend; this app is connected to a remote server.',
+    });
+  }
   const port = getPort() ?? store.get('backendPort', 3001);
   return fetch(`http://127.0.0.1:${port}/healthz`)
     .then(() => ({ ok: true, detail: `backend answered on 127.0.0.1:${port}` }))

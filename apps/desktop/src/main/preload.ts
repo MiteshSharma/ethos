@@ -149,6 +149,10 @@ const api = {
       ipcRenderer.invoke(IPC_CHANNELS['connection:set'], req),
     test: (req: { url: string; token?: string }) =>
       ipcRenderer.invoke(IPC_CHANNELS['connection:test'], req),
+    reload: () => ipcRenderer.invoke(IPC_CHANNELS['connection:reload']),
+  },
+  app: {
+    relaunch: () => ipcRenderer.invoke(IPC_CHANNELS['app:relaunch']),
   },
   codex: {
     startAuth: () => ipcRenderer.invoke(IPC_CHANNELS['codex:startAuth']),

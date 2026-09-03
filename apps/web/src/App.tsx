@@ -74,7 +74,7 @@ import { Tasks } from './pages/Tasks';
 import { TeamControlCenter } from './pages/TeamControlCenter';
 import { TeamCreate } from './pages/TeamCreate';
 import { Teams } from './pages/Teams';
-import { reinitializeClient, rpc } from './rpc';
+import { rpc } from './rpc';
 
 // Top-level route map. v0 ships only Talk-group routes (Chat + Sessions)
 // plus the onboarding flow and the signing-in placeholder. v0.5 adds the
@@ -330,20 +330,17 @@ export function App() {
 }
 
 /**
- * On desktop, read the Electron bridge connection config on mount.
- * When mode is 'remote', point the SDK client at the remote URL.
- * Bearer-token injection is handled at the network layer by
- * Electron's session.defaultSession.webRequest.onBeforeSendHeaders.
+ * On desktop, subscribe to the Electron bridge's plugin OAuth completions.
+ *
+ * The renderer does not need to know whether the backend is local or remote:
+ * in remote mode the desktop window navigates to the remote server, which
+ * serves this SPA itself, so `window.location.origin` is already the right API
+ * base in both modes and no request is ever cross-origin.
  */
 function useDesktopBootstrap(): void {
   const qc = useQueryClient();
   useEffect(() => {
     if (!isDesktop || !bridge) return;
-    bridge.connection.get().then((conn) => {
-      if (conn.mode === 'remote' && conn.url) {
-        reinitializeClient(conn.url);
-      }
-    });
     bridge.plugin.onOAuthComplete(() => {
       qc.invalidateQueries({ queryKey: ['plugins'] });
     });

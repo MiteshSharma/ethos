@@ -124,7 +124,10 @@ export interface IpcContract {
     request: ValidateProviderRequest;
     response: ValidateProviderResponse;
   };
-  'onboarding:complete': { request: OnboardingCompleteRequest; response: { success: boolean } };
+  'onboarding:complete': {
+    request: OnboardingCompleteRequest;
+    response: { success: boolean; error?: string };
+  };
   'personalities:list': { request: undefined; response: PersonalityListItem[] };
   'backend:port': { request: undefined; response: number };
   'backend:start': { request: { port: number }; response: { started: boolean } };
@@ -235,16 +238,18 @@ export interface IpcContract {
   };
   'connection:get': {
     request: undefined;
-    response: { mode: 'local' | 'remote'; url?: string };
+    response: { mode: 'local' | 'remote'; url?: string; hasToken: boolean; tokenSavedAt?: string };
   };
   'connection:set': {
     request: { mode: 'local' | 'remote'; url?: string; token?: string };
-    response: { ok: boolean };
+    response: { ok: boolean; relaunchRequired?: boolean; error?: string };
   };
   'connection:test': {
     request: { url: string; token?: string };
-    response: { ok: boolean; latencyMs?: number; error?: string };
+    response: { ok: boolean; latencyMs?: number; version?: string; error?: string };
   };
+  'connection:reload': { request: undefined; response: { ok: boolean } };
+  'app:relaunch': { request: undefined; response: { ok: boolean } };
   'gateway:status': {
     request: undefined;
     response: { state: 'running' | 'stopped' | 'crashed' | 'starting'; serviceInstalled: boolean };
@@ -330,6 +335,8 @@ export const IPC_CHANNELS: { [K in IpcChannel]: K } = {
   'connection:get': 'connection:get',
   'connection:set': 'connection:set',
   'connection:test': 'connection:test',
+  'connection:reload': 'connection:reload',
+  'app:relaunch': 'app:relaunch',
   'gateway:status': 'gateway:status',
   'gateway:start': 'gateway:start',
   'gateway:stop': 'gateway:stop',

@@ -8,6 +8,7 @@
 // stay in their current shape; Phase 6 converts rosters/tables, not this".
 
 import {
+  Alert,
   App as AntApp,
   Button,
   Checkbox,
@@ -17,20 +18,48 @@ import {
   Space,
   Typography,
 } from 'antd';
-import { useEffect, useState } from 'react';
+import { type CSSProperties, useEffect, useState } from 'react';
 import { bridge } from '../lib/desktop';
-import { ROW_BOX_STYLE } from './settings/components/primitives';
+import { ROW_BOX_STYLE, RowLabel } from './settings/components/primitives';
 import { SectionHeading } from './settings/components/section-heading';
 import { SelfSaveMarker } from './settings/components/self-save-marker';
+
+const MONO_STYLE: CSSProperties = {
+  fontFamily: "'Geist Mono', monospace",
+  fontVariantNumeric: 'tabular-nums',
+};
+
+/** `https://box.local:4000/` → `box.local:4000`. Unparseable input renders as typed. */
+function hostLabel(url: string): string {
+  try {
+    return new URL(url).host;
+  } catch {
+    return url;
+  }
+}
+
+/** ISO timestamp → `3 Sep 2026`. */
+function formatSavedAt(iso: string): string {
+  return new Date(iso).toLocaleDateString(undefined, {
+    day: 'numeric',
+    month: 'short',
+    year: 'numeric',
+  });
+}
 
 export function DesktopSettings() {
   const { notification } = AntApp.useApp();
 
-  // Connection mode
+  // Connection mode. The web token is write-only: `connection:get` reports only
+  // whether one is stored and when, never its value.
   const [connMode, setConnMode] = useState<'local' | 'remote'>('local');
   const [remoteUrl, setRemoteUrl] = useState('');
   const [remoteToken, setRemoteToken] = useState('');
+  const [hasToken, setHasToken] = useState(false);
+  const [tokenSavedAt, setTokenSavedAt] = useState<string | null>(null);
+  const [replacingToken, setReplacingToken] = useState(false);
   const [testResult, setTestResult] = useState<string | null>(null);
+  const [relaunchHost, setRelaunchHost] = useState<string | null>(null);
 
   // Launch at login
   const [launchAtLogin, setLaunchAtLogin] = useState(false);
@@ -60,6 +89,8 @@ export function DesktopSettings() {
         const conn = await b.connection.get();
         setConnMode(conn.mode);
         if (conn.url) setRemoteUrl(conn.url);
+        setHasToken(conn.hasToken);
+        setTokenSavedAt(conn.tokenSavedAt ?? null);
 
         const login = await b.loginItem.get();
         setLaunchAtLogin(login);
@@ -106,9 +137,12 @@ export function DesktopSettings() {
         token: remoteToken || undefined,
       });
       if (result.ok) {
-        setTestResult(`Connected (${result.latencyMs ?? '?'}ms)`);
+        const version = result.version ? ` · ethos ${result.version}` : '';
+        setTestResult(`✓ Connected · ${result.latencyMs ?? '?'}ms${version}`);
       } else {
-        setTestResult(`Failed: ${result.error ?? 'unknown error'}`);
+        setTestResult(
+          `✗ ${result.error ?? 'The server refused the connection without saying why.'}`,
+        );
       }
     } catch (err) {
       notification.error({
@@ -125,12 +159,45 @@ export function DesktopSettings() {
         url: remoteUrl || undefined,
         token: remoteToken || undefined,
       });
-      if (result.ok) {
-        notification.success({ message: 'Connection settings saved' });
+      if (!result.ok) {
+        notification.error({
+          message: 'Failed to save connection settings',
+          description: result.error ?? 'Unknown error',
+        });
+        return;
       }
+      notification.success({ message: 'Connection settings saved' });
+      setRemoteToken('');
+      setReplacingToken(false);
+      setRelaunchHost(result.relaunchRequired ? hostLabel(remoteUrl) : null);
+      const conn = await b.connection.get();
+      setHasToken(conn.hasToken);
+      setTokenSavedAt(conn.tokenSavedAt ?? null);
     } catch (err) {
       notification.error({
         message: 'Failed to save connection settings',
+        description: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  async function handleReloadApp() {
+    try {
+      await b.connection.reload();
+    } catch (err) {
+      notification.error({
+        message: 'Failed to reload the app',
+        description: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  async function handleRelaunch() {
+    try {
+      await b.app.relaunch();
+    } catch (err) {
+      notification.error({
+        message: 'Failed to relaunch Ethos',
         description: err instanceof Error ? err.message : String(err),
       });
     }
@@ -262,24 +329,69 @@ export function DesktopSettings() {
 
           {connMode === 'remote' && (
             <Space direction="vertical" style={{ width: '100%' }}>
-              <Input
-                placeholder="Remote URL"
-                value={remoteUrl}
-                onChange={(e) => setRemoteUrl(e.target.value)}
-              />
-              <Input.Password
-                placeholder="Token (optional)"
-                value={remoteToken}
-                onChange={(e) => setRemoteToken(e.target.value)}
-              />
-              <Button onClick={handleTestConnection}>Test</Button>
-              {testResult && <Typography.Text>{testResult}</Typography.Text>}
+              <div>
+                <RowLabel>Server URL</RowLabel>
+                <Input
+                  style={MONO_STYLE}
+                  value={remoteUrl}
+                  onChange={(e) => setRemoteUrl(e.target.value)}
+                />
+              </div>
+              <div>
+                <RowLabel>Web token</RowLabel>
+                {hasToken && !replacingToken ? (
+                  <Space>
+                    <Typography.Text>
+                      ✓ Stored in keychain
+                      {tokenSavedAt ? ` · added ${formatSavedAt(tokenSavedAt)}` : ''}
+                    </Typography.Text>
+                    <Button onClick={() => setReplacingToken(true)}>Replace</Button>
+                  </Space>
+                ) : (
+                  <Input.Password
+                    value={remoteToken}
+                    onChange={(e) => setRemoteToken(e.target.value)}
+                  />
+                )}
+                <Typography.Text type="secondary" style={{ display: 'block', marginTop: 4 }}>
+                  Printed by ethos serve as ?t=…, or read from ~/.ethos/web-token on that machine.
+                  Stored in the keychain — nothing else re-authenticates.
+                </Typography.Text>
+              </div>
             </Space>
           )}
 
-          <Button type="primary" onClick={handleSaveConnection}>
-            Save
-          </Button>
+          <Space>
+            {connMode === 'remote' ? (
+              <Button onClick={handleTestConnection}>Test connection</Button>
+            ) : null}
+            {connMode === 'remote' ? <Button onClick={handleReloadApp}>Reload app</Button> : null}
+            <Button type="primary" onClick={handleSaveConnection}>
+              Save
+            </Button>
+          </Space>
+
+          {connMode === 'remote' && (
+            <Typography.Text type="secondary">
+              Clears the cached app and reloads it from the server.
+            </Typography.Text>
+          )}
+
+          {testResult && <Typography.Text style={MONO_STYLE}>{testResult}</Typography.Text>}
+
+          {relaunchHost && (
+            <Alert
+              type="warning"
+              message="Relaunch to apply."
+              description={
+                <>
+                  Ethos will reconnect to <span style={MONO_STYLE}>{relaunchHost}</span> on the next
+                  start.
+                </>
+              }
+              action={<Button onClick={handleRelaunch}>Relaunch now</Button>}
+            />
+          )}
         </Space>
       </div>
 

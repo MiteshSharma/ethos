@@ -398,9 +398,9 @@ Registration itself is not validated. `PluginApi.registerDataSource(id, path)` r
 
 *Status: Shipped.*
 
-When Mission Control connects to a remote Ethos instance, the connection token is stored in the OS keychain rather than in plaintext config. The desktop app retrieves the token at connection time via `keytar` and transmits it over TLS. CORS is restricted to the configured origin.
+When Mission Control connects to a remote Ethos instance, the web token is stored in the OS keychain (Electron `safeStorage`) rather than in plaintext config, and is never exposed to the renderer. The main process writes it onto the remote origin as the `ethos_auth` cookie before navigating; the window then loads the remote server's own SPA same-origin, so there is no cross-origin request to authorize. `/auth/exchange` is deliberately not used — it rotates the token, which would invalidate the stored value on every launch.
 
-- Source: `apps/desktop/src/main/remote-auth.ts`
+- Source: `apps/desktop/src/main/connection.ts`
 - Cross-ref: [Deploy Mission Control with a remote Ethos](../building/how-to/deploy-mission-control-remote.md)
 
 ## Removed empty safety stubs {#removed-empty-safety-stubs}
