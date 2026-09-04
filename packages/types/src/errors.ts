@@ -73,6 +73,7 @@ export type EthosErrorCode =
   | 'TEAM_MANIFEST_INVALID'
   // Backup / import
   | 'IMPORT_BLOCKED'
+  | 'IMPORT_NEWER_SCHEMA'
   // Memory
   | 'MEMORY_CONFLICT'
   // Web API (Phase 26)

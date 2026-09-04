@@ -2451,7 +2451,11 @@ importers:
 
   packages/session-lane: {}
 
-  packages/sqlite: {}
+  packages/sqlite:
+    dependencies:
+      '@ethosagent/types':
+        specifier: workspace:*
+        version: link:../types
 
   packages/storage-fs:
     dependencies:

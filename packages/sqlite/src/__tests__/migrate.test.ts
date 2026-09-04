@@ -1,3 +1,4 @@
+import { type EthosError, isEthosError } from '@ethosagent/types';
 import { describe, expect, it } from 'vitest';
 import Database, { migrate } from '../index';
 
@@ -30,6 +31,24 @@ describe('migrate', () => {
     expect(() =>
       migrate(db, { name: 'test', targetVersion: 1, baseline: BASELINE, migrations: {} }),
     ).toThrow(/user_version=2 is newer than code \(1\); refusing to open to avoid downgrade/);
+    db.close();
+  });
+
+  it('refuses a downgrade with a typed IMPORT_NEWER_SCHEMA error', () => {
+    const db = new Database(':memory:');
+    db.pragma('user_version = 2');
+    let thrown: unknown;
+    try {
+      migrate(db, { name: 'test', targetVersion: 1, baseline: BASELINE, migrations: {} });
+    } catch (err) {
+      thrown = err;
+    }
+    expect(isEthosError(thrown)).toBe(true);
+    const err = thrown as EthosError;
+    expect(err.code).toBe('IMPORT_NEWER_SCHEMA');
+    expect(err.action).toMatch(/Upgrade Ethos/);
+    // The refusal still refuses: the baseline never ran, so the table is absent.
+    expect(() => db.prepare('SELECT COUNT(*) AS n FROM items').get()).toThrow();
     db.close();
   });
 

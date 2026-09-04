@@ -1,11 +1,13 @@
-import type { DatabaseSync as DatabaseSyncClass } from 'node:sqlite';
+import type { BackupOptions, DatabaseSync as DatabaseSyncClass } from 'node:sqlite';
 
 // `node:sqlite` is a Node built-in. Resolve it via `process.getBuiltinModule`
 // instead of a static `import ... from 'node:sqlite'` so the bundler cannot
 // strip the `node:` prefix: esbuild rewrote it to a bare `sqlite` specifier in
 // the published CLI bundle, breaking `ethos serve` with ERR_MODULE_NOT_FOUND.
 // The `import type` above is erased at build time, so no runtime import remains.
-const { DatabaseSync } = process.getBuiltinModule('node:sqlite') as typeof import('node:sqlite');
+const { DatabaseSync, backup: nodeBackup } = process.getBuiltinModule(
+  'node:sqlite',
+) as typeof import('node:sqlite');
 type DatabaseSync = DatabaseSyncClass;
 
 type RunResult = { changes: number; lastInsertRowid: number };
@@ -159,6 +161,29 @@ namespace _Database {
   export type Database = _Database;
 }
 
+/**
+ * Copy an open database to `destPath` via SQLite's online backup API.
+ *
+ * The one ASYNCHRONOUS member of an otherwise synchronous shim, deliberately:
+ * in-process callers (the scheduled backup task, the web RPC) run inside a
+ * serving process, where a synchronous `VACUUM INTO` over a multi-hundred-MB
+ * database would stall the event loop for the whole copy. The source database
+ * stays usable throughout, and the copy is consistent in WAL mode without a
+ * checkpoint — which a plain file copy is not.
+ *
+ * Resolves with the number of pages transferred. `@types/node` declares the
+ * return as `Promise<void>`, but Node 24 resolves the page count (as its own
+ * documentation shows), hence the cast.
+ */
+export function backup(db: _Database, destPath: string, options?: BackupOptions): Promise<number> {
+  // biome-ignore lint/suspicious/noExplicitAny: reads the wrapped node:sqlite handle without widening the public Database surface
+  const source = (db as any).inner as DatabaseSync;
+  // Node rejects an explicit `undefined` third argument ("options must be an
+  // object"), so an absent `options` becomes `{}` and the platform defaults apply.
+  return nodeBackup(source, destPath, options ?? {}) as unknown as Promise<number>;
+}
+
 export default _Database;
+export type { BackupOptions, BackupProgressInfo } from 'node:sqlite';
 export { type MigrationConfig, migrate } from './migrate';
 export type { _Database as Database };

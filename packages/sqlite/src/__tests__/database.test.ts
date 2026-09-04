@@ -1,7 +1,7 @@
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import Database from '@ethosagent/sqlite';
+import Database, { backup } from '@ethosagent/sqlite';
 import { afterEach, describe, expect, it } from 'vitest';
 
 function makeTmpDir() {
@@ -344,5 +344,58 @@ describe('STRICT tables', () => {
       db.prepare('INSERT INTO strict_t (id, val) VALUES (?, ?)').run('not_an_int', 'oops'),
     ).toThrow();
     db.close();
+  });
+});
+
+describe('backup', () => {
+  let dir: string;
+  afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+  it('copies a WAL database with pending writes, and the copy reads back the same rows', async () => {
+    dir = makeTmpDir();
+    const src = new Database(join(dir, 'src.db'));
+    src.pragma('journal_mode = WAL');
+    src.exec('CREATE TABLE t (id INTEGER PRIMARY KEY, val TEXT) STRICT');
+    const insert = src.prepare('INSERT INTO t (val) VALUES (?)');
+    for (let i = 0; i < 500; i++) insert.run(`row-${i}`);
+
+    // Uncheckpointed: the rows above still live in the -wal file, which is the
+    // case a naive file copy of src.db alone gets wrong.
+    const walMode = src.pragma('journal_mode') as Record<string, unknown>[];
+    expect(walMode[0]?.journal_mode).toBe('wal');
+    expect(statSync(join(dir, 'src.db-wal')).size).toBeGreaterThan(
+      statSync(join(dir, 'src.db')).size,
+    );
+
+    const destPath = join(dir, 'copy.db');
+    const pages = await backup(src, destPath);
+    expect(pages).toBeGreaterThan(0);
+
+    const copy = new Database(destPath, { readonly: true });
+    expect(copy.prepare('SELECT COUNT(*) AS n FROM t').get()).toEqual({ n: 500 });
+    expect(copy.prepare('SELECT val FROM t WHERE id = ?').get(499)).toEqual({ val: 'row-498' });
+    copy.close();
+    src.close();
+  });
+
+  it('reports progress and leaves the source usable afterwards', async () => {
+    dir = makeTmpDir();
+    const src = new Database(join(dir, 'src.db'));
+    src.pragma('journal_mode = WAL');
+    src.exec('CREATE TABLE t (id INTEGER PRIMARY KEY, val TEXT) STRICT');
+    const insert = src.prepare('INSERT INTO t (val) VALUES (?)');
+    for (let i = 0; i < 500; i++) insert.run(`row-${i}`);
+
+    const seen: number[] = [];
+    await backup(src, join(dir, 'copy.db'), {
+      rate: 1,
+      progress: ({ remainingPages }) => seen.push(remainingPages),
+    });
+    expect(seen.length).toBeGreaterThan(1);
+    expect(seen[seen.length - 1] ?? -1).toBeLessThan(seen[0] ?? 0);
+
+    src.prepare('INSERT INTO t (val) VALUES (?)').run('after');
+    expect(src.prepare('SELECT COUNT(*) AS n FROM t').get()).toEqual({ n: 501 });
+    src.close();
   });
 });

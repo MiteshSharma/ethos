@@ -13,5 +13,7 @@
   "scripts": {
     "build": "tsup src/index.ts --format esm --dts"
   },
-  "dependencies": {}
+  "dependencies": {
+    "@ethosagent/types": "workspace:*"
+  }
 }

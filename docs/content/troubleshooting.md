@@ -344,6 +344,7 @@ The full list of registered codes. Every code shipped in `@ethosagent/types` `Et
 | `PLUGIN_INSTALL_FAILED` | The install needs a recorded capability grant and stdin is not a TTY. | Install interactively, or pass `--yes` to record the grant. |
 | `TEAM_MANIFEST_INVALID` | `team.yaml` failed schema validation. | Fix the named field and re-run `ethos team start`. |
 | `IMPORT_BLOCKED` | A backup archive entry escapes the data dir or is not a regular file. | Inspect the archive — it may be corrupted or malicious. |
+| `IMPORT_NEWER_SCHEMA` | A SQLite store on disk was written by a newer Ethos than the one opening it. | Upgrade Ethos to a build that understands this schema, then retry. |
 | `MEMORY_CONFLICT` | A memory entry changed on disk between your read and your write. | Re-read the entry and retry the write. |
 | `UNAUTHORIZED` | A web API request lacks valid auth. | Sign in again from the web UI. |
 | `FORBIDDEN` | Authenticated, but the caller may not perform this action. | Use an account with the required role. |

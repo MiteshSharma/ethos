@@ -1,3 +1,4 @@
+import { EthosError } from '@ethosagent/types';
 import type Database from './index';
 
 // ---------------------------------------------------------------------------
@@ -44,9 +45,12 @@ export function migrate(db: Database.Database, config: MigrationConfig): void {
   const current = rows[0]?.user_version ?? 0;
 
   if (current > targetVersion) {
-    throw new Error(
-      `${name}: database user_version=${current} is newer than code (${targetVersion}); refusing to open to avoid downgrade`,
-    );
+    throw new EthosError({
+      code: 'IMPORT_NEWER_SCHEMA',
+      cause: `${name}: database user_version=${current} is newer than code (${targetVersion}); refusing to open to avoid downgrade`,
+      action: 'Upgrade Ethos to a build that understands this schema, then retry.',
+      details: { store: name, databaseVersion: current, codeVersion: targetVersion },
+    });
   }
 
   db.exec(baseline);
