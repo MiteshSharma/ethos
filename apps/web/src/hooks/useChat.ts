@@ -10,6 +10,7 @@ import {
   type RestoredRun,
 } from '../lib/chat-reducer';
 import { getClientId } from '../lib/clientId';
+import { broadcastTurnAborted } from '../lib/lastSession';
 import { isTerminalRun } from '../lib/pi-run-reducer';
 import { rpc } from '../rpc';
 import { subscribeToSession } from '../sse';
@@ -64,7 +65,10 @@ export interface UseChatResult {
   /** Steer the running turn. Returns true if accepted, false if the turn
    *  already ended or the RPC failed. */
   steerMessage: (text: string) => Promise<boolean>;
-  /** Abort the running turn. Fire-and-forget — best effort. */
+  /**
+   * Abort the running turn. Acknowledged locally at once; if the RPC fails the
+   * acknowledgement is withdrawn (`state.error` says Stop did not take).
+   */
   abortTurn: () => Promise<void>;
   /**
    * Switch the in-flight session to a new id (e.g. after a fork). Wipes
@@ -283,6 +287,11 @@ export function useChat(opts: UseChatOptions): UseChatResult {
   //    fires chat.send, and lets SSE drive the assistant response.
   const onSessionCreated = opts.onSessionCreated;
   const personalityId = opts.personalityId;
+  // The turn a new question would cut off. `submit-user-message` runs `stopTurn`
+  // exactly when `state.currentTurn` is non-null, so this reads the same fact —
+  // as an id, so the callback is only rebuilt when the turn changes, not on
+  // every delta.
+  const interruptedTurnId = state.currentTurn?.id ?? null;
   const sendMessage = useCallback(
     async (
       text: string,
@@ -307,6 +316,12 @@ export function useChat(opts: UseChatOptions): UseChatResult {
           ...(opts?.origin === 'voice' ? { origin: 'voice' as const } : {}),
         },
       });
+      // A question asked over a live turn ends that turn — the reducer closes
+      // its trail with the same `stopTurn` Stop uses. Neither path is on the
+      // wire, so without this the separately-subscribed drawer keeps drawing
+      // `running` rows for calls the footer has already settled (contract §4,
+      // one trail two renderers). Nothing in flight, nothing to announce.
+      if (currentSessionId && interruptedTurnId) broadcastTurnAborted(currentSessionId);
 
       try {
         const response = await rpc.chat.send({
@@ -349,7 +364,7 @@ export function useChat(opts: UseChatOptions): UseChatResult {
         });
       }
     },
-    [currentSessionId, personalityId, onSessionCreated],
+    [currentSessionId, personalityId, onSessionCreated, interruptedTurnId],
   );
 
   const steerMessage = useCallback(
@@ -378,10 +393,23 @@ export function useChat(opts: UseChatOptions): UseChatResult {
 
   const abortTurn = useCallback(async (): Promise<void> => {
     if (!currentSessionId) return;
+    // Recorded locally as well as sent: nothing in the SSE stream distinguishes
+    // a turn that was ABANDONED from one that finished, and the trail footer
+    // has to be able to say `✗ stopped` (feedback-activity-contract §3).
+    dispatch({ kind: 'action', action: { type: 'abort-turn' } });
+    // The drawer is on its own SSE subscription and an abort is not on the
+    // wire, so without this it keeps drawing `running` rows for the calls this
+    // dispatch just settled as failed (contract §4, one trail two renderers).
+    broadcastTurnAborted(currentSessionId);
     try {
       await rpc.chat.abort({ sessionId: currentSessionId });
-    } catch {
-      // best-effort
+    } catch (err) {
+      // The optimism has to be RECOVERABLE. `abort-turn` sets the suppression
+      // guard, so a failed RPC would otherwise leave the surface permanently
+      // blind while the server kept executing tools — reporting a turn stopped
+      // while its side effects continued. Undo the guard, and say so.
+      const reason = err instanceof Error ? err.message : String(err);
+      dispatch({ kind: 'action', action: { type: 'abort-failed', reason } });
     }
   }, [currentSessionId]);
 

@@ -3,18 +3,24 @@ import { useQuery } from '@tanstack/react-query';
 import { CardView } from '../../features/cards/CardView';
 import { formatBytes, type MessageAttachment } from '../../lib/attachments';
 import type { AssistantBlock, AssistantTurn, UserMessage } from '../../lib/chat-reducer';
+import type { TrailEntry } from '../../lib/trail';
 import { rpc } from '../../rpc';
 import { HtmlBlock } from './HtmlBlock';
 import { ImageBlock } from './ImageBlock';
 import { PdfBlock } from './PdfBlock';
 import { PlayButton } from './PlayButton';
 import { RunAnchor, type RunSurface } from './RunCard';
-import { ToolChip } from './ToolChip';
+import { Trail } from './Trail';
 
 // One rendered message. DESIGN.md voice rules in effect:
 //   • User messages: bg-overlay tint, sm radius, right-anchored.
-//   • Assistant turns: bare text + inline tool chips, left-anchored.
-//     The Linear-density pattern, not the iMessage pattern.
+//   • Assistant turns: bare content, left-anchored. The Linear-density
+//     pattern, not the iMessage pattern.
+//
+// The answer is content only (feedback & activity contract §1): the bubble
+// holds text, images, HTML, PDF, cards and the delegated-run card — never a
+// tool chip, badge or status. What the agent DID goes under the bubble, in the
+// collapsed `Trail` footer.
 
 export function UserBubble({ message }: { message: UserMessage }) {
   const attachments = message.attachments ?? [];
@@ -73,6 +79,8 @@ export function AssistantBubble({
   onSuggestPrompt,
   personalityId,
   runSurface,
+  trail,
+  stopped,
 }: {
   turn: AssistantTurn;
   streaming?: boolean;
@@ -85,9 +93,11 @@ export function AssistantBubble({
   personalityId?: string;
   /** Live state for the delegated-run cards this turn anchors (§4.1). */
   runSurface?: RunSurface;
+  /** This turn's activity trail — the footer under the bubble. */
+  trail?: TrailEntry[];
+  /** The user stopped this turn. */
+  stopped?: boolean;
 }) {
-  const lastBlock = turn.blocks[turn.blocks.length - 1];
-  const cursorAfter = streaming && lastBlock?.kind === 'text';
   const fullText = turn.blocks
     .filter((b): b is Extract<AssistantBlock, { kind: 'text' }> => b.kind === 'text')
     .map((b) => b.content)
@@ -111,13 +121,11 @@ export function AssistantBubble({
             {...(runSurface ? { runSurface } : {})}
           />
         ))}
-        {streaming && !cursorAfter && lastBlock?.kind === 'tool' ? (
-          <span className="streaming-cursor streaming-cursor-trailing" aria-hidden="true" />
-        ) : null}
         {!streaming && fullText && ttsEnabled ? (
           <PlayButton text={fullText} {...(personalityId ? { personalityId } : {})} />
         ) : null}
       </div>
+      <Trail entries={trail ?? []} turnId={turn.id} {...(stopped ? { stopped } : {})} />
     </div>
   );
 }
@@ -169,7 +177,7 @@ function BlockRenderer({
     if (!runSurface) return null;
     return <RunAnchor jobId={block.jobId} surface={runSurface} />;
   }
-  return <ToolChip tool={block} />;
+  return null;
 }
 
 function blockKey(block: AssistantBlock, idx: number): string {
@@ -179,6 +187,5 @@ function blockKey(block: AssistantBlock, idx: number): string {
   if (block.kind === 'pdf') return `pdf-${block.toolCallId}`;
   // One tool call can emit several cards, so the id alone is not unique.
   if (block.kind === 'card') return `card-${block.toolCallId}-${idx}`;
-  if (block.kind === 'run') return `run-${block.jobId}`;
-  return `tool-${block.toolCallId}`;
+  return `run-${block.jobId}`;
 }

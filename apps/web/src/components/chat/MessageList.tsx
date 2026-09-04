@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { useFenceResolver } from '../../features/renderers/resolver';
 import type { AssistantTurn, ChatMessage } from '../../lib/chat-reducer';
+import type { TrailState } from '../../lib/trail';
 import { SaveToDashboardContextMenu } from '../dashboard/SaveToDashboardContextMenu';
 import { SaveToDashboardModal } from '../dashboard/SaveToDashboardModal';
 import { AssistantBubble, UserBubble } from './MessageBubble';
@@ -23,6 +24,10 @@ export interface MessageListProps {
   onTryVoice?: () => void;
   /** Live delegated-run state for the transcript's run anchors (§4.1). */
   runSurface?: RunSurface;
+  /** Per-turn activity trails — the footer under each bubble (contract §3). */
+  trail?: TrailState;
+  /** Turns the user stopped; their footer reads `✗ stopped`. */
+  stoppedTurnIds?: string[];
 }
 
 export function MessageList({
@@ -34,6 +39,8 @@ export function MessageList({
   onSuggestPrompt,
   onTryVoice,
   runSurface,
+  trail,
+  stoppedTurnIds,
 }: MessageListProps) {
   const listRef = useRef<HTMLDivElement>(null);
   const pinnedToBottomRef = useRef(true);
@@ -119,6 +126,8 @@ export function MessageList({
               onSuggestPrompt={onSuggestPrompt}
               {...(personalityId ? { personalityId } : {})}
               {...(runSurface ? { runSurface } : {})}
+              {...(trail?.[m.id] ? { trail: trail[m.id] } : {})}
+              {...(stoppedTurnIds?.includes(m.id) ? { stopped: true } : {})}
             />
           </SaveToDashboardContextMenu>
         ),
@@ -131,6 +140,8 @@ export function MessageList({
           onSuggestPrompt={onSuggestPrompt}
           {...(personalityId ? { personalityId } : {})}
           {...(runSurface ? { runSurface } : {})}
+          {...(trail?.[currentTurn.id] ? { trail: trail[currentTurn.id] } : {})}
+          {...(stoppedTurnIds?.includes(currentTurn.id) ? { stopped: true } : {})}
         />
       ) : null}
       {isThinking ? <ThinkingBubble /> : null}

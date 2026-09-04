@@ -1,20 +1,22 @@
 import { useEffect, useState } from 'react';
 import {
   applyEvent,
+  applyTurnAborted,
   type DrawerNotification,
   type DrawerStreamState,
+  type DrawerTurn,
   emptyDrawerState,
-  type ToolStreamEntry,
   type UsageState,
 } from '../lib/drawer-reducer';
-import { getLastSessionId } from '../lib/lastSession';
+import { getLastSessionId, TURN_ABORTED_EVENT, turnAbortedSessionId } from '../lib/lastSession';
 import { subscribeToSession } from '../sse';
 
 // Right-drawer state machine. Subscribes to the user's "active" session
 // (the one chat is currently looking at, or the last-touched one if chat
 // is not on screen) and bins inbound SSE events into three lanes:
 //
-//   • toolStream  — tool_start / tool_end events for the live observability pane
+//   • turns + trail — tool_start / tool_end grouped into per-turn trails
+//                     (run_start opens a turn, done/error closes it)
 //   • notifications — push events that aren't tied to the turn (cron.fired,
 //                     mesh.changed, evolve.skill_pending). Newest first.
 //   • usage       — last-seen UsageEvent (input/output tokens + cost)
@@ -23,7 +25,7 @@ import { subscribeToSession } from '../sse';
 // without React. The hook is the IO layer: SSE subscription + active-
 // session tracking + state.
 
-export type { DrawerNotification, DrawerStreamState, ToolStreamEntry, UsageState };
+export type { DrawerNotification, DrawerStreamState, DrawerTurn, UsageState };
 
 function readActiveSessionId(): string | null {
   return getLastSessionId() ?? null;
@@ -48,6 +50,19 @@ export function useDrawerStream(): DrawerStreamState {
       window.removeEventListener('storage', refresh);
       window.removeEventListener('ethos:active-session-changed', refresh);
     };
+  }, []);
+
+  // Stop never reaches the wire, so it never reaches this subscription: the
+  // chat hook broadcasts it, and the reducer settles the open turn's rows —
+  // but only when the drawer is bound to the session the abort happened on.
+  useEffect(() => {
+    const onAborted = (event: Event) => {
+      const sessionId = turnAbortedSessionId(event);
+      if (!sessionId) return;
+      setState((prev) => applyTurnAborted(prev, sessionId));
+    };
+    window.addEventListener(TURN_ABORTED_EVENT, onAborted);
+    return () => window.removeEventListener(TURN_ABORTED_EVENT, onAborted);
   }, []);
 
   useEffect(() => {

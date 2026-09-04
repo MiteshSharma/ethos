@@ -74,7 +74,7 @@ describe('--accent', () => {
     expect(block('input,\ntextarea')).toContain('caret-color: var(--accent, var(--ethos-info))');
     expect(block('.message-assistant a')).toContain('color: var(--accent, var(--ethos-info))');
     // Focus rings — asserted on one representative of the seventeen.
-    expect(block('.tool-chip:focus-visible')).toContain(
+    expect(block('.activity-row:focus-visible')).toContain(
       'outline: 2px solid var(--accent, var(--ethos-info))',
     );
   });

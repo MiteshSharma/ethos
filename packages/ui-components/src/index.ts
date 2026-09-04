@@ -7,4 +7,3 @@ export type {
 export { HtmlRenderer } from './html-renderer';
 export { MarkdownRenderer, type MarkdownRendererProps } from './markdown-renderer';
 export { PluginSettingsPanel } from './plugin-settings-panel';
-export { TurnStatusBar, type TurnStatusBarProps } from './turn-status-bar';

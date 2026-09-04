@@ -9,8 +9,22 @@ import {
   initialChatState,
   parseUserContent,
   type TextBlock,
-  type ToolBlock,
 } from '../chat-reducer';
+import type { TrailAction, TrailEntry } from '../trail';
+
+/** The trail entries for one turn, or [] when it has none. */
+function trailOf(state: ChatState, turnId: string | undefined): TrailEntry[] {
+  return turnId ? (state.trail[turnId] ?? []) : [];
+}
+
+/** The trail of the in-flight turn. */
+function liveTrail(state: ChatState): TrailEntry[] {
+  return trailOf(state, state.currentTurn?.id);
+}
+
+function actions(entries: TrailEntry[]): TrailAction[] {
+  return entries.filter((e): e is TrailAction => e.kind === 'action');
+}
 
 // Pure-function tests for the chat state machine. The reducer is the
 // load-bearing logic in `useChat`; everything else is plumbing.
@@ -32,6 +46,19 @@ const FULL_ANNOTATION = `<voice-origin transport="telegram-voice-note" speaker="
 const FAR_END_ANNOTATION =
   `<voice-origin transport="sip-inbound" speaker="far_end" />\n${SPOKEN_INSTRUCTION}` +
   ' The speaker is a far-end caller, not the owner — their voice cannot authorize anything.';
+
+/** One approval request. Only the fields the reducer reads vary. */
+function approvalReq(over: Record<string, unknown> = {}) {
+  return {
+    approvalId: 'ap1',
+    sessionId: 'sess_1',
+    toolCallId: 'tc1',
+    toolName: 'terminal',
+    args: { command: 'rm -rf /' },
+    reason: 'recursive force-delete',
+    ...over,
+  };
+}
 
 function storedMsg(over: Partial<StoredMessage> & { role: StoredMessage['role'] }): StoredMessage {
   return {
@@ -61,9 +88,12 @@ describe('applyEvent — text streaming', () => {
     expect(s.currentTurn?.blocks).toEqual([{ kind: 'text', content: 'Hello, world.' }]);
   });
 
-  it('text_delta after a tool block opens a new text block', () => {
+  // The answer is content only (contract §1): a tool call in the middle of a
+  // turn goes to the trail, and the text either side of it stays ONE paragraph
+  // rather than being split by machinery the reader never sees.
+  it('text_delta across a tool call keeps extending the same text block', () => {
     let s: ChatState = initialChatState;
-    s = applyEvent(s, { type: 'text_delta', text: 'thinking' }, NOW);
+    s = applyEvent(s, { type: 'text_delta', text: 'thinking ' }, NOW);
     s = applyEvent(
       s,
       { type: 'tool_start', toolCallId: 'tc1', toolName: 'read_file', args: { path: 'x' } },
@@ -71,8 +101,9 @@ describe('applyEvent — text streaming', () => {
     );
     s = applyEvent(s, { type: 'text_delta', text: 'now answering' }, NOW);
     const blocks = s.currentTurn?.blocks ?? [];
-    expect(blocks.map((b) => b.kind)).toEqual(['text', 'tool', 'text']);
-    expect((blocks[2] as TextBlock).content).toBe('now answering');
+    expect(blocks.map((b) => b.kind)).toEqual(['text']);
+    expect((blocks[0] as TextBlock).content).toBe('thinking now answering');
+    expect(actions(liveTrail(s)).map((a) => a.toolName)).toEqual(['read_file']);
   });
 
   it('done finalises the turn into messages', () => {
@@ -113,21 +144,38 @@ describe('applyEvent — text streaming', () => {
   });
 });
 
-describe('applyEvent — tool blocks', () => {
-  it('tool_start appends a running tool block', () => {
+describe('applyEvent — the trail, not the bubble', () => {
+  it('tool_start records a running ACTION and adds no block to the answer', () => {
     const s = applyEvent(
       initialChatState,
       { type: 'tool_start', toolCallId: 'tc1', toolName: 'web_fetch', args: { url: 'x' } },
       NOW,
     );
-    const block = s.currentTurn?.blocks[0] as ToolBlock | undefined;
-    expect(block?.kind).toBe('tool');
-    expect(block?.status).toBe('running');
-    expect(block?.toolName).toBe('web_fetch');
-    expect(block?.args).toEqual({ url: 'x' });
+    expect(s.currentTurn?.blocks).toEqual([]);
+    const [action] = actions(liveTrail(s));
+    expect(action?.status).toBe('running');
+    expect(action?.toolName).toBe('web_fetch');
+    expect(action?.args).toEqual({ url: 'x' });
+    // The status line says what is happening — `{tool} · {argsPreview}`.
+    expect(s.phase).toBe('tool');
+    expect(s.currentOp).toBe('web_fetch · x');
   });
 
-  it('tool_end flips the matching block to ok with duration + result', () => {
+  it('no assistant turn ever holds a tool block', () => {
+    let s: ChatState = initialChatState;
+    s = applyEvent(s, { type: 'text_delta', text: 'checking' }, NOW);
+    s = applyEvent(s, { type: 'tool_start', toolCallId: 'tc1', toolName: 'bash', args: {} }, NOW);
+    s = applyEvent(
+      s,
+      { type: 'tool_end', toolCallId: 'tc1', toolName: 'bash', ok: true, durationMs: 3 },
+      NOW,
+    );
+    s = applyEvent(s, { type: 'done', text: 'checking', turnCount: 1 }, NOW);
+    const kinds = (s.messages[0] as AssistantTurn).blocks.map((b) => b.kind);
+    expect(kinds).not.toContain('tool');
+  });
+
+  it('tool_end flips the matching action to ok with duration + result', () => {
     let s: ChatState = initialChatState;
     s = applyEvent(
       s,
@@ -146,10 +194,11 @@ describe('applyEvent — tool blocks', () => {
       },
       NOW,
     );
-    const block = s.currentTurn?.blocks[0] as ToolBlock;
-    expect(block.status).toBe('ok');
-    expect(block.durationMs).toBe(42);
-    expect(block.result).toBe('file contents');
+    const [action] = actions(liveTrail(s));
+    expect(action?.status).toBe('ok');
+    expect(action?.durationMs).toBe(42);
+    expect(action?.result).toBe('file contents');
+    expect(s.phase).toBe('thinking');
   });
 
   it('tool_end with ok:false flips to failed and carries the error', () => {
@@ -171,12 +220,12 @@ describe('applyEvent — tool blocks', () => {
       },
       NOW,
     );
-    const block = s.currentTurn?.blocks[0] as ToolBlock;
-    expect(block.status).toBe('failed');
-    expect(block.result).toBe('denied by user');
+    const [action] = actions(liveTrail(s));
+    expect(action?.status).toBe('failed');
+    expect(action?.result).toBe('denied by user');
   });
 
-  it('tool_end without a matching block is a no-op', () => {
+  it('tool_end without a matching action is a no-op', () => {
     const s = applyEvent(
       initialChatState,
       { type: 'tool_end', toolCallId: 'unknown', toolName: 'x', ok: true, durationMs: 1 },
@@ -185,10 +234,9 @@ describe('applyEvent — tool blocks', () => {
     expect(s).toBe(initialChatState);
   });
 
-  it('tool_end can update a block in the last finalised message (out-of-order delivery)', () => {
-    // Simulate: tool_start → done → tool_end (rare but possible across
-    // SSE reconnect). The block lives in `messages` by the time
-    // tool_end arrives; the reducer should still find it.
+  it('tool_end can close an action whose turn already moved into history', () => {
+    // Simulate: tool_start → done → tool_end (rare but possible across an SSE
+    // reconnect). The turn is in `messages` by then; its trail key is not.
     let s: ChatState = initialChatState;
     s = applyEvent(s, { type: 'tool_start', toolCallId: 'tc1', toolName: 'x', args: {} }, NOW);
     s = applyEvent(s, { type: 'done', text: '', turnCount: 1 }, NOW);
@@ -198,14 +246,161 @@ describe('applyEvent — tool blocks', () => {
       NOW,
     );
     const turn = s.messages[0] as AssistantTurn;
-    const block = turn.blocks[0] as ToolBlock;
-    expect(block.status).toBe('ok');
-    expect(block.result).toBe('r');
+    const [action] = actions(trailOf(s, turn.id));
+    expect(action?.status).toBe('ok');
+    expect(action?.result).toBe('r');
+  });
+
+  it('a tool_end for a finished turn settles the row without reviving the status line', () => {
+    // Same race as above, seen from the status line: the turn is over, so
+    // `phase` must stay null. `StatusLine` renders on any non-null phase, and
+    // a resurrected `thinking` becomes `⚠ still working` once the stall
+    // window passes — a permanent spinner on a turn that already ended.
+    let s: ChatState = initialChatState;
+    s = applyEvent(s, { type: 'tool_start', toolCallId: 'tc1', toolName: 'x', args: {} }, NOW);
+    s = applyEvent(s, { type: 'done', text: '', turnCount: 1 }, NOW);
+    expect(s.phase).toBeNull();
+    s = applyEvent(
+      s,
+      { type: 'tool_end', toolCallId: 'tc1', toolName: 'x', ok: true, durationMs: 5 },
+      NOW + 1,
+    );
+    expect(s.phase).toBeNull();
+    expect(s.currentOp).toBeNull();
+    expect(s.currentTurn).toBeNull();
+    // The row still settled — suppressing the status line must not cost the trail.
+    const turn = s.messages[0] as AssistantTurn;
+    expect(actions(trailOf(s, turn.id))[0]?.status).toBe('ok');
+  });
+
+  it('a tool_end for the LIVE turn still moves the status line to thinking', () => {
+    let s: ChatState = initialChatState;
+    s = applyEvent(s, { type: 'tool_start', toolCallId: 'tc1', toolName: 'x', args: {} }, NOW);
+    expect(s.phase).toBe('tool');
+    s = applyEvent(
+      s,
+      { type: 'tool_end', toolCallId: 'tc1', toolName: 'x', ok: true, durationMs: 5 },
+      NOW,
+    );
+    expect(s.phase).toBe('thinking');
+    expect(s.currentOp).toBeNull();
+  });
+
+  it('a late tool_end for a PREVIOUS turn leaves the new live turn alone', () => {
+    // The nastier variant: the user already asked the next question, so a live
+    // turn exists — it just is not the one the end belongs to.
+    let s: ChatState = initialChatState;
+    s = applyEvent(s, { type: 'tool_start', toolCallId: 'old', toolName: 'x', args: {} }, NOW);
+    s = applyEvent(s, { type: 'done', text: '', turnCount: 1 }, NOW);
+    // A later `now`, because the turn id is derived from it — same clock, same
+    // turn, and the two would not be distinguishable at all.
+    s = applyEvent(s, { type: 'tool_start', toolCallId: 'new', toolName: 'y', args: {} }, NOW + 10);
+    expect(s.phase).toBe('tool');
+    const liveOp = s.currentOp;
+    s = applyEvent(
+      s,
+      { type: 'tool_end', toolCallId: 'old', toolName: 'x', ok: true, durationMs: 5 },
+      NOW + 11,
+    );
+    // The live call is still running; its status line must not say otherwise.
+    expect(s.phase).toBe('tool');
+    expect(s.currentOp).toBe(liveOp);
+    const finished = s.messages[0] as AssistantTurn;
+    expect(actions(trailOf(s, finished.id))[0]?.status).toBe('ok');
+  });
+
+  it('a tool-only turn survives `done` — its trail IS the record of it', () => {
+    let s: ChatState = initialChatState;
+    s = applyEvent(s, { type: 'tool_start', toolCallId: 'tc1', toolName: 'x', args: {} }, NOW);
+    s = applyEvent(s, { type: 'done', text: '', turnCount: 1 }, NOW);
+    expect(s.messages).toHaveLength(1);
+    const turn = s.messages[0] as AssistantTurn;
+    expect(turn.blocks).toEqual([]);
+    expect(actions(trailOf(s, turn.id))).toHaveLength(1);
+  });
+
+  it('an internal inner call is invisible — no trail row, no status churn', () => {
+    let s: ChatState = initialChatState;
+    s = applyEvent(
+      s,
+      {
+        type: 'tool_start',
+        toolCallId: 'in1',
+        toolName: 'read_file',
+        args: {},
+        audience: 'internal',
+      },
+      NOW,
+    );
+    s = applyEvent(
+      s,
+      {
+        type: 'tool_end',
+        toolCallId: 'in1',
+        toolName: 'read_file',
+        ok: true,
+        durationMs: 2,
+        audience: 'internal',
+      },
+      NOW,
+    );
+    expect(s.trail).toEqual({});
+    expect(s.currentOp).toBeNull();
+    expect(s.phase).toBeNull();
+    // The stream is alive, though — the stall clock moved.
+    expect(s.lastStreamEventAt).toBe(NOW);
+  });
+});
+
+describe('applyEvent — tool_progress', () => {
+  it("a user-audience message becomes the status line's label", () => {
+    const s = applyEvent(
+      initialChatState,
+      { type: 'tool_progress', toolName: 'bash', message: 'installing deps', audience: 'user' },
+      NOW,
+    );
+    expect(s.currentOp).toBe('installing deps');
+    expect(s.phase).toBe('tool');
+    expect(s.lastStreamEventAt).toBe(NOW);
+  });
+
+  it('an internal or dashboard message surfaces NOTHING', () => {
+    for (const audience of ['internal', 'dashboard'] as const) {
+      const s = applyEvent(
+        initialChatState,
+        { type: 'tool_progress', toolName: 'bash', message: 'chunk 3/9', audience },
+        NOW,
+      );
+      expect(s.currentOp).toBeNull();
+      expect(s.phase).toBeNull();
+      expect(s.trail).toEqual({});
+      expect(s.lastStreamEventAt).toBe(NOW);
+    }
+  });
+
+  it('a grounding message becomes a finding ROW, never status text', () => {
+    let s: ChatState = initialChatState;
+    s = applyEvent(s, { type: 'text_delta', text: 'the tests pass' }, NOW);
+    s = applyEvent(
+      s,
+      {
+        type: 'tool_progress',
+        toolName: '_grounding',
+        message: 'tests pass',
+        audience: 'user',
+      },
+      NOW,
+    );
+    const entries = liveTrail(s);
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({ kind: 'finding', claim: 'tests pass' });
+    // A claim under review is not a progress label.
+    expect(s.currentOp).toBeNull();
   });
 });
 
 describe('applyEvent — approval flow', () => {
-  it('tool.approval_required pre-creates a pending-approval block + queues the request', () => {
+  it('tool.approval_required pre-creates a pending-approval ACTION + queues the request', () => {
     const s = applyEvent(
       initialChatState,
       {
@@ -223,13 +418,14 @@ describe('applyEvent — approval flow', () => {
     );
     expect(s.pendingApprovals).toHaveLength(1);
     expect(s.pendingApprovals[0]?.approvalId).toBe('ap1');
-    const block = s.currentTurn?.blocks[0] as ToolBlock | undefined;
-    expect(block?.status).toBe('pending-approval');
-    expect(block?.toolName).toBe('terminal');
-    expect(block?.reason).toBe('recursive force-delete');
+    expect(s.currentTurn?.blocks).toEqual([]);
+    const [action] = actions(liveTrail(s));
+    expect(action?.status).toBe('pending-approval');
+    expect(action?.toolName).toBe('terminal');
+    expect(action?.reason).toBe('recursive force-delete');
   });
 
-  it('tool_start after approval flips the pending block to running (no duplicate)', () => {
+  it('tool_start after approval flips the pending action to running (no duplicate)', () => {
     let s: ChatState = initialChatState;
     s = applyEvent(
       s,
@@ -251,9 +447,8 @@ describe('applyEvent — approval flow', () => {
       { type: 'tool_start', toolCallId: 'tc1', toolName: 'bash', args: { cmd: 'x' } },
       NOW,
     );
-    expect(s.currentTurn?.blocks).toHaveLength(1);
-    const block = s.currentTurn?.blocks[0] as ToolBlock;
-    expect(block.status).toBe('running');
+    expect(actions(liveTrail(s))).toHaveLength(1);
+    expect(actions(liveTrail(s))[0]?.status).toBe('running');
   });
 
   it('approval.resolved drops the request from the modal queue', () => {
@@ -281,7 +476,7 @@ describe('applyEvent — approval flow', () => {
     expect(s.pendingApprovals).toHaveLength(0);
   });
 
-  it('deny path: tool_end with ok:false flips the pending block to failed (no tool_start)', () => {
+  it('deny path: tool_end with ok:false flips the pending action to failed (no tool_start)', () => {
     let s: ChatState = initialChatState;
     s = applyEvent(
       s,
@@ -315,10 +510,61 @@ describe('applyEvent — approval flow', () => {
       },
       NOW,
     );
-    const block = s.currentTurn?.blocks[0] as ToolBlock;
-    expect(block.status).toBe('failed');
-    expect(block.result).toBe('denied by user');
+    const [action] = actions(liveTrail(s));
+    expect(action?.status).toBe('failed');
+    expect(action?.result).toBe('denied by user');
     expect(s.pendingApprovals).toHaveLength(0);
+  });
+
+  it('abort settles the parked call AND closes the modal it was waiting on', () => {
+    // The failure this covers: Stop pressed while a tool sat on the approval
+    // modal left a finalised `✗ stopped` turn carrying a permanently
+    // `pending-approval` row, with the modal still on screen and nothing alive
+    // to resolve it.
+    let s: ChatState = initialChatState;
+    s = applyEvent(s, { type: 'tool.approval_required', request: approvalReq() }, NOW);
+    const turnId = s.currentTurn?.id ?? '';
+    s = applyAction(s, { type: 'abort-turn' });
+
+    expect(actions(trailOf(s, turnId)).map((a) => a.status)).toEqual(['failed']);
+    expect(s.pendingApprovals).toEqual([]);
+    expect(s.stoppedTurnIds).toEqual([turnId]);
+  });
+
+  it('a stream error settles the parked call and closes its modal too', () => {
+    let s: ChatState = initialChatState;
+    s = applyEvent(s, { type: 'tool.approval_required', request: approvalReq() }, NOW);
+    const turnId = s.currentTurn?.id ?? '';
+    s = applyEvent(s, { type: 'error', error: 'rate limited', code: 'RATE_LIMIT' }, NOW);
+
+    expect(actions(trailOf(s, turnId)).map((a) => a.status)).toEqual(['failed']);
+    expect(s.pendingApprovals).toEqual([]);
+    // Nobody stopped this one — the ✗ comes off the failed row alone.
+    expect(s.stoppedTurnIds).toEqual([]);
+  });
+
+  it('leaves an approval that belongs to another turn queued', () => {
+    // Attribution is by `toolCallId`: only the requests whose call is a row of
+    // the turn being finalised go with it.
+    let s: ChatState = initialChatState;
+    s = applyEvent(
+      s,
+      { type: 'tool.approval_required', request: approvalReq({ approvalId: 'ap-old' }) },
+      NOW,
+    );
+    s = applyEvent(s, { type: 'done', text: '', turnCount: 1 }, NOW);
+    s = applyEvent(
+      s,
+      {
+        type: 'tool.approval_required',
+        request: approvalReq({ approvalId: 'ap-new', toolCallId: 'tc2' }),
+      },
+      // A later clock, so the second turn is a genuinely different turn id.
+      NOW + 1_000,
+    );
+    s = applyAction(s, { type: 'abort-turn' });
+
+    expect(s.pendingApprovals.map((p) => p.approvalId)).toEqual(['ap-old']);
   });
 
   it('repeated tool.approval_required for the same id does NOT duplicate the queue entry', () => {
@@ -334,7 +580,7 @@ describe('applyEvent — approval flow', () => {
     s = applyEvent(s, { type: 'tool.approval_required', request: req }, NOW);
     s = applyEvent(s, { type: 'tool.approval_required', request: req }, NOW);
     expect(s.pendingApprovals).toHaveLength(1);
-    expect(s.currentTurn?.blocks).toHaveLength(1);
+    expect(actions(liveTrail(s))).toHaveLength(1);
   });
 });
 
@@ -463,13 +709,16 @@ describe('applyEvent — error and unhandled events', () => {
     s = applyEvent(s, { type: 'error', error: 'rate limited', code: 'RATE_LIMIT' }, NOW);
     expect(s.error).toBe('rate limited');
     expect(s.isStreaming).toBe(false);
-    expect(s.currentTurn?.blocks).toHaveLength(1);
+    // `error` is a terminal transition now, so the partial answer is preserved
+    // where every other ended turn lives — in `messages`, not held open as an
+    // in-flight `currentTurn` with a status line above it for ever.
+    const finalised = s.messages[s.messages.length - 1];
+    expect(finalised?.role === 'assistant' && finalised.blocks).toHaveLength(1);
   });
 
-  it('thinking / progress / push events do not mutate state', () => {
+  it('thinking / push events do not mutate state', () => {
     const events: SseEvent[] = [
       { type: 'thinking_delta', thinking: 'planning' },
-      { type: 'tool_progress', toolName: 'x', message: 'wait', audience: 'user' },
       { type: 'message_persisted', messageId: 'm1', role: 'assistant' },
     ];
     let s: ChatState = initialChatState;
@@ -601,9 +850,14 @@ describe('applyAction — UI/lifecycle transitions', () => {
     expect(s.messages).toHaveLength(2);
     expect(s.messages[0]?.role).toBe('user');
     const turn = s.messages[1] as AssistantTurn;
-    expect(turn.blocks.map((b) => b.kind)).toEqual(['text', 'tool', 'text']);
-    expect((turn.blocks[1] as ToolBlock).result).toBe('<file body>');
-    expect((turn.blocks[2] as TextBlock).content).toBe('done');
+    // The bubble holds the words; the machinery is in the trail beside it.
+    expect(turn.blocks.map((b) => b.kind)).toEqual(['text', 'text']);
+    expect((turn.blocks[1] as TextBlock).content).toBe('done');
+    const [action] = actions(trailOf(s, turn.id));
+    expect(action?.toolName).toBe('read_file');
+    expect(action?.result).toBe('<file body>');
+    // History persists no duration — the row renders `—` rather than a lie.
+    expect(action?.durationMs).toBeUndefined();
   });
 
   it('history-loaded skips tool_result that has no matching tool block', () => {
@@ -691,15 +945,20 @@ describe('applyAction — UI/lifecycle transitions', () => {
   });
 
   it('marks a turn cut off mid-tool-call, which has no sentence to mark', () => {
+    // Zero blocks, but a trail: something started and did not finish, and the
+    // footer is the record of it. Dropping the turn would lose that.
     let s = applyEvent(
       initialChatState,
       { type: 'tool_start', toolCallId: 'tc1', toolName: 'read_file', args: {} },
       NOW,
     );
+    const liveId = s.currentTurn?.id;
     s = applyAction(s, { type: 'submit-user-message', id: 'u1', text: 'stop', timestamp: 1 });
     const kept = s.messages[0] as AssistantTurn;
-    expect(kept.blocks.map((b) => b.kind)).toEqual(['tool', 'text']);
-    expect((kept.blocks[1] as TextBlock).content).toBe('[interrupted]');
+    expect(kept.id).toBe(liveId);
+    expect(kept.blocks.map((b) => b.kind)).toEqual(['text']);
+    expect((kept.blocks[0] as TextBlock).content).toBe('[interrupted]');
+    expect(actions(trailOf(s, kept.id))).toHaveLength(1);
   });
 
   it('keeps nothing when no answer had started', () => {
@@ -745,6 +1004,11 @@ describe('typed UI cards', () => {
     payload: { severity: 'info' as const, message: 'Prices refreshed.' },
   };
 
+  /** The same alert envelope with a distinguishing message, for order assertions. */
+  function alertCard(message: string) {
+    return { ...cardEnvelope, payload: { ...cardEnvelope.payload, message } };
+  }
+
   function turnWithTool(): ChatState {
     let s: ChatState = initialChatState;
     s = applyEvent(
@@ -755,7 +1019,7 @@ describe('typed UI cards', () => {
     return s;
   }
 
-  it('tool_end with a valid card appends one card block beside the tool chip', () => {
+  it('tool_end with a valid card appends one card block to the answer', () => {
     let s = turnWithTool();
     s = applyEvent(
       s,
@@ -770,8 +1034,8 @@ describe('typed UI cards', () => {
       NOW,
     );
     const blocks = s.currentTurn?.blocks ?? [];
-    expect(blocks.map((b) => b.kind)).toEqual(['tool', 'card']);
-    const card = blocks[1] as CardBlock;
+    expect(blocks.map((b) => b.kind)).toEqual(['card']);
+    const card = blocks[0] as CardBlock;
     expect(card.toolCallId).toBe('tc1');
     expect(card.card).toEqual(cardEnvelope);
   });
@@ -791,10 +1055,10 @@ describe('typed UI cards', () => {
       },
       NOW,
     );
-    expect(s.currentTurn?.blocks.map((b) => b.kind)).toEqual(['tool']);
+    expect(s.currentTurn?.blocks).toEqual([]);
   });
 
-  it('history-loaded places a replayed card directly after its tool block', () => {
+  it('history-loaded places a replayed card where its tool call ran', () => {
     const stored: StoredMessage[] = [
       storedMsg({
         id: 'a1',
@@ -820,9 +1084,71 @@ describe('typed UI cards', () => {
       ],
     });
     const turn = s.messages[0] as AssistantTurn;
-    expect(turn.blocks.map((b) => b.kind)).toEqual(['text', 'tool', 'card', 'card', 'tool']);
+    expect(turn.blocks.map((b) => b.kind)).toEqual(['text', 'card', 'card']);
     // Ordered by seq, not by arrival.
-    expect((turn.blocks[2] as CardBlock).card.payload).toMatchObject({ message: 'First.' });
+    expect((turn.blocks[1] as CardBlock).card.payload).toMatchObject({ message: 'First.' });
+  });
+
+  it('two calls in ONE assistant message keep their cards in seq order', () => {
+    // Tool calls are not blocks, so nothing between the two calls moves the
+    // position on: BOTH anchors record the same index. `seq` is then the only
+    // order there is, and stepping past cards already placed is what keeps it.
+    const s = applyAction(initialChatState, {
+      type: 'history-loaded',
+      messages: [
+        storedMsg({
+          id: 'a1',
+          role: 'assistant',
+          content: 'here you go',
+          toolCalls: [
+            { id: 'tc1', name: 'emit_card', input: {} },
+            { id: 'tc2', name: 'emit_card', input: {} },
+          ],
+          timestamp: new Date(10).toISOString(),
+        }),
+      ],
+      cards: [
+        { toolCallId: 'tc1', seq: 1, envelope: alertCard('A') },
+        { toolCallId: 'tc2', seq: 2, envelope: alertCard('B') },
+      ],
+    });
+    const turn = s.messages[0] as AssistantTurn;
+    expect(turn.blocks.map((b) => b.kind)).toEqual(['text', 'card', 'card']);
+    expect((turn.blocks[1] as CardBlock).card.payload).toMatchObject({ message: 'A' });
+    expect((turn.blocks[2] as CardBlock).card.payload).toMatchObject({ message: 'B' });
+  });
+
+  it('three cards interleaved across two calls in one message follow seq', () => {
+    // The harder shape: call A, then B, then A again. An off-by-one in the
+    // post-splice shift shows up here and nowhere else.
+    const s = applyAction(initialChatState, {
+      type: 'history-loaded',
+      messages: [
+        storedMsg({
+          id: 'a1',
+          role: 'assistant',
+          content: 'here you go',
+          toolCalls: [
+            { id: 'tc1', name: 'emit_card', input: {} },
+            { id: 'tc2', name: 'emit_card', input: {} },
+          ],
+          timestamp: new Date(10).toISOString(),
+        }),
+      ],
+      // Deliberately out of seq order on the wire, to pin that seq wins.
+      cards: [
+        { toolCallId: 'tc2', seq: 2, envelope: alertCard('B') },
+        { toolCallId: 'tc1', seq: 3, envelope: alertCard('C') },
+        { toolCallId: 'tc1', seq: 1, envelope: alertCard('A') },
+      ],
+    });
+    const turn = s.messages[0] as AssistantTurn;
+    expect(turn.blocks.map((b) => b.kind)).toEqual(['text', 'card', 'card', 'card']);
+    expect(turn.blocks.slice(1).map((b) => (b as CardBlock).card.payload)).toMatchObject([
+      { message: 'A' },
+      { message: 'B' },
+      { message: 'C' },
+    ]);
   });
 
   it('history-loaded appends a card with no matching tool block to the last turn', () => {
@@ -934,5 +1260,397 @@ describe('parseUserContent', () => {
 
   it('handles an annotation with no text after it', () => {
     expect(parseUserContent(MINIMAL_ANNOTATION)).toEqual({ text: '', origin: 'voice' });
+  });
+});
+
+// The status line's phases and the trail's lifecycle — the two halves of
+// "every request is visibly acknowledged, and every action is accounted for".
+describe('phases and the trail lifecycle', () => {
+  it('acknowledges the send BEFORE any event arrives', () => {
+    const s = applyAction(initialChatState, {
+      type: 'submit-user-message',
+      id: 'u1',
+      text: 'go',
+      timestamp: 7,
+    });
+    expect(s.phase).toBe('received');
+    // The clock runs from the send, not from the server's first byte.
+    expect(s.turnStartedAt).toBe(7);
+  });
+
+  it('walks received → thinking → tool → writing → (footer)', () => {
+    let s = applyAction(initialChatState, {
+      type: 'submit-user-message',
+      id: 'u1',
+      text: 'go',
+      timestamp: 7,
+    });
+    expect(s.phase).toBe('received');
+    s = applyEvent(
+      s,
+      { type: 'run_start', provider: 'anthropic', model: 'm', source: 'personality' },
+      NOW,
+    );
+    expect(s.phase).toBe('thinking');
+    // run_start does not restart the clock the send started.
+    expect(s.turnStartedAt).toBe(7);
+    s = applyEvent(s, { type: 'tool_start', toolCallId: 'tc1', toolName: 'bash', args: {} }, NOW);
+    expect(s.phase).toBe('tool');
+    s = applyEvent(s, { type: 'text_delta', text: 'here' }, NOW);
+    expect(s.phase).toBe('writing');
+    s = applyEvent(s, { type: 'done', text: 'here', turnCount: 1 }, NOW);
+    expect(s.phase).toBeNull();
+  });
+
+  it('abort closes the trail as stopped and remembers which turn it was', () => {
+    let s: ChatState = initialChatState;
+    s = applyEvent(s, { type: 'tool_start', toolCallId: 'a', toolName: 'x', args: {} }, NOW);
+    s = applyEvent(
+      s,
+      { type: 'tool_end', toolCallId: 'a', toolName: 'x', ok: true, durationMs: 4 },
+      NOW,
+    );
+    s = applyEvent(s, { type: 'tool_start', toolCallId: 'b', toolName: 'y', args: {} }, NOW);
+    const turnId = s.currentTurn?.id ?? '';
+    s = applyAction(s, { type: 'abort-turn' });
+
+    // The phase clears: the turn's footer takes over the slot (contract §2/§3).
+    expect(s.phase).toBeNull();
+    expect(s.isStreaming).toBe(false);
+    expect(s.stoppedTurnIds).toEqual([turnId]);
+    // The call that was still running did not finish, and says so.
+    expect(actions(trailOf(s, turnId)).map((a) => a.status)).toEqual(['ok', 'failed']);
+  });
+
+  it('abort BEFORE the first server event still stops the visible turn', () => {
+    // `currentTurn` is only minted by the first SSE event, but the status line
+    // is already saying `received`. Stop pressed here — the slow-start case —
+    // used to change nothing, leaving `⚠ still working` to appear later.
+    let s = applyAction(initialChatState, {
+      type: 'submit-user-message',
+      id: 'u1',
+      text: 'go',
+      timestamp: 1,
+    });
+    expect(s.currentTurn).toBeNull();
+    s = applyAction(s, { type: 'abort-turn' });
+    // Zero actions means no footer to hand over to (§3), so the status line
+    // simply goes — not a permanent `✗ stopped` line with nothing under it.
+    expect(s.phase).toBeNull();
+    expect(s.isStreaming).toBe(false);
+    expect(s.currentOp).toBeNull();
+    // Nothing ran, so there is no trail to close and no turn to remember.
+    expect(s.trail).toEqual({});
+    expect(s.stoppedTurnIds).toEqual([]);
+  });
+
+  it('abort hands the turn over to its footer instead of leaving both on screen', () => {
+    // Contract §2/§3: the footer REPLACES the status line. Stop used to leave
+    // `phase: 'stopped'` AND `currentTurn` set, so the aborted turn drew its
+    // `✗ stopped` footer while the status line stayed mounted and the elapsed
+    // clock kept ticking, for ever.
+    let s = applyAction(initialChatState, {
+      type: 'submit-user-message',
+      id: 'u1',
+      text: 'go',
+      timestamp: 1,
+    });
+    s = applyEvent(s, { type: 'text_delta', text: 'partial' }, NOW);
+    s = applyEvent(s, { type: 'tool_start', toolCallId: 'a', toolName: 'x', args: {} }, NOW);
+    const turnId = s.currentTurn?.id ?? '';
+    s = applyAction(s, { type: 'abort-turn' });
+
+    expect(s.phase).toBeNull();
+    expect(s.turnStartedAt).toBeNull();
+    expect(s.currentTurn).toBeNull();
+    expect(s.isStreaming).toBe(false);
+    // The evidence survives the hand-off: the turn is in `messages` under the
+    // same id, still marked stopped, its unfinished call still failed — which
+    // is what makes the footer read `✗ stopped · 1 action`.
+    const finalised = s.messages[s.messages.length - 1];
+    expect(finalised?.id).toBe(turnId);
+    expect(s.stoppedTurnIds).toEqual([turnId]);
+    expect(actions(trailOf(s, turnId)).map((a) => a.status)).toEqual(['failed']);
+  });
+
+  it('a Stop the server never heard un-blinds the stream and tells the user', () => {
+    // `abort-turn` is optimistic AND durable: it suppresses every
+    // turn-advancing event until the next submission. If the RPC then fails,
+    // that guard would blind the surface for the rest of the session while the
+    // server kept executing tools — the turn reported stopped, its side effects
+    // still running, and nothing on screen saying so.
+    let s = applyAction(initialChatState, {
+      type: 'submit-user-message',
+      id: 'u1',
+      text: 'go',
+      timestamp: 1,
+    });
+    s = applyEvent(s, { type: 'tool_start', toolCallId: 'a', toolName: 'x', args: {} }, NOW);
+    s = applyAction(s, { type: 'abort-turn' });
+    expect(s.abortedTurn).toBe(true);
+
+    s = applyAction(s, { type: 'abort-failed', reason: 'network unreachable' });
+    expect(s.abortedTurn).toBe(false);
+    expect(s.error).toContain('Stop did not reach the server');
+    expect(s.error).toContain('network unreachable');
+
+    // The suppression is lifted, so what the server is still doing is visible
+    // again instead of silently dropped.
+    s = applyEvent(s, { type: 'text_delta', text: 'still going' }, NOW);
+    expect(s.currentTurn?.blocks).toEqual([{ kind: 'text', content: 'still going' }]);
+  });
+
+  it('events still in flight after an abort cannot resurrect the stopped turn', () => {
+    // An abort is a local decision plus an RPC; the server keeps sending until
+    // it hears. A post-abort `run_start` used to flip the phase back to
+    // `thinking`, and a post-abort `tool_start` minted a brand-new
+    // `currentTurn` — the turn the user just stopped, back from the dead.
+    let s = applyAction(initialChatState, {
+      type: 'submit-user-message',
+      id: 'u1',
+      text: 'go',
+      timestamp: 1,
+    });
+    s = applyEvent(s, { type: 'tool_start', toolCallId: 'a', toolName: 'x', args: {} }, NOW);
+    s = applyAction(s, { type: 'abort-turn' });
+    const stopped = s;
+
+    for (const event of [
+      { type: 'run_start', provider: 'anthropic', model: 'm', source: 'personality' },
+      { type: 'tool_start', toolCallId: 'b', toolName: 'y', args: {} },
+      { type: 'text_delta', text: 'zombie' },
+      { type: 'thinking_delta', thinking: 'still going' },
+      { type: 'done', text: 'zombie', turnCount: 1 },
+    ] satisfies SseEvent[]) {
+      s = applyEvent(s, event, NOW);
+    }
+    expect(s).toBe(stopped);
+
+    // Session-scoped bookkeeping is NOT turn state and keeps flowing.
+    s = applyEvent(
+      s,
+      { type: 'usage', inputTokens: 42, outputTokens: 1, estimatedCostUsd: 0 },
+      NOW,
+    );
+    expect(s.contextTokens).toBe(42);
+
+    // The next question re-arms the stream.
+    s = applyAction(s, { type: 'submit-user-message', id: 'u2', text: 'again', timestamp: 2 });
+    s = applyEvent(s, { type: 'text_delta', text: 'fresh' }, NOW);
+    expect(s.currentTurn?.blocks).toEqual([{ kind: 'text', content: 'fresh' }]);
+    expect(s.phase).toBe('writing');
+  });
+
+  it('error ends the turn: nothing is left running, the partial text survives', () => {
+    // The drawer reducer closes its turn on `error`; chat did not, so any
+    // action still `running` stayed running for ever — on the very path where
+    // honest accounting matters most.
+    let s = applyAction(initialChatState, {
+      type: 'submit-user-message',
+      id: 'u1',
+      text: 'go',
+      timestamp: 1,
+    });
+    s = applyEvent(s, { type: 'text_delta', text: 'half-done' }, NOW);
+    s = applyEvent(s, { type: 'tool_start', toolCallId: 'a', toolName: 'x', args: {} }, NOW);
+    const turnId = s.currentTurn?.id ?? '';
+    s = applyEvent(s, { type: 'error', error: 'rate limited', code: 'RATE_LIMIT' }, NOW);
+
+    expect(s.error).toBe('rate limited');
+    expect(s.currentTurn).toBeNull();
+    expect(s.turnStartedAt).toBeNull();
+    expect(s.phase).toBeNull();
+    // The partial answer is still readable and copyable, in `messages` now.
+    const finalised = s.messages[s.messages.length - 1];
+    expect(finalised?.role === 'assistant' && finalised.blocks).toEqual([
+      { kind: 'text', content: 'half-done' },
+    ]);
+    // The call that never came back is `failed`, so the footer leads with ✗ on
+    // its own — the user did not stop this, so it is not a stopped turn.
+    expect(actions(trailOf(s, turnId)).map((a) => a.status)).toEqual(['failed']);
+    expect(s.stoppedTurnIds).toEqual([]);
+  });
+
+  it('the replay defense moves the live trail onto the history turn it kept', () => {
+    // The live copy is the one with real durations; the persisted rows have
+    // none. Dropping the live turn must not drop them with it.
+    let s: ChatState = applyAction(initialChatState, {
+      type: 'history-loaded',
+      messages: [
+        storedMsg({
+          id: 'asst-old',
+          role: 'assistant',
+          content: 'cached reply',
+          toolCalls: [{ id: 'tc1', name: 'read_file', input: {} }],
+          timestamp: new Date(100).toISOString(),
+        }),
+      ],
+    });
+    s = applyEvent(s, { type: 'text_delta', text: 'cached reply' }, NOW);
+    const liveId = s.currentTurn?.id ?? '';
+    s = applyEvent(
+      s,
+      { type: 'tool_start', toolCallId: 'tc1', toolName: 'read_file', args: {} },
+      NOW,
+    );
+    s = applyEvent(
+      s,
+      { type: 'tool_end', toolCallId: 'tc1', toolName: 'read_file', ok: true, durationMs: 88 },
+      NOW,
+    );
+    s = applyEvent(s, { type: 'done', text: 'cached reply', turnCount: 1 }, NOW);
+
+    expect(s.messages).toHaveLength(1);
+    expect(s.trail[liveId]).toBeUndefined();
+    const [action] = actions(trailOf(s, 'asst-old'));
+    expect(action?.durationMs).toBe(88);
+  });
+
+  it('reset clears the trail with everything else', () => {
+    let s: ChatState = initialChatState;
+    s = applyEvent(s, { type: 'tool_start', toolCallId: 'a', toolName: 'x', args: {} }, NOW);
+    s = applyAction(s, { type: 'abort-turn' });
+    expect(s.trail).not.toEqual({});
+    s = applyAction(s, { type: 'reset' });
+    expect(s).toEqual(initialChatState);
+    expect(s.trail).toEqual({});
+    expect(s.stoppedTurnIds).toEqual([]);
+  });
+
+  it('a turn interrupted by the next question ends exactly as Stop ends one', () => {
+    // The old code cleared `currentTurn` without closing its trail: the actions
+    // stayed `running` for ever, and the footer led with a ✓ it never earned.
+    let s: ChatState = applyAction(initialChatState, {
+      type: 'submit-user-message',
+      id: 'u1',
+      text: 'q1',
+      timestamp: 1,
+    });
+    s = applyEvent(s, { type: 'tool_start', toolCallId: 'a', toolName: 'x', args: {} }, NOW);
+    const interruptedId = s.currentTurn?.id ?? '';
+    s = applyAction(s, { type: 'submit-user-message', id: 'u2', text: 'q2', timestamp: 2 });
+
+    expect(s.currentTurn).toBeNull();
+    expect(actions(trailOf(s, interruptedId)).map((a) => a.status)).toEqual(['failed']);
+    expect(s.stoppedTurnIds).toEqual([interruptedId]);
+  });
+
+  it('history rows say the outcome was unrecorded, never that it was ok', () => {
+    // `StoredMessage` carries no error flag, so a reloaded failure and a
+    // reloaded success are the same row. Calling both `ok` painted a ✓ on
+    // calls that may well have failed (contract §3).
+    const s = applyAction(initialChatState, {
+      type: 'history-loaded',
+      messages: [
+        storedMsg({
+          id: 'a1',
+          role: 'assistant',
+          content: 'one',
+          toolCalls: [{ id: 'tc1', name: 'read_file', input: { path: 'x' } }],
+          timestamp: new Date(10).toISOString(),
+        }),
+      ],
+    });
+    expect(actions(trailOf(s, 'a1')).map((a) => a.status)).toEqual(['unrecorded']);
+  });
+
+  it('a live tool_end still settles a row that was reloaded as unrecorded', () => {
+    let s: ChatState = applyAction(initialChatState, {
+      type: 'history-loaded',
+      messages: [
+        storedMsg({
+          id: 'a1',
+          role: 'assistant',
+          content: 'one',
+          toolCalls: [{ id: 'tc1', name: 'read_file', input: {} }],
+          timestamp: new Date(10).toISOString(),
+        }),
+      ],
+    });
+    s = applyEvent(
+      s,
+      { type: 'tool_end', toolCallId: 'tc1', toolName: 'read_file', ok: false, durationMs: 7 },
+      NOW,
+    );
+    expect(actions(trailOf(s, 'a1')).map((a) => a.status)).toEqual(['failed']);
+  });
+
+  it('history load derives a trail per turn, replacing whatever was there', () => {
+    const s = applyAction(initialChatState, {
+      type: 'history-loaded',
+      messages: [
+        storedMsg({
+          id: 'a1',
+          role: 'assistant',
+          content: 'one',
+          toolCalls: [{ id: 'tc1', name: 'read_file', input: { path: 'x' } }],
+          timestamp: new Date(10).toISOString(),
+        }),
+        storedMsg({
+          id: 'u1',
+          role: 'user',
+          content: 'again',
+          timestamp: new Date(20).toISOString(),
+        }),
+        storedMsg({
+          id: 'a2',
+          role: 'assistant',
+          content: 'two',
+          toolCalls: [{ id: 'tc2', name: 'bash', input: {} }],
+          timestamp: new Date(30).toISOString(),
+        }),
+      ],
+    });
+    expect(Object.keys(s.trail).sort()).toEqual(['a1', 'a2']);
+    expect(actions(trailOf(s, 'a1')).map((a) => a.toolName)).toEqual(['read_file']);
+    expect(actions(trailOf(s, 'a2')).map((a) => a.toolName)).toEqual(['bash']);
+  });
+
+  it('a card lands after the text that followed its tool call, not before it', () => {
+    // The anchor is a position, and positions shift as earlier cards splice
+    // in. This is the case a fixed index gets wrong.
+    const s = applyAction(initialChatState, {
+      type: 'history-loaded',
+      messages: [
+        storedMsg({
+          id: 'a1',
+          role: 'assistant',
+          content: 'first',
+          toolCalls: [{ id: 'tc1', name: 'emit_card', input: {} }],
+          timestamp: new Date(10).toISOString(),
+        }),
+        storedMsg({
+          id: 'a2',
+          role: 'assistant',
+          content: 'second',
+          toolCalls: [{ id: 'tc2', name: 'emit_card', input: {} }],
+          timestamp: new Date(20).toISOString(),
+        }),
+      ],
+      cards: [
+        {
+          toolCallId: 'tc1',
+          seq: 0,
+          envelope: {
+            kind: 'alert',
+            specVersion: 1,
+            payload: { severity: 'info', message: 'A' },
+          },
+        },
+        {
+          toolCallId: 'tc2',
+          seq: 1,
+          envelope: {
+            kind: 'alert',
+            specVersion: 1,
+            payload: { severity: 'info', message: 'B' },
+          },
+        },
+      ],
+    });
+    const turn = s.messages[0] as AssistantTurn;
+    expect(turn.blocks.map((b) => b.kind)).toEqual(['text', 'card', 'text', 'card']);
+    expect((turn.blocks[1] as CardBlock).card.payload).toMatchObject({ message: 'A' });
+    expect((turn.blocks[3] as CardBlock).card.payload).toMatchObject({ message: 'B' });
   });
 });

@@ -2280,7 +2280,15 @@ body,
   border: 1.5px solid var(--ethos-text-dim);
   border-top-color: transparent;
   border-radius: 9999px;
-  animation: tool-chip-spin 700ms linear infinite;
+  animation: spinner-rotate 700ms linear infinite;
+}
+
+/* Pure rotation, no layout impact. Named for what it does now that the tool
+   chip it was written for is gone (the trail's rows carry state as a word). */
+@keyframes spinner-rotate {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .message-attachment-error {
@@ -3813,17 +3821,6 @@ textarea {
   font-size: 13px;
 }
 
-.chat-stall-notice {
-  margin: 0 16px 8px;
-  padding: 8px 12px;
-  background: rgba(255, 200, 50, 0.08);
-  border: 1px solid rgba(255, 200, 50, 0.25);
-  border-radius: 6px;
-  font-size: 12px;
-  color: var(--ethos-text-dim);
-  text-align: center;
-}
-
 /* Approval modal — anchored under the personality bar, NOT centered.
    DESIGN.md: "the agent itself is asking permission, so the modal slides
    down from where the agent's face lives". Slide-down 180ms, accent
@@ -3994,122 +3991,207 @@ textarea {
   }
 }
 
-.tool-chip-pending-approval {
-  border-color: rgba(245, 158, 11, 0.4);
-  background: rgba(245, 158, 11, 0.06);
-}
+/* ---------------------------------------------------------------------------
+   Feedback & activity (DESIGN.md § "Feedback & activity",
+   plan/phases/feedback-activity-contract.md). Three surfaces, ONE vocabulary:
+   the status line above the composer, the trail footer under a bubble, and
+   `FeedbackRow` outside chat. Rows, not boxes — no card chrome, no shadow, no
+   coloured left border.
+   --------------------------------------------------------------------------- */
 
-/* Tool chips: inline pills that sit between text spans inside an
-   assistant turn. NOT a card. sm border-radius (4px), mono font for
-   the tool name + args, status icon + color. The chip itself is a
-   <button> so keyboard users can expand it via Enter / Space. */
-
-.tool-chip-wrapper {
-  display: block;
-  margin: 6px 0;
-}
-
-.tool-chip {
-  display: inline-flex;
+/* The reserved slot. The status line holds it from send until the turn's
+   footer takes it over, so the phases change without anything moving. Both
+   use it, which is what makes the handover silent. */
+.activity-slot {
+  min-height: 28px;
+  display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 3px 8px;
-  border-radius: 4px;
-  border: 1px solid var(--ethos-border);
-  background: var(--ethos-bg-elevated);
-  color: var(--ethos-text);
+  gap: 8px;
+  padding: 0 24px;
   font-family: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 12px;
-  font-variant-numeric: tabular-nums;
-  cursor: pointer;
-  max-width: 100%;
-  text-align: left;
-  transition: background-color 80ms cubic-bezier(0.16, 1, 0.3, 1);
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--text-secondary);
 }
 
-.tool-chip:hover {
+/* The live region's text. Announced, never drawn — the visible line beside it
+   updates instantly while announcements stay throttled. */
+.activity-sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
+.status-line {
+  transition: opacity var(--motion-default, 180ms) cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.status-line-dot {
+  background: var(--accent, var(--ethos-info));
+  margin-right: 0;
+}
+
+.status-line-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.status-line-stall {
+  color: var(--warning);
+  flex-shrink: 0;
+}
+
+.status-line-elapsed {
+  margin-left: auto;
+  color: var(--text-tertiary);
+  font-variant-numeric: tabular-nums;
+  flex-shrink: 0;
+}
+
+/* The trail footer — one line under the bubble, in the slot the status line
+   vacated. A button, because it opens the rows. */
+.trail {
+  display: flex;
+  flex-direction: column;
+}
+
+.trail-footer {
+  border: 0;
+  background: none;
+  cursor: pointer;
+  text-align: left;
+  width: 100%;
+  border-radius: 4px;
+  transition: background-color var(--motion-fast, 80ms) cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.trail-footer:hover {
   background: var(--ethos-hover);
 }
 
-.tool-chip:focus-visible {
+.trail-footer:focus-visible {
   outline: 2px solid var(--accent, var(--ethos-info));
   outline-offset: 1px;
 }
 
-.tool-chip-status {
-  display: inline-flex;
+.trail-footer-findings {
+  color: var(--warning);
+}
+
+.trail-footer-duration {
+  color: var(--text-tertiary);
+  font-variant-numeric: tabular-nums;
+}
+
+.trail-footer-chevron {
+  margin-left: auto;
+  color: var(--text-tertiary);
+}
+
+.trail-rows {
+  display: flex;
+  flex-direction: column;
+  padding: 0 24px 4px;
+}
+
+/* THE row. Shared by the trail's expansion, the drawer, and FeedbackRow. */
+.activity-row {
+  display: flex;
   align-items: center;
-  justify-content: center;
-  width: 14px;
-  height: 14px;
+  gap: 10px;
+  width: 100%;
+  min-height: 28px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 4px;
+  background: none;
+  text-align: left;
+  font-family: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-secondary);
+  transition: background-color var(--motion-fast, 80ms) cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+button.activity-row {
+  cursor: pointer;
+}
+
+button.activity-row:hover {
+  background: var(--ethos-hover);
+}
+
+.activity-row:focus-visible {
+  outline: 2px solid var(--accent, var(--ethos-info));
+  outline-offset: 1px;
+}
+
+/* Glyph + word. The colour is the third signal, never the only one. */
+.activity-row-state {
   flex-shrink: 0;
-  font-size: 11px;
+  min-width: 76px;
 }
 
-.tool-chip-running .tool-chip-status {
-  color: var(--ethos-text-dim);
+.activity-row-ok .activity-row-state {
+  color: var(--success);
 }
 
-.tool-chip-ok .tool-chip-status {
-  color: var(--ethos-success);
+.activity-row-failed .activity-row-state {
+  color: var(--error);
 }
 
-.tool-chip-failed .tool-chip-status {
-  color: var(--ethos-error);
+.activity-row-unverified .activity-row-state,
+.activity-row-pending-approval .activity-row-state {
+  color: var(--warning);
 }
 
-/* Pending-approval chip variant — distinct from running, ok, failed.
-   Uses the warning amber from the semantic palette since it signals
-   "waiting on you" rather than "running" or "done". */
-.tool-chip-pending-approval .tool-chip-status {
-  color: var(--ethos-warning);
+/* An outcome history never recorded: deliberately the row's own reading colour,
+   so it reads as neither success nor failure. The glyph and the word carry it. */
+.activity-row-unrecorded .activity-row-state {
+  color: var(--text-secondary);
 }
 
-.tool-chip-name {
-  color: var(--ethos-text);
-  font-weight: 500;
-}
-
-.tool-chip-args {
-  color: var(--ethos-text-dim);
-  white-space: nowrap;
+.activity-row-subject {
+  color: var(--text-primary);
+  flex-shrink: 0;
+  max-width: 40%;
   overflow: hidden;
   text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.activity-row-result {
   flex: 1;
   min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.tool-chip-duration {
-  color: var(--ethos-text-dim);
-  font-size: 11px;
-  margin-left: 4px;
+.activity-row-meta {
+  margin-left: auto;
+  color: var(--text-tertiary);
+  flex-shrink: 0;
 }
 
-/* Spinner for the running state. Pure rotation, no layout impact. */
-
-.tool-chip-spinner {
-  display: inline-block;
-  width: 10px;
-  height: 10px;
-  border: 1.5px solid var(--ethos-text-dim);
-  border-top-color: transparent;
-  border-radius: 9999px;
-  animation: tool-chip-spin 700ms linear infinite;
+.trail-row-wrapper {
+  display: flex;
+  flex-direction: column;
 }
 
-@keyframes tool-chip-spin {
-  to {
-    transform: rotate(360deg);
-  }
-}
-
-.tool-chip-detail {
-  margin-top: 6px;
-  margin-left: 18px;
+.trail-row-detail {
+  margin: 4px 0 8px 18px;
   padding: 10px 12px;
-  border-left: 2px solid var(--ethos-border);
   background: var(--ethos-surface-tint);
-  border-radius: 0 4px 4px 0;
+  border-radius: 4px;
   font-family: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 12px;
   display: flex;
@@ -4117,38 +4199,43 @@ textarea {
   gap: 8px;
 }
 
-.tool-chip-section {
+.trail-row-section {
   display: flex;
   flex-direction: column;
   gap: 4px;
 }
 
-.tool-chip-section-label {
+.trail-row-section-label {
   font-family: "Geist", system-ui, sans-serif;
   font-size: 11px;
   text-transform: uppercase;
   letter-spacing: 0.08em;
-  color: var(--ethos-text-dim);
+  color: var(--text-tertiary);
   font-weight: 500;
 }
 
-.tool-chip-section pre {
+.trail-row-section pre {
   margin: 0;
   padding: 0;
   white-space: pre-wrap;
   word-break: break-word;
-  color: var(--ethos-text);
+  color: var(--text-primary);
   font-size: 12px;
   line-height: 1.5;
   max-height: 320px;
   overflow: auto;
 }
 
-/* Trailing cursor for turns ending on a tool block — sits as its own
-   marker so the user can see the agent is still alive between tool
-   completion and the next text chunk. */
-.streaming-cursor-trailing {
-  margin-left: 4px;
+.trail-row-pending {
+  color: var(--text-tertiary);
+}
+
+@media (max-width: 760px) {
+  .activity-slot,
+  .trail-rows {
+    padding-left: 16px;
+    padding-right: 16px;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -4156,9 +4243,8 @@ textarea {
     animation: none;
     opacity: 0.6;
   }
-  .tool-chip-spinner {
-    animation: none;
-    border-top-color: var(--ethos-text-dim);
+  .status-line {
+    transition: none;
   }
 }
 
@@ -4247,65 +4333,35 @@ textarea {
   gap: 6px;
 }
 
-.tool-stream-row {
+/* The Tool stream — the trail, grouped by turn (feedback & activity contract
+   §4). The rows are `.activity-row`, unchanged: the drawer and the chat footer
+   draw the same thing, so only the turn header is new here. */
+.drawer-turns {
   display: flex;
-  align-items: center;
-  gap: 8px;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.drawer-turn {
+  display: flex;
+  flex-direction: column;
+}
+
+.drawer-turn-header {
+  margin: 0 0 2px;
+  padding: 0 8px;
+  font-family: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 12px;
-  color: var(--ethos-text);
-}
-
-.tool-stream-dot {
-  flex-shrink: 0;
-  width: 14px;
-  text-align: center;
-  font-size: 10px;
-  line-height: 1;
-}
-
-.tool-stream-dot--running {
-  color: var(--ethos-info);
-  animation: tool-stream-pulse 1.2s ease-in-out infinite;
-}
-
-.tool-stream-dot--ok {
-  color: #5fbf68;
-}
-
-.tool-stream-dot--error {
-  color: #d65454;
-}
-
-.tool-stream-name {
-  font-family: "Geist Mono", ui-monospace, monospace;
-  font-size: 11.5px;
-  flex-grow: 1;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.tool-stream-duration {
-  font-size: 11px;
-  color: var(--ethos-text-dim);
+  font-weight: 400;
   font-variant-numeric: tabular-nums;
+  color: var(--text-tertiary);
 }
 
-@keyframes tool-stream-pulse {
-  0%,
-  100% {
-    opacity: 1;
-  }
-  50% {
-    opacity: 0.4;
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .tool-stream-dot--running {
-    animation: none;
-    opacity: 0.8;
-  }
+/* The drawer column is 360px, not the chat column's 800px: the state cell
+   gives back the width the tool name needs. Its floor, not its cap — a long
+   word still takes the room it needs. */
+.drawer-turn .activity-row-state {
+  min-width: 58px;
 }
 
 .notification-row {

@@ -19,6 +19,16 @@
 const STORAGE_KEY = 'ethos.lastSessionId';
 const CHANGE_EVENT = 'ethos:active-session-changed';
 
+/**
+ * "The user stopped the turn on this session." Lives next to `CHANGE_EVENT`
+ * because it is the same mechanism for the same reason: a decision taken in the
+ * chat hook that a separately-subscribed in-tab consumer (the right drawer) has
+ * to see. An abort is local — it is a `ChatAction`, never an SSE event — so
+ * without this the drawer keeps drawing `running` rows for calls the chat
+ * footer has already settled (feedback-activity-contract §4).
+ */
+export const TURN_ABORTED_EVENT = 'ethos:turn-aborted';
+
 export function getLastSessionId(): string | null {
   if (typeof window === 'undefined') return null;
   return window.localStorage.getItem(STORAGE_KEY);
@@ -30,6 +40,21 @@ export function setLastSessionId(sessionId: string): void {
   if (prev === sessionId) return;
   window.localStorage.setItem(STORAGE_KEY, sessionId);
   window.dispatchEvent(new CustomEvent(CHANGE_EVENT));
+}
+
+/** Tell in-tab consumers the turn on `sessionId` was stopped by the user. */
+export function broadcastTurnAborted(sessionId: string): void {
+  if (typeof window === 'undefined') return;
+  window.dispatchEvent(new CustomEvent(TURN_ABORTED_EVENT, { detail: { sessionId } }));
+}
+
+/** The session a `TURN_ABORTED_EVENT` names, or null if it carries no id. */
+export function turnAbortedSessionId(event: Event): string | null {
+  if (!(event instanceof CustomEvent)) return null;
+  const detail: unknown = event.detail;
+  if (typeof detail !== 'object' || detail === null || !('sessionId' in detail)) return null;
+  const { sessionId } = detail;
+  return typeof sessionId === 'string' ? sessionId : null;
 }
 
 export function clearLastSessionId(): void {

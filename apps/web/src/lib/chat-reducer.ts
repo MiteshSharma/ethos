@@ -7,6 +7,7 @@ import {
   type ClarifyRequestEvent,
   type SessionCard,
   type SseEvent,
+  type SseEventType,
   type StoredMessage,
 } from '@ethosagent/web-contracts';
 import type { MessageAttachment } from './attachments';
@@ -18,17 +19,28 @@ import {
   seedClarify,
 } from './clarify-queue';
 import { applyRunEvent, emptyRunsState, type RunsState, seedRun } from './pi-run-reducer';
+import {
+  applyTrailEvent,
+  closeTrail,
+  type TrailAction,
+  type TrailEntry,
+  type TrailState,
+  toolLabel,
+} from './trail';
 
 // Pure reducer that maps SSE events → ChatState. Extracted from the
 // `useChat` hook so we can test the state machine in isolation, without
 // React or `EventSource` infrastructure.
 //
 // W2b extends the W2a shape: an assistant turn is no longer a flat
-// string. It's an ordered sequence of "blocks" — text segments and
-// tool calls — that render in arrival order. This matches how the
-// agent loop actually streams output (tool_use blocks appear between
-// chunks of text within a single turn) and what the chip rendering
-// needs to interleave correctly.
+// string. It's an ordered sequence of "blocks" — text segments and the
+// artifacts a tool produced (image, html, pdf, card, run anchor) — that
+// render in arrival order.
+//
+// Tool CALLS are not blocks. The feedback & activity contract
+// (plan/phases/feedback-activity-contract.md §1) says the answer is content
+// only: the machinery goes to `state.trail`, keyed by turn id, which the
+// footer under the bubble and the right drawer both render.
 
 export interface UserMessage {
   id: string;
@@ -59,28 +71,6 @@ export interface UserMessage {
 export interface TextBlock {
   kind: 'text';
   content: string;
-}
-
-export interface ToolBlock {
-  kind: 'tool';
-  toolCallId: string;
-  toolName: string;
-  args: unknown;
-  /**
-   * Live state.
-   *  • `pending-approval` — server is asking the user to approve before
-   *    running the call. The chip surfaces a "?" icon; the modal does the
-   *    actual asking. Flips to `running` on tool_start once granted.
-   *  • `running`          — tool is executing. Spinner.
-   *  • `ok` / `failed`    — terminal. Set by tool_end.
-   */
-  status: 'pending-approval' | 'running' | 'ok' | 'failed';
-  /** Wall-clock duration in ms when the tool finished. */
-  durationMs?: number;
-  /** Tool output body — surfaces in click-to-expand. */
-  result?: string;
-  /** Reason copy carried from the approval request (e.g. "force-delete"). */
-  reason?: string;
 }
 
 export interface ImageBlock {
@@ -130,14 +120,7 @@ export interface RunBlock {
   runner: string;
 }
 
-export type AssistantBlock =
-  | TextBlock
-  | ToolBlock
-  | ImageBlock
-  | HtmlBlock
-  | PdfBlock
-  | CardBlock
-  | RunBlock;
+export type AssistantBlock = TextBlock | ImageBlock | HtmlBlock | PdfBlock | CardBlock | RunBlock;
 
 export interface AssistantTurn {
   id: string;
@@ -191,7 +174,37 @@ export interface ChatState {
    * card — a run's question is drawn inside its own card instead (§4.5).
    */
   clarifyQueue: ClarifyQueueState;
+  /**
+   * Per-turn activity trail, keyed by `AssistantTurn.id` — every tool call and
+   * finding this surface saw (feedback-activity-contract §4, "one trail, two
+   * renderers"). Built from live `tool_start`/`tool_end`/`tool_progress` AND
+   * from persisted tool rows on history load, so yesterday's replies have
+   * trails too (durations show `—` when history lacks them).
+   */
+  trail: TrailState;
+  /**
+   * Coarse phase of the in-flight turn, for the status line above the composer.
+   * Null when idle — the footer under the bubble takes over from there.
+   */
+  phase: TurnPhase | null;
+  /** Turns the user stopped. Their footer reads `✗ stopped · N actions`. */
+  stoppedTurnIds: string[];
+  /**
+   * The user pressed Stop and the events already on the wire have not drained.
+   *
+   * An abort is a local decision plus an RPC: the server keeps streaming until
+   * it hears, so turn-advancing events keep arriving for a turn that is over.
+   * While this is set they are dropped (see `TURN_ADVANCING_EVENTS`). Cleared
+   * when a new generation starts — a submission, a history load, a reset.
+   */
+  abortedTurn: boolean;
 }
+
+/**
+ * Status-line phases (feedback-activity-contract §2). `received` is set on send,
+ * BEFORE any event, so every request is visibly acknowledged.
+ */
+export type TurnPhase = 'received' | 'thinking' | 'tool' | 'writing';
 
 export const initialChatState: ChatState = {
   messages: [],
@@ -206,6 +219,10 @@ export const initialChatState: ChatState = {
   contextTokens: null,
   runs: emptyRunsState,
   clarifyQueue: emptyClarifyQueue,
+  trail: {},
+  phase: null,
+  stoppedTurnIds: [],
+  abortedTurn: false,
 };
 
 /**
@@ -263,7 +280,25 @@ export type ChatAction =
    * the question and its Allow/Deny buttons should be — the run is visibly
    * blocked and there is no way to unblock it.
    */
-  | { type: 'clarify-restored'; pending: ClarifyRequestEvent[] };
+  | { type: 'clarify-restored'; pending: ClarifyRequestEvent[] }
+  /**
+   * The user pressed Stop. Nothing in the SSE stream says a turn was ABANDONED
+   * rather than finished, so the surface records it: the trail closes (anything
+   * still running did not finish) and the turn is remembered as stopped, which
+   * is what makes its footer read `✗ stopped` instead of `✓ N actions`.
+   */
+  | { type: 'abort-turn' }
+  /**
+   * The Stop the user was already told had happened did NOT reach the server.
+   *
+   * `abort-turn` is optimistic — immediate acknowledgement is the point of the
+   * contract — and it sets `abortedTurn`, which suppresses every turn-advancing
+   * event until the next submission. If the RPC then fails, that guard blinds
+   * the surface while the server keeps running tools: the UI says the turn
+   * stopped while side effects continue. So the guard is lifted and the user is
+   * told, which is the whole of the recovery.
+   */
+  | { type: 'abort-failed'; reason: string };
 
 /** One durable job row, mapped onto what a run anchor + card need. */
 export interface RestoredRun {
@@ -274,7 +309,36 @@ export interface RestoredRun {
   elapsedMs: number;
 }
 
+/**
+ * The SSE events that advance or resurrect an assistant turn — the ones an
+ * aborted turn must not see.
+ *
+ * The judgement, spelled out because it is the whole of FIX B: suppress only
+ * TURN state. `tool.approval_required` is in the set because it calls
+ * `ensureTurn` and so mints a turn on its own; `approval.resolved` deliberately
+ * is NOT, because it only REMOVES a request from the modal queue — dropping it
+ * would strand an approval modal on screen with nothing left to close it.
+ * Everything else the stream carries is session-scoped bookkeeping (`usage`,
+ * `context_meta`, `message_persisted`, `cron.fired`, `mesh.changed`,
+ * `evolve.*`, `run.update`, `clarify.*`, `stream_meta`) and keeps flowing: a
+ * delegated run outlives the chat turn that launched it, and silencing those
+ * would break surfaces the abort never touched.
+ */
+const TURN_ADVANCING_EVENTS = new Set<SseEventType>([
+  'run_start',
+  'text_delta',
+  'thinking_delta',
+  'tool_start',
+  'tool_end',
+  'tool_progress',
+  'tool.approval_required',
+  'done',
+]);
+
 export function applyEvent(state: ChatState, event: SseEvent, now: number): ChatState {
+  // One guard, one place: a turn the user stopped stays stopped.
+  if (state.abortedTurn && TURN_ADVANCING_EVENTS.has(event.type)) return state;
+
   switch (event.type) {
     case 'text_delta': {
       // Either extend the trailing text block of the current turn, or
@@ -293,72 +357,47 @@ export function applyEvent(state: ChatState, event: SseEvent, now: number): Chat
         isStreaming: true,
         error: null,
         lastStreamEventAt: now,
+        currentOp: null,
+        phase: 'writing',
       };
     }
 
     case 'tool_start': {
-      // Lane E (tools-as-code-api) — in-script inner calls are tagged
-      // `audience: 'internal'`: no chip, no currentOp churn. The stream is
-      // still alive, so refresh the stall clock.
-      if (event.audience === 'internal') {
-        return { ...state, lastStreamEventAt: now };
-      }
-      // Two paths converge here:
-      //   1. Auto-allowed call — no approval was needed, this is the
-      //      first event. Append a fresh running block.
-      //   2. Approved call — `tool.approval_required` already created a
-      //      pending-approval block. Flip it to running.
       const turn = ensureTurn(state.currentTurn, now);
-      const existingIdx = turn.blocks.findIndex(
-        (b) => b.kind === 'tool' && b.toolCallId === event.toolCallId,
-      );
-      let blocks: AssistantBlock[];
-      if (existingIdx >= 0) {
-        const block = turn.blocks[existingIdx];
-        if (block?.kind === 'tool') {
-          blocks = [...turn.blocks];
-          blocks[existingIdx] = { ...block, status: 'running', args: event.args };
-        } else {
-          blocks = turn.blocks;
-        }
-      } else {
-        const tool: ToolBlock = {
-          kind: 'tool',
-          toolCallId: event.toolCallId,
-          toolName: event.toolName,
-          args: event.args,
-          status: 'running',
-        };
-        blocks = [...turn.blocks, tool];
-      }
+      const trail = applyTrailEvent(state.trail, turn.id, event);
+      // Audience-filtered (Lane E): no row, no currentOp churn — but the
+      // stream is alive, so refresh the stall clock.
+      if (trail === null) return { ...state, lastStreamEventAt: now };
       return {
         ...state,
-        currentTurn: { ...turn, blocks },
+        currentTurn: turn,
+        trail,
         isStreaming: true,
         error: null,
         lastStreamEventAt: now,
-        currentOp: `⚙ ${event.toolName}`,
+        currentOp: toolLabel(event.toolName, event.args),
+        phase: 'tool',
       };
     }
 
     case 'tool_end': {
-      // Lane E — internal inner-call ends have no chip to flip; skip.
-      if (event.audience === 'internal') {
-        return { ...state, lastStreamEventAt: now };
-      }
-      // Find the matching running block by toolCallId and flip it.
-      // The block could live in `currentTurn` (live) or in the last
-      // assistant message of `messages` (when tool_end races the `done`
-      // event after a refresh). Try current first.
-      const updated = updateToolBlock(state, event.toolCallId, (block) => ({
-        ...block,
-        status: event.ok ? 'ok' : 'failed',
-        durationMs: event.durationMs,
-        ...(event.result !== undefined ? { result: event.result } : {}),
-      }));
-      if (!updated) return state;
+      const trail = applyTrailEvent(state.trail, state.currentTurn?.id ?? '', event);
+      if (trail === null) return { ...state, lastStreamEventAt: now };
+      // No matching action means no call this surface saw start; a stray end
+      // must not invent a turn.
+      if (trail === state.trail) return state;
 
-      const base = { ...updated, lastStreamEventAt: now, currentOp: '\u{1F4AD} Thinking…' };
+      // `applyTrailEvent` resolves the call WHEREVER it lives, including a turn
+      // `done` already moved into `messages` (the "tool_end races done" case).
+      // Live-turn status may only move when the resolved row belongs to the
+      // live turn — otherwise a late end paints a `thinking` status line on a
+      // turn that already ended, which after the stall window reads
+      // `⚠ still working` for ever. The changed key names the turn.
+      const liveId = state.currentTurn?.id;
+      const resolvedLiveTurn = liveId !== undefined && trail[liveId] !== state.trail[liveId];
+      const base: ChatState = resolvedLiveTurn
+        ? { ...state, trail, lastStreamEventAt: now, currentOp: null, phase: 'thinking' }
+        : { ...state, trail, lastStreamEventAt: now };
       const uiType = event.structured?._uiType;
 
       if (uiType === 'image') {
@@ -404,7 +443,7 @@ export function applyEvent(state: ChatState, event: SseEvent, now: number): Chat
 
       // Typed UI cards (ui-cards-canvas). The server already gates the wire on
       // this same schema; re-parsing here is belt-and-braces — a malformed
-      // envelope drops the card and keeps the plain tool chip.
+      // envelope drops the card and leaves the trail row alone.
       if (event.structured?.card !== undefined) {
         const parsed = CardEnvelopeSchema.safeParse(event.structured.card);
         if (!parsed.success) return base;
@@ -419,100 +458,38 @@ export function applyEvent(state: ChatState, event: SseEvent, now: number): Chat
       return base;
     }
 
-    case 'done': {
-      // Finalise the in-flight turn. If we somehow got `done` without
-      // any blocks (e.g. SSE replayed the event for an old turn that's
-      // already in history), don't append anything — the dedupe defense
-      // below guards against double-rendering on page refresh.
-      if (!state.currentTurn || state.currentTurn.blocks.length === 0) {
-        return {
-          ...state,
-          currentTurn: null,
-          isStreaming: false,
-          lastStreamEventAt: null,
-          currentOp: null,
-          turnStartedAt: null,
-        };
-      }
-
-      // Replay defense: if the most recent message in history matches
-      // this turn's text content + tool ids, drop the live copy.
-      const last = state.messages[state.messages.length - 1];
-      if (last?.role === 'assistant' && turnsMatch(last, state.currentTurn)) {
-        return {
-          ...state,
-          currentTurn: null,
-          isStreaming: false,
-          lastStreamEventAt: null,
-          currentOp: null,
-          turnStartedAt: null,
-        };
-      }
-
-      return {
-        ...state,
-        messages: [...state.messages, state.currentTurn],
-        currentTurn: null,
-        isStreaming: false,
-        lastStreamEventAt: null,
-        currentOp: null,
-        turnStartedAt: null,
-      };
-    }
+    case 'done':
+      return finaliseTurn(state);
 
     case 'error': {
-      // Don't drop the streaming buffer — the user might want to copy
-      // what came back before the error.
-      return {
-        ...state,
-        isStreaming: false,
-        error: event.error,
-        lastStreamEventAt: null,
-        currentOp: null,
-        turnStartedAt: null,
-      };
+      // A stream that errored is a turn that ENDED, so it takes the same
+      // terminal transition `done` and `abort-turn` take. Clearing the phase
+      // alone left every still-`running` action running for ever, on the one
+      // path where honest accounting matters most.
+      //
+      // The streaming buffer is still not dropped — `finaliseTurn` moves it
+      // into `messages`, so the user can read and copy what came back before
+      // the error, which is what it was always for.
+      //
+      // The turn is NOT recorded in `stoppedTurnIds`: the user did not stop it.
+      // Its actions are `failed`, so the footer leads with ✗ on its own, and a
+      // turn that errored before running anything has no footer at all. Any
+      // approval it was parked on goes with it — see `closeTurn`.
+      const turn = state.currentTurn;
+      const closed = turn ? { ...state, ...closeTurn(state, turn.id, 'errored') } : state;
+      return { ...finaliseTurn(closed), error: event.error };
     }
 
     case 'tool.approval_required': {
-      // The agent is paused on a tool call waiting for a human decision.
-      // Two state updates fire together:
-      //   • Add the request to `pendingApprovals` so the modal renders it.
-      //   • Pre-create the tool block with status 'pending-approval' so
-      //     the chip surface acknowledges the call exists. If user denies,
-      //     `tool_end` (with no preceding `tool_start`) flips it to failed.
-      //     If user allows, `tool_start` flips it to running.
+      // The agent is paused on a tool call waiting for a human decision: queue
+      // the request so the modal renders it, while the trail acknowledges that
+      // the call exists (the row's own transitions are `applyTrailEvent`'s).
       const req = event.request;
       const turn = ensureTurn(state.currentTurn, now);
-      const existingIdx = turn.blocks.findIndex(
-        (b) => b.kind === 'tool' && b.toolCallId === req.toolCallId,
-      );
-      let blocks: AssistantBlock[];
-      if (existingIdx >= 0) {
-        const block = turn.blocks[existingIdx];
-        if (block?.kind === 'tool') {
-          blocks = [...turn.blocks];
-          blocks[existingIdx] = {
-            ...block,
-            status: 'pending-approval',
-            ...(req.reason ? { reason: req.reason } : {}),
-          };
-        } else {
-          blocks = turn.blocks;
-        }
-      } else {
-        const tool: ToolBlock = {
-          kind: 'tool',
-          toolCallId: req.toolCallId,
-          toolName: req.toolName,
-          args: req.args,
-          status: 'pending-approval',
-          ...(req.reason ? { reason: req.reason } : {}),
-        };
-        blocks = [...turn.blocks, tool];
-      }
       return {
         ...state,
-        currentTurn: { ...turn, blocks },
+        currentTurn: turn,
+        trail: applyTrailEvent(state.trail, turn.id, event) ?? state.trail,
         pendingApprovals: dedupeApproval(state.pendingApprovals, req),
         isStreaming: true,
       };
@@ -520,7 +497,7 @@ export function applyEvent(state: ChatState, event: SseEvent, now: number): Chat
 
     case 'approval.resolved': {
       // Pop the request from the modal queue. The follow-up `tool_start`
-      // (allow) or `tool_end` (deny) transitions the chip block. Multi-tab:
+      // (allow) or `tool_end` (deny) transitions the trail row. Multi-tab:
       // when another tab decides, this fires here too and the modal closes.
       return {
         ...state,
@@ -559,8 +536,7 @@ export function applyEvent(state: ChatState, event: SseEvent, now: number): Chat
       // G9 — a delegated run's own events fire on its child session key, which
       // nobody watching this chat is subscribed to. This coalesced digest is
       // the card's ONLY feed, which is why the first one also plants the
-      // transcript anchor: the run card renders where the handoff happened,
-      // in place of what would otherwise be a tool chip.
+      // transcript anchor: the run card renders where the handoff happened.
       const runs = applyRunEvent(state.runs, event, now);
       if (state.runs.byId[event.jobId] !== undefined) return { ...state, runs };
       const turn = ensureTurn(state.currentTurn, now);
@@ -573,14 +549,32 @@ export function applyEvent(state: ChatState, event: SseEvent, now: number): Chat
     }
 
     case 'run_start':
-      return { ...state, turnStartedAt: now, currentOp: '\u{1F4AD} Thinking…' };
+      // The clock starts when the user pressed Send, not when the server got
+      // round to us — `submit-user-message` already set it.
+      return {
+        ...state,
+        turnStartedAt: state.turnStartedAt ?? now,
+        currentOp: null,
+        phase: 'thinking',
+      };
 
     case 'usage':
       // Track the most recent input-token count as the current context size.
       return { ...state, contextTokens: event.inputTokens };
 
+    case 'tool_progress': {
+      const turn = ensureTurn(state.currentTurn, now);
+      const trail = applyTrailEvent(state.trail, turn.id, event);
+      if (trail === null) return { ...state, lastStreamEventAt: now };
+      // A new row means it was a finding (contract §5); anything else is status
+      // text, which is this surface's own business.
+      if (trail !== state.trail) {
+        return { ...state, currentTurn: turn, trail, lastStreamEventAt: now };
+      }
+      return { ...state, currentOp: event.message, phase: 'tool', lastStreamEventAt: now };
+    }
+
     case 'thinking_delta':
-    case 'tool_progress':
     case 'context_meta':
     case 'message_persisted':
     case 'cron.fired':
@@ -604,15 +598,26 @@ export function applyAction(state: ChatState, action: ChatAction): ChatState {
         ...(action.attachments?.length ? { attachments: action.attachments } : {}),
         ...(action.origin === 'voice' ? { origin: 'voice' as const } : {}),
       };
+      const hasTrail = (state.trail[state.currentTurn?.id ?? '']?.length ?? 0) > 0;
+      const interrupted = state.currentTurn;
       return {
         ...state,
-        messages: [...keepInterruptedTurn(state.messages, state.currentTurn), message],
+        messages: [...keepInterruptedTurn(state.messages, interrupted, hasTrail), message],
+        // A turn cut off by the next question ENDED, exactly as Stop ends one.
+        // Without this its actions stay `running` for ever and its footer leads
+        // with a ✓ it never earned.
+        ...(interrupted ? stopTurn(state, interrupted.id) : {}),
         currentTurn: null,
         isStreaming: false,
         error: null,
         lastStreamEventAt: null,
         currentOp: null,
-        turnStartedAt: null,
+        // Acknowledged before a single byte comes back (contract §2). The clock
+        // starts here too, so elapsed measures what the user actually waited.
+        phase: 'received',
+        turnStartedAt: action.timestamp,
+        // A new generation re-arms the stream the abort silenced.
+        abortedTurn: false,
       };
     }
 
@@ -631,7 +636,15 @@ export function applyAction(state: ChatState, action: ChatAction): ChatState {
     }
 
     case 'history-loaded': {
-      return { ...state, messages: parseHistory(action.messages, action.cards ?? []) };
+      // One walk builds both — durations and results live on the stored rows,
+      // which the parsed `ChatMessage[]` no longer carries (see trail.ts).
+      const parsed = parseHistory(action.messages, action.cards ?? []);
+      return {
+        ...state,
+        messages: parsed.messages,
+        trail: parsed.trail,
+        abortedTurn: false,
+      };
     }
 
     case 'send-failed': {
@@ -694,6 +707,33 @@ export function applyAction(state: ChatState, action: ChatAction): ChatState {
       return { ...state, clarifyQueue: queue };
     }
 
+    case 'abort-turn': {
+      // Stop is terminal, not a pause: the footer REPLACES the status line
+      // (contract §2/§3). Keeping `currentTurn` and `phase: 'stopped'` drew
+      // both at once — the `✗ stopped` footer under a status line that never
+      // went away, with the elapsed clock still ticking.
+      //
+      // `currentTurn` is only minted by the first SSE event, so a Stop pressed
+      // during `received` — the slow start this contract exists to cover — has
+      // no turn and therefore zero actions. §3: "zero actions → no footer",
+      // so there is nothing to show and clearing the phase is the whole of it.
+      const turn = state.currentTurn;
+      const stopped = turn ? { ...state, ...stopTurn(state, turn.id) } : state;
+      return { ...finaliseTurn(stopped), abortedTurn: true };
+    }
+
+    case 'abort-failed': {
+      // The turn stays finalised — its partial answer and trail are what the
+      // user has already read, and re-opening it would be a second lie. What is
+      // undone is the SUPPRESSION: real events land again, so whatever the
+      // server is still doing becomes visible instead of silently dropped.
+      return {
+        ...state,
+        abortedTurn: false,
+        error: `Stop did not reach the server — the turn may still be running. ${action.reason}`,
+      };
+    }
+
     case 'undo-turns': {
       const msgs = state.messages;
       let remaining = action.count;
@@ -718,6 +758,119 @@ export function applyAction(state: ChatState, action: ChatAction): ChatState {
 
 function ensureTurn(turn: AssistantTurn | null, now: number): AssistantTurn {
   return turn ?? { id: `asst-${now}`, role: 'assistant', blocks: [], timestamp: now };
+}
+
+/**
+ * The one terminal transition for an in-flight turn. `done`, `abort-turn` and
+ * `error` all end here, so the three endings cannot disagree about what "the
+ * turn is over" means: the finished turn moves into `messages`, and every field
+ * that describes a turn in flight is cleared — including `phase` and
+ * `turnStartedAt`, which is what hands the status line's slot over to the
+ * turn's own footer (contract §2/§3).
+ *
+ * A turn with neither content nor activity is nothing to keep (e.g. SSE
+ * replayed a `done` for a turn already in history) — but a TOOL-ONLY turn has
+ * zero blocks and a non-empty trail, and dropping that would lose its footer.
+ *
+ * Callers apply their own account of WHY first (`stopTurn`, `closeTrail`) and
+ * pass the resulting state in, so the trail this reads is already closed.
+ */
+function finaliseTurn(state: ChatState): ChatState {
+  const turn = state.currentTurn;
+  const cleared = {
+    currentTurn: null,
+    isStreaming: false,
+    lastStreamEventAt: null,
+    currentOp: null,
+    phase: null,
+    turnStartedAt: null,
+  } as const;
+  if (!turn || (turn.blocks.length === 0 && (state.trail[turn.id]?.length ?? 0) === 0)) {
+    return { ...state, ...cleared };
+  }
+
+  // Replay defense: if the most recent message in history matches this turn's
+  // content, drop the live copy — but move its trail onto the history turn's id
+  // first. The live copy is the one with real durations; the persisted rows
+  // have none.
+  const last = state.messages[state.messages.length - 1];
+  if (last?.role === 'assistant' && turnsMatch(last, turn)) {
+    return { ...state, ...rekeyTrail(state, turn.id, last.id), ...cleared };
+  }
+
+  return { ...state, messages: [...state.messages, turn], ...cleared };
+}
+
+/**
+ * The trail half of a turn the USER ended: anything still running is marked
+ * failed, and the turn is remembered as stopped so its footer reads
+ * `✗ stopped · N actions`.
+ *
+ * Both of those endings share it — the user pressing Stop, and the user simply
+ * asking the next question over the top of a live turn. A turn the SERVER ended
+ * badly does not: `error` closes the trail without the stopped marker, because
+ * nobody stopped it.
+ *
+ * Returns only the keys it changes, so the caller can spread it.
+ */
+function stopTurn(
+  state: ChatState,
+  turnId: string,
+): Pick<ChatState, 'trail' | 'pendingApprovals' | 'stoppedTurnIds'> {
+  return {
+    ...closeTurn(state, turnId, 'stopped'),
+    stoppedTurnIds: state.stoppedTurnIds.includes(turnId)
+      ? state.stoppedTurnIds
+      : [...state.stoppedTurnIds, turnId],
+  };
+}
+
+/**
+ * A turn that ended without finishing, in both places that outlive it: its
+ * unfinished rows settle as failed (`closeTrail`), and the approval requests
+ * that belong to it leave the modal queue.
+ *
+ * The second half is not optional. A call parked on `pending-approval` has an
+ * open request in `pendingApprovals`, and once the turn is over nothing is left
+ * alive to resolve it — leaving it queued strands the approval modal on screen
+ * above a finalised `✗ stopped` turn, with Allow and Deny that answer nobody.
+ *
+ * `ApprovalRequest` carries no turn id, so the turn's own trail rows are the
+ * attribution: a request whose `toolCallId` is a row of THIS turn dies with it,
+ * and one that is not is left alone.
+ *
+ * Returns only the keys it changes, so the caller can spread it.
+ */
+function closeTurn(
+  state: ChatState,
+  turnId: string,
+  reason: 'stopped' | 'errored',
+): Pick<ChatState, 'trail' | 'pendingApprovals'> {
+  const owned = new Set(
+    (state.trail[turnId] ?? []).flatMap((e) => (e.kind === 'action' ? [e.toolCallId] : [])),
+  );
+  return {
+    trail: closeTrail(state.trail, turnId, reason),
+    pendingApprovals: state.pendingApprovals.filter((p) => !owned.has(p.toolCallId)),
+  };
+}
+
+/**
+ * Move a live turn's trail onto the history turn the replay defense kept, and
+ * carry the stopped marker with it. Returns only the keys it changes.
+ */
+function rekeyTrail(
+  state: ChatState,
+  fromTurnId: string,
+  toTurnId: string,
+): Pick<ChatState, 'trail' | 'stoppedTurnIds'> {
+  const { [fromTurnId]: live, ...rest } = state.trail;
+  if (!live || live.length === 0)
+    return { trail: state.trail, stoppedTurnIds: state.stoppedTurnIds };
+  const stoppedTurnIds = state.stoppedTurnIds.includes(fromTurnId)
+    ? [...state.stoppedTurnIds.filter((id) => id !== fromTurnId), toTurnId]
+    : state.stoppedTurnIds;
+  return { trail: { ...rest, [toTurnId]: live }, stoppedTurnIds };
 }
 
 /**
@@ -778,12 +931,18 @@ export function markInterrupted(text: string): string {
  * question arrives here as an ordinary `sendMessage`, so the answer being
  * watched simply vanished and the two questions closed up next to each other.
  *
- * A turn with no blocks yet has nothing to keep and is dropped as before — the
- * same guard `done` uses, and what keeps a late `done` from appending a second
- * copy of a turn already committed here.
+ * A turn with neither blocks nor a trail has nothing to keep and is dropped —
+ * the same guard `done` uses, and what keeps a late `done` from appending a
+ * second copy of a turn already committed here. A turn cut off mid-tool-call
+ * HAS a trail, so it is kept: its footer is the record that something started
+ * and did not finish.
  */
-function keepInterruptedTurn(messages: ChatMessage[], turn: AssistantTurn | null): ChatMessage[] {
-  if (!turn || turn.blocks.length === 0) return messages;
+function keepInterruptedTurn(
+  messages: ChatMessage[],
+  turn: AssistantTurn | null,
+  hasTrail: boolean,
+): ChatMessage[] {
+  if (!turn || (turn.blocks.length === 0 && !hasTrail)) return messages;
   const last = turn.blocks[turn.blocks.length - 1];
   // The marker rides the trailing sentence when there is one. A turn cut off
   // mid-tool-call has no sentence to mark, and a bare marker block is still the
@@ -801,52 +960,8 @@ function dedupeApproval(current: ApprovalRequest[], next: ApprovalRequest): Appr
 }
 
 /**
- * Apply `update` to a tool block matching `toolCallId`, searching the
- * current turn first and the last assistant message second. Returns the
- * new state, or null if no match exists (caller falls back to no-op).
- */
-function updateToolBlock(
-  state: ChatState,
-  toolCallId: string,
-  update: (block: ToolBlock) => ToolBlock,
-): ChatState | null {
-  if (state.currentTurn) {
-    const idx = state.currentTurn.blocks.findIndex(
-      (b) => b.kind === 'tool' && b.toolCallId === toolCallId,
-    );
-    if (idx >= 0) {
-      const block = state.currentTurn.blocks[idx];
-      if (block?.kind === 'tool') {
-        const newBlocks = [...state.currentTurn.blocks];
-        newBlocks[idx] = update(block);
-        return { ...state, currentTurn: { ...state.currentTurn, blocks: newBlocks } };
-      }
-    }
-  }
-  // Try the last assistant message — covers the case where `done`
-  // fired before `tool_end` (rare but possible if the SSE buffer
-  // delivered events out of order across a reconnect).
-  const lastIdx = state.messages.length - 1;
-  const last = state.messages[lastIdx];
-  if (last?.role === 'assistant') {
-    const blockIdx = last.blocks.findIndex((b) => b.kind === 'tool' && b.toolCallId === toolCallId);
-    if (blockIdx >= 0) {
-      const block = last.blocks[blockIdx];
-      if (block?.kind === 'tool') {
-        const newBlocks = [...last.blocks];
-        newBlocks[blockIdx] = update(block);
-        const newMessages = [...state.messages];
-        newMessages[lastIdx] = { ...last, blocks: newBlocks };
-        return { ...state, messages: newMessages };
-      }
-    }
-  }
-  return null;
-}
-
-/**
  * Append a sibling block to the last turn (currentTurn first, else last
- * assistant message). Mirrors the location updateToolBlock wrote to.
+ * assistant message) — where the tool that produced it was running.
  */
 function appendSiblingBlock(
   state: ChatState,
@@ -871,8 +986,10 @@ function appendSiblingBlock(
   return state;
 }
 
-/** Two turns match when they have the same text content + tool ids in
- *  order. Used by the `done` replay defense. */
+/** Two turns match when they hold the same blocks — same kinds in order, same
+ *  text, same artifact ids. Used by the `done` replay defense. Tool calls are
+ *  deliberately absent: they are not blocks any more, and the live turn and its
+ *  persisted twin must still match. */
 function turnsMatch(a: AssistantTurn, b: AssistantTurn): boolean {
   if (a.blocks.length !== b.blocks.length) return false;
   for (let i = 0; i < a.blocks.length; i++) {
@@ -881,7 +998,6 @@ function turnsMatch(a: AssistantTurn, b: AssistantTurn): boolean {
     if (!x || !y) return false;
     if (x.kind !== y.kind) return false;
     if (x.kind === 'text' && y.kind === 'text' && x.content !== y.content) return false;
-    if (x.kind === 'tool' && y.kind === 'tool' && x.toolCallId !== y.toolCallId) return false;
     if (x.kind === 'image' && y.kind === 'image' && x.toolCallId !== y.toolCallId) return false;
     if (x.kind === 'html' && y.kind === 'html' && x.toolCallId !== y.toolCallId) return false;
     if (x.kind === 'pdf' && y.kind === 'pdf' && x.toolCallId !== y.toolCallId) return false;
@@ -940,16 +1056,38 @@ export function parseUserContent(content: string): { text: string; origin?: 'voi
  * AssistantTurn per logical user→done cycle so the UI matches what the
  * user actually saw stream.
  *
+ * ONE walk produces two things, because only this walk has both: the visible
+ * `messages`, and the `trail` those turns' footers render. Tool calls are not
+ * blocks any more (contract §1), and the durations/results a trail row wants
+ * live on the stored rows rather than on the parsed messages — so a separate
+ * `deriveTrailsFromHistory(messages)` could not recover them.
+ *
  * `cards` are the envelopes the session replayed alongside the messages; each
- * one is placed next to the tool call that emitted it.
+ * one is placed where the tool call that emitted it sat.
  */
-function parseHistory(stored: StoredMessage[], cards: SessionCard[] = []): ChatMessage[] {
+function parseHistory(
+  stored: StoredMessage[],
+  cards: SessionCard[] = [],
+): { messages: ChatMessage[]; trail: TrailState } {
   const ui: ChatMessage[] = [];
+  const trail: TrailState = {};
+  // Where each replayed tool call sat in its turn. With tool blocks gone there
+  // is no anchor block to search for, so the position is recorded as the walk
+  // passes it and kept correct as cards are spliced in.
+  const anchors = new Map<string, CardAnchor>();
+  const actionsById = new Map<string, TrailAction>();
   let current: AssistantTurn | null = null;
+  let entries: TrailEntry[] = [];
 
   const flush = () => {
-    if (current && current.blocks.length > 0) ui.push(current);
+    // A tool-only turn has no blocks and is still a turn — its trail is the
+    // whole record of it.
+    if (current && (current.blocks.length > 0 || entries.length > 0)) {
+      ui.push(current);
+      if (entries.length > 0) trail[current.id] = entries;
+    }
     current = null;
+    entries = [];
   };
 
   for (const m of stored) {
@@ -989,73 +1127,88 @@ function parseHistory(stored: StoredMessage[], cards: SessionCard[] = []): ChatM
           timestamp: new Date(m.timestamp).getTime(),
         };
       }
+      const turn = current;
       const text = m.content.trim();
       if (text !== '') {
-        current.blocks.push({ kind: 'text', content: m.content });
+        turn.blocks.push({ kind: 'text', content: m.content });
       }
       if (m.toolCalls && m.toolCalls.length > 0) {
         for (const tc of m.toolCalls) {
-          current.blocks.push({
-            kind: 'tool',
+          const action: TrailAction = {
+            kind: 'action',
             toolCallId: tc.id,
             toolName: tc.name,
             args: tc.input,
-            // History doesn't preserve ok/failed for tool_result rows
-            // (server stores both kinds in `content` without a flag).
-            // Default to ok; tool_end via SSE updates the live state.
-            status: 'ok',
-          });
+            // History doesn't preserve ok/failed for tool_result rows (the
+            // server stores both kinds in `content` without a flag), so the
+            // row says exactly that: it ran, the outcome was not recorded.
+            // Defaulting to `ok` painted a ✓ on calls that may well have
+            // failed. A live `tool_end` still flips it either way. No duration
+            // is persisted either, which is why the row renders `—`.
+            //
+            // FOLLOW-UP: persist an `is_error` flag on `tool_result` rows and
+            // this becomes a real `ok`/`failed` again.
+            status: 'unrecorded',
+          };
+          entries.push(action);
+          actionsById.set(tc.id, action);
+          anchors.set(tc.id, { turn, index: turn.blocks.length });
         }
       }
       continue;
     }
 
     if (m.role === 'tool_result') {
-      // Match the corresponding tool block in the current turn and
-      // hydrate its result field. Skip if we somehow have a tool_result
-      // before any assistant message — shouldn't happen but be defensive.
+      // Hydrate the matching trail action's result. Skip if we somehow have a
+      // tool_result before any assistant message — shouldn't happen but be
+      // defensive.
       if (!current || !m.toolCallId) continue;
-      const block = current.blocks.find((b) => b.kind === 'tool' && b.toolCallId === m.toolCallId);
-      if (block?.kind === 'tool') {
-        block.result = m.content;
-      }
+      const action = actionsById.get(m.toolCallId);
+      if (action) action.result = m.content;
     }
 
     // role === 'system' — skip in the chat surface.
   }
   flush();
-  insertReplayedCards(ui, cards);
-  return ui;
+  insertReplayedCards(ui, cards, anchors);
+  return { messages: ui, trail };
+}
+
+/** Where a replayed card goes, and which turn it goes into. */
+interface CardAnchor {
+  turn: AssistantTurn;
+  index: number;
 }
 
 /**
- * Place each replayed card directly after the tool block that emitted it, so
- * a reloaded turn reads in the same order it streamed. Cards are applied in
- * `seq` order and mutate the freshly-built turns from `parseHistory` in place.
+ * Place each replayed card where the tool call that emitted it ran, so a
+ * reloaded turn reads in the same order it streamed. Cards are applied in `seq`
+ * order and mutate the freshly-built turns from `parseHistory` in place.
  *
- * No matching tool block is a defect upstream, not a reason to lose the card:
+ * No matching tool call is a defect upstream, not a reason to lose the card:
  * it lands at the end of the last assistant turn instead.
  */
-function insertReplayedCards(ui: ChatMessage[], cards: SessionCard[]): void {
+function insertReplayedCards(
+  ui: ChatMessage[],
+  cards: SessionCard[],
+  anchors: Map<string, CardAnchor>,
+): void {
   for (const entry of [...cards].sort((a, b) => a.seq - b.seq)) {
     const block: CardBlock = {
       kind: 'card',
       toolCallId: entry.toolCallId,
       card: entry.envelope,
     };
-    const turn = ui.find(
-      (m): m is AssistantTurn =>
-        m.role === 'assistant' &&
-        m.blocks.some((b) => b.kind === 'tool' && b.toolCallId === entry.toolCallId),
-    );
-    if (turn) {
-      const toolIdx = turn.blocks.findIndex(
-        (b) => b.kind === 'tool' && b.toolCallId === entry.toolCallId,
-      );
+    const anchor = anchors.get(entry.toolCallId);
+    if (anchor) {
       // Step past cards already placed for this call so `seq` order survives.
-      let at = toolIdx + 1;
-      while (turn.blocks[at]?.kind === 'card') at++;
-      turn.blocks.splice(at, 0, block);
+      let at = anchor.index;
+      while (anchor.turn.blocks[at]?.kind === 'card') at++;
+      anchor.turn.blocks.splice(at, 0, block);
+      // Every later anchor in the same turn just shifted right by one.
+      for (const other of anchors.values()) {
+        if (other.turn === anchor.turn && other.index > at) other.index++;
+      }
       continue;
     }
     for (let i = ui.length - 1; i >= 0; i--) {

@@ -2,7 +2,7 @@ import { isLightSurface } from '@ethosagent/design-tokens/antd';
 import { useNavigate } from 'react-router-dom';
 import {
   type DrawerNotification,
-  type ToolStreamEntry,
+  type DrawerTurn,
   type UsageState,
   useDrawerStream,
 } from '../hooks/useDrawerStream';
@@ -10,12 +10,16 @@ import { type ClarifyQueueState, questionForRun } from '../lib/clarify-queue';
 import { allRuns, type RunState, type RunsState, runsNeedingYou } from '../lib/pi-run-reducer';
 import { resolveRunner, runnerAccentVars } from '../lib/runners';
 import { useResolvedTokens } from '../lib/skin-tokens';
+import { type TrailEntry, type TrailState, trailRowId } from '../lib/trail';
 import { RUN_COPY } from '../lib/worker-copy';
+import { TrailRow } from './chat/Trail';
 import { DebugPanel } from './DebugPanel';
 
 // Right-side observability drawer. Three panes, top-to-bottom:
 //
-//   1. Tool stream     — live tool_start/end events for the active session
+//   1. Tool stream     — the active session's trails, grouped by turn. Same
+//                        rows the chat footer draws (feedback & activity
+//                        contract §4, "one trail, two renderers").
 //   2. Notifications   — push events (cron firings, mesh changes, evolved
 //                        skills awaiting review). Click deep-links to the
 //                        relevant tab.
@@ -43,7 +47,7 @@ export function RightDrawer({
   runs,
   clarifyQueue,
 }: RightDrawerProps) {
-  const { sessionId, toolStream, notifications, usage } = useDrawerStream();
+  const { sessionId, turns, trail, notifications, usage } = useDrawerStream();
 
   if (!open) return null;
 
@@ -67,14 +71,8 @@ export function RightDrawer({
         <Section title="Tool stream">
           {!sessionId ? (
             <EmptyHint>No active session. Start a chat to see tool calls live.</EmptyHint>
-          ) : toolStream.length === 0 ? (
-            <EmptyHint>Quiet for now. Tool activity appears here as the agent works.</EmptyHint>
           ) : (
-            <ul className="right-drawer-list">
-              {toolStream.map((e) => (
-                <ToolStreamRow key={e.toolCallId} entry={e} />
-              ))}
-            </ul>
+            <ToolStreamPane turns={turns} trail={trail} />
           )}
         </Section>
 
@@ -206,19 +204,44 @@ function EmptyHint({ children }: { children: React.ReactNode }) {
   return <div className="right-drawer-empty">{children}</div>;
 }
 
-function ToolStreamRow({ entry }: { entry: ToolStreamEntry }) {
-  const dot = entry.status === 'running' ? '●' : entry.status === 'ok' ? '✓' : '✗';
-  const dotClass = `tool-stream-dot tool-stream-dot--${entry.status}`;
+/**
+ * The Tool stream, grouped by turn. A turn with no actions draws nothing — an
+ * empty header is an accounting line with nothing to account for (contract §3).
+ */
+function ToolStreamPane({ turns, trail }: { turns: DrawerTurn[]; trail: TrailState }) {
+  const groups = turns
+    .map((turn) => ({ turn, entries: trail[turn.turnId] ?? [] }))
+    .filter((group) => group.entries.length > 0);
+
+  if (groups.length === 0) {
+    return <EmptyHint>Quiet for now. Tool activity appears here as the agent works.</EmptyHint>;
+  }
   return (
-    <li className="tool-stream-row">
-      <span className={dotClass} aria-hidden="true">
-        {dot}
-      </span>
-      <span className="tool-stream-name">{entry.toolName}</span>
-      {entry.durationMs !== undefined ? (
-        <span className="tool-stream-duration">{formatDuration(entry.durationMs)}</span>
-      ) : null}
-    </li>
+    <div className="drawer-turns">
+      {groups.map(({ turn, entries }) => (
+        <TurnGroup key={turn.turnId} turn={turn} entries={entries} />
+      ))}
+    </div>
+  );
+}
+
+function TurnGroup({ turn, entries }: { turn: DrawerTurn; entries: TrailEntry[] }) {
+  return (
+    <section className="drawer-turn">
+      {/* The contract asks for "relative time + the first words of the user
+          message" here. The SSE union carries no user text — `message_persisted`
+          is `{ messageId, role }` and there is no user-text event — so the
+          drawer names the turn by its ordinal until that wire exists. */}
+      <h4 className="drawer-turn-header">
+        {`${formatRelative(turn.startedAt)} · turn ${turn.ordinal}`}
+        {/* The per-turn cap dropped rows; say so rather than lose them quietly. */}
+        {turn.droppedEntries > 0 ? ` · ${turn.droppedEntries} earlier actions dropped` : ''}
+      </h4>
+      {entries.map((entry) => {
+        const key = entry.kind === 'action' ? entry.toolCallId : entry.id;
+        return <TrailRow key={key} entry={entry} rowId={trailRowId(turn.turnId, key)} />;
+      })}
+    </section>
   );
 }
 
@@ -255,12 +278,6 @@ function UsageBlock({ usage }: { usage: UsageState }) {
       </div>
     </dl>
   );
-}
-
-function formatDuration(ms: number): string {
-  if (ms < 1000) return `${ms}ms`;
-  const s = (ms / 1000).toFixed(ms < 10_000 ? 1 : 0);
-  return `${s}s`;
 }
 
 function formatTokens(n: number): string {

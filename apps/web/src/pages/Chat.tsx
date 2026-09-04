@@ -1,5 +1,4 @@
 import { resolveCallTreatment } from '@ethosagent/types';
-import { TurnStatusBar } from '@ethosagent/ui-components';
 import { useQueryClient } from '@tanstack/react-query';
 import { App as AntApp, ConfigProvider } from 'antd';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -11,6 +10,7 @@ import { GoalIntakeModal } from '../components/chat/GoalIntakeModal';
 import { MessageList } from '../components/chat/MessageList';
 import { PersonalityBar } from '../components/chat/PersonalityBar';
 import type { RunSurface } from '../components/chat/RunCard';
+import { StatusLine } from '../components/chat/StatusLine';
 import { useConfig } from '../features/config/api/queries';
 import { useGoalCreate } from '../features/goals/api/mutations';
 import { useGoalDetection } from '../features/goals/useGoalDetection';
@@ -208,19 +208,22 @@ export function Chat() {
     setSearchParams(next, { replace: true });
   }, [newSessionParam, searchParams, setSearchParams]);
 
-  // Periodically re-render while streaming so the stall indicator can
-  // compare lastStreamEventAt to the current wall clock.
+  // Periodically re-render while a turn is in flight so the stall indicator can
+  // compare the last activity to the current wall clock.
   const [, setTick] = useState(0);
   useEffect(() => {
-    if (!state.isStreaming) return;
+    if (state.phase === null) return;
     const id = setInterval(() => setTick((n) => n + 1), 5_000);
     return () => clearInterval(id);
-  }, [state.isStreaming]);
+  }, [state.phase]);
 
+  // 20 s with no event → `⚠ still working` inside the status line (contract
+  // §2). Before the first SSE event there is no `lastStreamEventAt`, so the
+  // send itself is the last thing that happened — a request the server never
+  // answers has to stall too.
+  const lastActivityAt = state.lastStreamEventAt ?? state.turnStartedAt;
   const isStalled =
-    state.isStreaming &&
-    state.lastStreamEventAt !== null &&
-    Date.now() - state.lastStreamEventAt > 30_000;
+    state.phase !== null && lastActivityAt !== null && Date.now() - lastActivityAt > 20_000;
 
   const [pendingAttachments, setPendingAttachments] = useState<AttachmentPreview[]>([]);
 
@@ -806,26 +809,24 @@ export function Chat() {
         messages={messages}
         currentTurn={state.currentTurn}
         runSurface={runSurface}
+        trail={state.trail}
+        stoppedTurnIds={state.stoppedTurnIds}
         personalityId={personalityId}
         model={model}
         sessionId={currentSessionId ?? undefined}
         onSuggestPrompt={handleSuggestPrompt}
         {...(canTalk && !inCall ? { onTryVoice: handleTalkToggle } : {})}
       />
-      <TurnStatusBar
-        isStreaming={state.isStreaming}
-        currentOp={state.currentOp}
+      <StatusLine
+        phase={state.phase}
+        label={state.currentOp}
         elapsedMs={elapsedMs}
+        stalled={isStalled}
       />
       <div>
         {state.error ? (
           <div className="chat-error" role="alert">
             {state.error}
-          </div>
-        ) : null}
-        {isStalled ? (
-          <div className="chat-stall-notice" role="status">
-            Still working — this is taking longer than usual…
           </div>
         ) : null}
         <Composer
