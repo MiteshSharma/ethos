@@ -173,10 +173,14 @@ function matchAllowedPrefix(canonical: string, allowed: Iterable<string>): strin
 // rule enforced at the other personality filesystem boundary. It is not shared
 // code because `@ethosagent/core` may not import `@ethosagent/storage-fs` at
 // runtime (storage-fs is the security kernel; core is not, and core depends on it
-// only as a devDependency — ARCHITECTURE.md §II). **The two must change together:**
-// a fix applied to one boundary and not the other leaves the escape open on
-// whichever path the caller happens to take. The reciprocal note lives in
-// `scoped-storage.ts`'s class doc.
+// only as a devDependency — ARCHITECTURE.md §II). A THIRD copy —
+// `containedPath`/`followFirstSymlink` in `packages/wiring/src/backup/restore.ts` —
+// guards the backup restore's destination paths under the Ethos data directory,
+// duplicated for the same reason: `packages/wiring` is a different layer.
+// **All three must change together:** a fix applied to one boundary and not the
+// others leaves the escape open on whichever path the caller happens to take.
+// The reciprocal notes live in `scoped-storage.ts`'s class doc and in
+// `restore.ts`'s `followFirstSymlink` doc.
 
 /**
  * Walk `target` one segment at a time below `prefixRoot`, `lstat`ing each.

@@ -56,7 +56,12 @@ export interface ScopedStorageScope {
  * the other personality filesystem boundary. It is not shared code because
  * `@ethosagent/core` may not import `@ethosagent/storage-fs` at runtime
  * (storage-fs is the security kernel; core is not, and core depends on it
- * only as a devDependency). **The two must change together.**
+ * only as a devDependency). A THIRD copy —
+ * `containedPath`/`followFirstSymlink` in
+ * `packages/wiring/src/backup/restore.ts` — guards the backup restore's
+ * destination paths under the Ethos data directory, duplicated for the same
+ * reason: `packages/wiring` is a different layer. **All three must change
+ * together.**
  *
  * Prefixes are matched literally — there is no glob expansion. Pass paths
  * that end in `/` for directory scopes; ScopedStorage normalizes them so

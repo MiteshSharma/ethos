@@ -231,7 +231,7 @@ register_anchors:
     - { path: packages/core/src/fs-reach.ts, line: 136, contains: "export function deriveFsReachPaths" }
     - { path: packages/core/src/scoped/scoped-fs.ts, line: 102, contains: "private checkReach(" }
     - { path: packages/core/src/scoped/scoped-fs.ts, line: 136, contains: "through a symbolic link" }
-    - { path: packages/storage-fs/src/scoped-storage.ts, line: 79, contains: "private check(rawPath" }
+    - { path: packages/storage-fs/src/scoped-storage.ts, line: 84, contains: "private check(rawPath" }
     - { path: packages/core/src/path-boundary.ts, line: 17, contains: "export function assertWithinBase" }
 
   G-NET:

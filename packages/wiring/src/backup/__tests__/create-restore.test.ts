@@ -1,6 +1,7 @@
 // backup → wipe → restore, and every way a restore is supposed to refuse.
 
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -194,10 +195,21 @@ describe('createBackup → restoreBackup', () => {
     expect(entries.length).toBeGreaterThan(0);
     // An explicit staging dir is the caller's to remove; the default one is not.
     expect(existsSync(staging)).toBe(true);
-    const before = readdirSync(tmpdir()).filter((n) => n.startsWith('ethos-backup-')).length;
-    await createBackup({ dataDir, outPath: join(root, 'b.tar.gz'), snapshot: 'backup' });
-    const after = readdirSync(tmpdir()).filter((n) => n.startsWith('ethos-backup-')).length;
-    expect(after).toBe(before);
+
+    // The default staging root is created under `os.tmpdir()`, which every
+    // other test process on this machine shares — counting `ethos-backup-*`
+    // entries there measures the machine, not this call, and any suite running
+    // in parallel moves the count. Point `TMPDIR` at a directory this test
+    // owns, so whatever is left in it afterwards can only be this call's.
+    const ownTmp = join(root, 'tmp');
+    mkdirSync(ownTmp, { recursive: true });
+    vi.stubEnv('TMPDIR', ownTmp);
+    try {
+      await createBackup({ dataDir, outPath: join(root, 'b.tar.gz'), snapshot: 'backup' });
+    } finally {
+      vi.unstubAllEnvs();
+    }
+    expect(readdirSync(ownTmp)).toEqual([]);
   });
 
   it('restores a single scope and leaves the rest of the archive alone', async () => {
@@ -537,6 +549,36 @@ describe('restore destination containment', () => {
     expect(readFileSync(outsideFile, 'utf8')).toBe('provider: elsewhere\n');
     expect(existsSync(join(dataDir, '.pre-restore'))).toBe(false);
   });
+
+  // The one fail-open the walk used to have. `lstat` on a segment under an
+  // unreadable directory raises EACCES, and a swallow turned that into "no
+  // link here" — the check reporting a path contained when it never managed to
+  // look at it. A real chmod rather than the `node:fs` mock
+  // `scopes-unreadable.test.ts` uses: restore.ts pulls in a dozen `node:fs`
+  // functions, and mocking the module for one of them is more machinery than
+  // the mode bits are. Root ignores mode bits, so as root this would pass
+  // without exercising the path at all — skipped there rather than lying.
+  it.skipIf(process.getuid?.() === 0)(
+    'refuses a destination it cannot check, rather than judging it contained',
+    async () => {
+      await createBackup({ dataDir, outPath: out, snapshot: 'vacuum' });
+      // `skills` itself still stats; `skills/pdf` below it does not.
+      const unreadable = join(dataDir, 'skills');
+      chmodSync(unreadable, 0o000);
+      try {
+        const err = await restoreBackup({ dataDir, archivePath: out }).catch((e: unknown) => e);
+        expect(err).toBeInstanceOf(EthosError);
+        if (!(err instanceof EthosError)) return;
+        expect(err.code).toBe('IMPORT_BLOCKED');
+        expect(err.message).toMatch(/skills\/pdf\/SKILL\.md/);
+        expect(err.message).toMatch(/EACCES/);
+        // Refused at gate 3, before anything moved.
+        expect(existsSync(join(dataDir, '.pre-restore'))).toBe(false);
+      } finally {
+        chmodSync(unreadable, 0o755);
+      }
+    },
+  );
 });
 
 // ---------------------------------------------------------------------------
@@ -595,42 +637,11 @@ describe('restore buffering limits', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// A failed install
-// ---------------------------------------------------------------------------
-
-describe('restore install failure', () => {
-  it('rolls back to exactly the state it started in', async () => {
-    await createBackup({ dataDir, outPath: out, snapshot: 'vacuum' });
-    write('config.yaml', 'provider: openai\n');
-
-    // One destination made impossible: `skills` is a FILE here, so creating
-    // `skills/pdf/` for the entry below it fails — after config.yaml and
-    // sessions.db have already been installed.
-    rmSync(join(dataDir, 'skills'), { recursive: true, force: true });
-    writeFileSync(join(dataDir, 'skills'), 'not a directory');
-
-    const err = await restoreBackup({ dataDir, archivePath: out }).catch((e: unknown) => e);
-    expect(err).toBeInstanceOf(EthosError);
-    if (!(err instanceof EthosError)) return;
-    expect(err.code).toBe('IMPORT_BLOCKED');
-    expect(err.message).toMatch(/Restore failed while installing/);
-    expect(err.message).toMatch(/\.pre-restore\//);
-    expect(err.details).toMatchObject({ rolledBack: true });
-
-    // The installation is the one that existed before the restore, not a
-    // half-restored mixture of the two.
-    expect(readFileSync(join(dataDir, 'config.yaml'), 'utf8')).toBe('provider: openai\n');
-    expect(readFileSync(join(dataDir, 'skills'), 'utf8')).toBe('not a directory');
-    expect(count(join(dataDir, 'sessions.db'), 'messages')).toBe(120);
-    expect(readFileSync(join(dataDir, 'cron/jobs.json'), 'utf8')).toBe('[{"id":"daily"}]');
-    // The staging tree is not left behind either.
-    const leftovers = existsSync(join(dataDir, '.pre-restore'))
-      ? readdirSync(join(dataDir, '.pre-restore'))
-      : [];
-    expect(leftovers.filter((name) => name.endsWith('-staging'))).toEqual([]);
-  });
-});
+// A failed install — and the rollback that undoes it — moved to
+// `restore-install-failure.test.ts`: its trigger (a FILE where a directory has
+// to be) is now refused by gate 3's containment walk before the install phase
+// runs, so provoking a mid-install failure needs a `node:fs` mock and the mock
+// must not be in force for the rest of this file.
 
 // ---------------------------------------------------------------------------
 // A failed backup (the previous archive is the one thing it must not destroy)

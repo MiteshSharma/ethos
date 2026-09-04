@@ -89,7 +89,6 @@ import {
   readlinkSync,
   renameSync,
   rmSync,
-  type Stats,
   unlinkSync,
   writeFileSync,
   writeSync,
@@ -229,17 +228,21 @@ function isBeneath(root: string, path: string): boolean {
 }
 
 /**
- * `lstat`, or null when the walk has nothing left to inspect: a segment that
- * does not exist, or one below a path that is not a directory (the second
- * throws `ENOTDIR` rather than reporting nothing, which is the same answer).
- * Neither can hide a link beneath it.
+ * The refusal for a destination this cannot judge at all. `containmentError`
+ * says a path leaves the data directory; this one says the question could not
+ * be answered — an unreadable intermediate directory, a segment that is not a
+ * directory — and refuses on that. The distinction is worth two error builders:
+ * the operator fixes a permission, not a symbolic link.
  */
-function statOrNull(path: string): Stats | null {
-  try {
-    return lstatSync(path, { throwIfNoEntry: false }) ?? null;
-  } catch {
-    return null;
-  }
+function uncheckableError(rel: string, err: unknown): EthosError {
+  const detail = err instanceof Error ? err.message : String(err);
+  return new EthosError({
+    code: 'IMPORT_BLOCKED',
+    cause: `Refusing to touch "${rel}": it could not be checked against the Ethos data directory (${detail})`,
+    action:
+      'Fix what stopped the check — usually a directory the current user cannot read — and run the restore again.',
+    details: { path: rel, error: detail },
+  });
 }
 
 /**
@@ -255,6 +258,16 @@ function statOrNull(path: string): Stats | null {
  * portion BELOW `root` is walked: segments above it are the operator's own
  * layout (`/var` → `/private/var` on macOS), not an escape.
  *
+ * `ENOENT` — and only `ENOENT` — ends the walk: that is what
+ * `throwIfNoEntry: false` reports as `undefined`. EVERY other errno propagates,
+ * `ENOTDIR` included, and `containedPath` turns it into a refusal. A boundary
+ * check that reads "I could not look" as "nothing to see" is fail-open: an
+ * unreadable intermediate directory (`EACCES`) would otherwise be judged
+ * contained. `ENOTDIR` could be argued to end the walk — nothing hides below a
+ * non-directory — but the two siblings throw on it, and a third copy that
+ * diverges on one errno is exactly what the must-change-together rule exists to
+ * prevent.
+ *
  * Deliberate mirror of `followFirstSymlink` in
  * `packages/core/src/scoped/scoped-fs.ts` and
  * `packages/storage-fs/src/scoped-storage.ts` — the same guarantee at a third
@@ -269,8 +282,8 @@ function followFirstSymlink(root: string, target: string): string | null {
   let cursor = root;
   for (let i = 0; i < segments.length; i++) {
     cursor = join(cursor, segments[i] ?? '');
-    const stat = statOrNull(cursor);
-    if (stat === null) return null;
+    const stat = lstatSync(cursor, { throwIfNoEntry: false });
+    if (stat === undefined) return null;
     if (!stat.isSymbolicLink()) continue;
     const linkTarget = resolve(dirname(cursor), readlinkSync(cursor));
     return resolve(join(linkTarget, ...segments.slice(i + 1)));
@@ -285,6 +298,10 @@ function followFirstSymlink(root: string, target: string): string | null {
  *
  * Like the boundaries it mirrors, this closes MISDIRECTION, not TOCTOU: a path
  * swapped between this walk and the write that follows still wins.
+ *
+ * A walk that cannot complete is a refusal, not a pass — and the callers are
+ * restore gates whose failures an operator reads, so the raw errno is wrapped
+ * in an `EthosError` naming the path rather than thrown as a stack.
  */
 function containedPath(root: string, rel: string): string {
   const target = resolve(root, rel);
@@ -292,7 +309,12 @@ function containedPath(root: string, rel: string): string {
 
   let current = target;
   for (let hop = 0; hop < MAX_SYMLINK_HOPS; hop++) {
-    const next = followFirstSymlink(root, current);
+    let next: string | null;
+    try {
+      next = followFirstSymlink(root, current);
+    } catch (err) {
+      throw uncheckableError(rel, err);
+    }
     if (next === null) return target;
     if (!isBeneath(root, next)) {
       throw containmentError(rel, 'leaves, through a symbolic link,');
@@ -638,8 +660,8 @@ function claimRestore(root: string): () => void {
       };
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
-      const stat = statOrNull(path);
-      if (stat === null) continue; // vanished between the create and the stat
+      const stat = lstatSync(path, { throwIfNoEntry: false });
+      if (stat === undefined) continue; // vanished between the create and the stat
       if (Date.now() - stat.mtimeMs <= SENTINEL_STALE_MS) throw restoreInProgress(path);
       recoverAbandonedRestores(root);
       try {
