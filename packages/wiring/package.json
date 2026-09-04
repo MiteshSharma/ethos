@@ -91,6 +91,7 @@
     "@ethosagent/session-sqlite": "workspace:*",
     "@ethosagent/skill-evolver": "workspace:*",
     "@ethosagent/skills": "workspace:*",
+    "@ethosagent/sqlite": "workspace:*",
     "@ethosagent/storage-crypto": "workspace:*",
     "@ethosagent/storage-fs": "workspace:*",
     "@ethosagent/storage-s3": "workspace:*",

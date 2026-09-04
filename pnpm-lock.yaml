@@ -2690,6 +2690,9 @@ importers:
       '@ethosagent/skills':
         specifier: workspace:*
         version: link:../../extensions/skills
+      '@ethosagent/sqlite':
+        specifier: workspace:*
+        version: link:../sqlite
       '@ethosagent/storage-crypto':
         specifier: workspace:*
         version: link:../../extensions/storage-crypto
