@@ -65,6 +65,13 @@ export const StoredMessageSchema = z.object({
   toolCallId: z.string().nullable(),
   toolName: z.string().nullable(),
   toolCalls: z.array(ToolCallSchema).nullable(),
+  /**
+   * Did this `tool_result` row record a failure? Optional, not nullable:
+   * ABSENT means the outcome was never recorded (a row written before the
+   * flag existed), which is not the same as `false`. Surfaces must not read
+   * absent as success.
+   */
+  isError: z.boolean().optional(),
   timestamp: z.string(), // ISO-8601
 });
 export type StoredMessage = z.infer<typeof StoredMessageSchema>;

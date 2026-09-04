@@ -74,6 +74,7 @@
       "content": "===TOOL_RESULT_START:read_file===\n<untrusted source=\"file:/etc/hosts\" tool=\"read_file\">\nfile contents here\n</untrusted>\n===TOOL_RESULT_END===",
       "toolCallId": "tc1",
       "toolName": "read_file",
+      "isError": false,
       "id": "normalized",
       "timestamp": "2000-01-01T00:00:00.000Z"
     },

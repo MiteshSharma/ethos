@@ -74,6 +74,7 @@
       "content": "===TOOL_RESULT_START:do_thing===\ndone\n===TOOL_RESULT_END===",
       "toolCallId": "tc1",
       "toolName": "do_thing",
+      "isError": false,
       "id": "normalized",
       "timestamp": "2000-01-01T00:00:00.000Z"
     }

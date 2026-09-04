@@ -239,6 +239,14 @@ export class SQLiteSessionStore implements SessionStore {
       this.db.exec('ALTER TABLE messages ADD COLUMN deleted_at TEXT');
     }
 
+    // Additive migration: did this `tool_result` row record a failure?
+    // Nullable INTEGER (STRICT has no BOOLEAN): 1 = failed, 0 = succeeded,
+    // NULL = never recorded. Deliberately no DEFAULT 0 — a pre-migration row
+    // must read back as unknown, not as a success it was never known to be.
+    if (!msgCols.some((c) => c.name === 'is_error')) {
+      this.db.exec('ALTER TABLE messages ADD COLUMN is_error INTEGER');
+    }
+
     // Context-compaction Phase 2: watermark boundary. The id of the first
     // stored message kept verbatim after a compaction; drives the cross-turn
     // read-back so a compaction survives past the turn it fired on. Nullable —
@@ -417,8 +425,8 @@ export class SQLiteSessionStore implements SessionStore {
         `INSERT INTO messages
          (id, session_id, role, content, tool_call_id, tool_name, tool_calls,
           content_blocks, input_tokens, output_tokens, cache_read_tokens,
-          cache_creation_tokens, estimated_cost_usd, trace_id, timestamp)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+          cache_creation_tokens, estimated_cost_usd, trace_id, is_error, timestamp)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       )
       .run(
         id,
@@ -435,6 +443,7 @@ export class SQLiteSessionStore implements SessionStore {
         data.usage?.cacheCreationTokens ?? null,
         data.usage?.estimatedCostUsd ?? null,
         data.traceId ?? null,
+        data.isError === undefined ? null : data.isError ? 1 : 0,
         timestamp,
       );
 
@@ -994,6 +1003,7 @@ interface MessageRow {
   cache_creation_tokens: number | null;
   estimated_cost_usd: number | null;
   trace_id: string | null;
+  is_error: number | null;
   timestamp: string;
 }
 
@@ -1070,6 +1080,8 @@ function rowToMessage(r: MessageRow): StoredMessage {
           }
         : undefined,
     traceId: r.trace_id ?? undefined,
+    // NULL is "never recorded", not "succeeded" — see StoredMessage.isError.
+    isError: r.is_error === null ? undefined : r.is_error !== 0,
     timestamp: new Date(r.timestamp),
   };
 }

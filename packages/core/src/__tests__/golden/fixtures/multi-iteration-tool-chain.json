@@ -90,6 +90,7 @@
       "content": "===TOOL_RESULT_START:first===\nfirst-result\n===TOOL_RESULT_END===",
       "toolCallId": "tc1",
       "toolName": "first",
+      "isError": false,
       "id": "normalized",
       "timestamp": "2000-01-01T00:00:00.000Z"
     },
@@ -113,6 +114,7 @@
       "content": "===TOOL_RESULT_START:second===\nsecond-result\n===TOOL_RESULT_END===",
       "toolCallId": "tc2",
       "toolName": "second",
+      "isError": false,
       "id": "normalized",
       "timestamp": "2000-01-01T00:00:00.000Z"
     },

@@ -175,7 +175,13 @@ describe('Orchestrator guardrails', () => {
       // every tool call twice. One field, plus the comment recording why the
       // link cannot come from the span id (generated inside the store) or from
       // the in-memory `spanIds` map (never persisted).
-      if (lineCount > 816) {
+      // Bumped 816 -> 820 (feedback-activity-contract §3): both `tool_result`
+      // persist sites now carry `isError: !result.ok` — the same `result.ok`
+      // the LLM-facing block's `is_error` is already built from — so a
+      // reloaded transcript can say `ok`/`failed` instead of `unrecorded`.
+      // One field at each of the two sites, plus a two-line comment recording
+      // that a hook-rejected call is a failure too.
+      if (lineCount > 820) {
         violations.push(`${file}: ${lineCount} lines`);
       }
     }

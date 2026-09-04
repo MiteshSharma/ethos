@@ -69,6 +69,20 @@ export interface StoredMessage {
    * wired) or by a store that does not persist it.
    */
   traceId?: string;
+  /**
+   * Whether this `tool_result` row records a FAILURE. Mirrors the `is_error`
+   * flag on the LLM-facing tool_result block, so a reloaded transcript can say
+   * `ok` or `failed` instead of admitting it does not know.
+   *
+   * Tri-state on purpose. Absent means "not recorded" — every row written
+   * before this field existed, and every store that does not persist it — and
+   * must NOT be read back as `false`. `false` is a recorded success; `true` is
+   * a recorded failure. Reading absent as success would fabricate the very
+   * assurance this field exists to make honest.
+   *
+   * Only meaningful on `role: 'tool_result'`; absent everywhere else.
+   */
+  isError?: boolean;
 }
 
 export interface SessionFilter {

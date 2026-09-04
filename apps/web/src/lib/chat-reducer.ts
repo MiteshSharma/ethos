@@ -1139,15 +1139,13 @@ function parseHistory(
             toolCallId: tc.id,
             toolName: tc.name,
             args: tc.input,
-            // History doesn't preserve ok/failed for tool_result rows (the
-            // server stores both kinds in `content` without a flag), so the
-            // row says exactly that: it ran, the outcome was not recorded.
-            // Defaulting to `ok` painted a ✓ on calls that may well have
-            // failed. A live `tool_end` still flips it either way. No duration
-            // is persisted either, which is why the row renders `—`.
-            //
-            // FOLLOW-UP: persist an `is_error` flag on `tool_result` rows and
-            // this becomes a real `ok`/`failed` again.
+            // Opened as `unrecorded`: the assistant row records that the call
+            // was MADE, not how it went. The matching `tool_result` row below
+            // settles it from its persisted `isError` flag, and a row written
+            // before that flag existed leaves it `unrecorded` — which is still
+            // the honest answer for pre-migration history. A live `tool_end`
+            // flips it either way. No duration is persisted, which is why the
+            // row renders `—`.
             status: 'unrecorded',
           };
           entries.push(action);
@@ -1164,7 +1162,11 @@ function parseHistory(
       // defensive.
       if (!current || !m.toolCallId) continue;
       const action = actionsById.get(m.toolCallId);
-      if (action) action.result = m.content;
+      if (!action) continue;
+      action.result = m.content;
+      // Absent (pre-migration row) leaves the row `unrecorded`; painting a ✓
+      // on it would fabricate assurance the wire never carried (contract §3).
+      if (m.isError !== undefined) action.status = m.isError ? 'failed' : 'ok';
     }
 
     // role === 'system' — skip in the chat surface.

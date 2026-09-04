@@ -20,15 +20,13 @@ import type { SseEvent } from '@ethosagent/web-contracts';
 // `TrailState` as it walks the stored rows — one walk, no duplication.
 
 /**
- * `unrecorded` is what a tool call reloaded from history reads as: it RAN, and
- * whether it succeeded was not persisted. `StoredMessage` carries no error flag
- * on a `tool_result` row, so a reloaded failure is indistinguishable from a
- * reloaded success — and painting a ✓ on it would fabricate assurance the wire
- * never carried (contract §3, "fail-open must not fabricate assurance").
- *
- * FOLLOW-UP: the real fix is persisting an `is_error` flag on `tool_result`
- * rows so history can say `ok` or `failed` honestly. Until then this state is
- * the truthful placeholder, and a live `tool_end` still flips it either way.
+ * `unrecorded` is what a PRE-MIGRATION tool call reloaded from history reads
+ * as: it RAN, and whether it succeeded was never persisted. `StoredMessage`
+ * now carries `isError` on a `tool_result` row, so rows written since read back
+ * as a real `ok`/`failed`; rows written before it have nothing to read, and
+ * painting a ✓ on those would fabricate assurance the wire never carried
+ * (contract §3, "fail-open must not fabricate assurance"). A live `tool_end`
+ * still flips the state either way.
  */
 export type TrailEntryStatus = 'pending-approval' | 'running' | 'ok' | 'failed' | 'unrecorded';
 

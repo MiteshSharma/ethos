@@ -6,10 +6,12 @@
 // nothing when there is nothing to say, it never fabricates assurance, and a
 // finding takes you to the evidence it cites.
 
+import type { StoredMessage } from '@ethosagent/web-contracts';
 import { act, createElement } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { applyAction, initialChatState } from '../../../lib/chat-reducer';
 import type { TrailAction, TrailEntry } from '../../../lib/trail';
 import { Trail } from '../Trail';
 
@@ -196,5 +198,72 @@ describe('Trail — expansion', () => {
     act(() => row?.click());
     expect(container.textContent).toContain('/etc/hosts');
     expect(container.textContent).toContain('root 127.0.0.1');
+  });
+});
+
+// End to end: the persisted `isError` flag reaches the footer's lead glyph.
+// The rule it must not weaken — a ✓ needs at least one genuine success and
+// nothing unrecorded — is `Trail`'s, not this test's; this pins that the flag
+// is what now feeds it (contract §3).
+describe('Trail footer — fed by reloaded history', () => {
+  function storedMsg(
+    over: Partial<StoredMessage> & { role: StoredMessage['role'] },
+  ): StoredMessage {
+    return {
+      id: 'm',
+      sessionId: 's1',
+      content: '',
+      toolCallId: null,
+      toolName: null,
+      toolCalls: null,
+      timestamp: new Date(0).toISOString(),
+      ...over,
+    };
+  }
+
+  /** One assistant turn calling `read_file`, plus its `tool_result` row. */
+  function reloadedFooter(isError: boolean | undefined): string {
+    const state = applyAction(initialChatState, {
+      type: 'history-loaded',
+      messages: [
+        storedMsg({
+          id: 'a1',
+          role: 'assistant',
+          content: 'one',
+          toolCalls: [{ id: 'tc1', name: 'read_file', input: { path: 'x' } }],
+          timestamp: new Date(10).toISOString(),
+        }),
+        storedMsg({
+          id: 'r1',
+          role: 'tool_result',
+          content: 'body',
+          toolCallId: 'tc1',
+          toolName: 'read_file',
+          ...(isError === undefined ? {} : { isError }),
+          timestamp: new Date(11).toISOString(),
+        }),
+      ],
+    });
+    return renderToStaticMarkup(
+      createElement(Trail, { entries: state.trail.a1 ?? [], turnId: 'a1' }),
+    );
+  }
+
+  it('leads with ✓ when history recorded a success', () => {
+    const html = reloadedFooter(false);
+    expect(text(html)).toContain('✓ 1 action');
+  });
+
+  it('leads with ✗ when history recorded a failure', () => {
+    const html = reloadedFooter(true);
+    expect(text(html)).toContain('✗ 1 action');
+    expect(html).not.toContain('✓');
+  });
+
+  it('leads with NO glyph when history recorded nothing (pre-migration row)', () => {
+    const html = reloadedFooter(undefined);
+    expect(text(html)).toContain('1 action');
+    expect(html).not.toContain('✓');
+    expect(html).not.toContain('✗');
   });
 });

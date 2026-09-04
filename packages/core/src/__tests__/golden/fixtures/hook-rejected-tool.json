@@ -65,6 +65,7 @@
       "content": "blocked by policy",
       "toolCallId": "tc1",
       "toolName": "restricted",
+      "isError": true,
       "id": "normalized",
       "timestamp": "2000-01-01T00:00:00.000Z"
     },

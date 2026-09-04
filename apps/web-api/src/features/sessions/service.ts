@@ -180,6 +180,8 @@ function toWireMessage(m: import('@ethosagent/types').StoredMessage): WireStored
     toolCallId: m.toolCallId ?? null,
     toolName: m.toolName ?? null,
     toolCalls: m.toolCalls ?? null,
+    // Omitted, never coerced to false — absent means "outcome not recorded".
+    ...(m.isError === undefined ? {} : { isError: m.isError }),
     timestamp: m.timestamp.toISOString(),
   };
 }

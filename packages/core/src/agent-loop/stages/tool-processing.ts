@@ -489,6 +489,7 @@ export async function* processTools(
         toolCallId: p.toolCallId,
         toolName: p.name,
         traceId: ctx.traceId,
+        isError: !result.ok,
       });
     }
     // Emit tool_end for all completed tools
@@ -772,6 +773,9 @@ export async function* processTools(
       toolCallId: p.toolCallId,
       toolName: p.name,
       traceId: ctx.traceId,
+      // `result` is ok:false for a hook-rejected/blocked call too, so a
+      // rejection persists as the failure it is.
+      isError: !result.ok,
     });
 
     toolResultContent.push({

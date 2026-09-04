@@ -87,6 +87,7 @@
       "content": "===TOOL_RESULT_START:read_file===\n[dry-run] read_file would be called with: {\"path\":\"/tmp/x\"}\n===TOOL_RESULT_END===",
       "toolCallId": "tc1",
       "toolName": "read_file",
+      "isError": false,
       "id": "normalized",
       "timestamp": "2000-01-01T00:00:00.000Z"
     },

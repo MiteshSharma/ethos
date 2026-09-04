@@ -1535,10 +1535,10 @@ describe('phases and the trail lifecycle', () => {
     expect(s.stoppedTurnIds).toEqual([interruptedId]);
   });
 
-  it('history rows say the outcome was unrecorded, never that it was ok', () => {
-    // `StoredMessage` carries no error flag, so a reloaded failure and a
-    // reloaded success are the same row. Calling both `ok` painted a ✓ on
-    // calls that may well have failed (contract §3).
+  it('a PRE-MIGRATION history row says the outcome was unrecorded, never that it was ok', () => {
+    // A `tool_result` row written before `isError` existed carries no flag, so
+    // a reloaded failure and a reloaded success are the same row. Calling both
+    // `ok` would paint a ✓ on calls that may well have failed (contract §3).
     const s = applyAction(initialChatState, {
       type: 'history-loaded',
       messages: [
@@ -1549,9 +1549,67 @@ describe('phases and the trail lifecycle', () => {
           toolCalls: [{ id: 'tc1', name: 'read_file', input: { path: 'x' } }],
           timestamp: new Date(10).toISOString(),
         }),
+        storedMsg({
+          id: 'r1',
+          role: 'tool_result',
+          content: 'contents',
+          toolCallId: 'tc1',
+          toolName: 'read_file',
+          timestamp: new Date(11).toISOString(),
+        }),
       ],
     });
     expect(actions(trailOf(s, 'a1')).map((a) => a.status)).toEqual(['unrecorded']);
+  });
+
+  it('a history row whose tool_result recorded a FAILURE reads as failed', () => {
+    const s = applyAction(initialChatState, {
+      type: 'history-loaded',
+      messages: [
+        storedMsg({
+          id: 'a1',
+          role: 'assistant',
+          content: 'one',
+          toolCalls: [{ id: 'tc1', name: 'read_file', input: { path: 'x' } }],
+          timestamp: new Date(10).toISOString(),
+        }),
+        storedMsg({
+          id: 'r1',
+          role: 'tool_result',
+          content: 'ENOENT',
+          toolCallId: 'tc1',
+          toolName: 'read_file',
+          isError: true,
+          timestamp: new Date(11).toISOString(),
+        }),
+      ],
+    });
+    expect(actions(trailOf(s, 'a1')).map((a) => a.status)).toEqual(['failed']);
+  });
+
+  it('a history row whose tool_result recorded a SUCCESS reads as ok', () => {
+    const s = applyAction(initialChatState, {
+      type: 'history-loaded',
+      messages: [
+        storedMsg({
+          id: 'a1',
+          role: 'assistant',
+          content: 'one',
+          toolCalls: [{ id: 'tc1', name: 'read_file', input: { path: 'x' } }],
+          timestamp: new Date(10).toISOString(),
+        }),
+        storedMsg({
+          id: 'r1',
+          role: 'tool_result',
+          content: 'contents',
+          toolCallId: 'tc1',
+          toolName: 'read_file',
+          isError: false,
+          timestamp: new Date(11).toISOString(),
+        }),
+      ],
+    });
+    expect(actions(trailOf(s, 'a1')).map((a) => a.status)).toEqual(['ok']);
   });
 
   it('a live tool_end still settles a row that was reloaded as unrecorded', () => {

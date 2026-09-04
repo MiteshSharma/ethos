@@ -74,6 +74,7 @@
       "content": "===TOOL_RESULT_START:greet===\nhello world\n===TOOL_RESULT_END===",
       "toolCallId": "tc1",
       "toolName": "greet",
+      "isError": false,
       "id": "normalized",
       "timestamp": "2000-01-01T00:00:00.000Z"
     },
