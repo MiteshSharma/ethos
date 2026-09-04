@@ -47,8 +47,8 @@ color:#9A9A98;margin-bottom:5px}
 input[type=text],input[type=password]{width:100%;background:#0F0F0F;border:1px solid #3A3A3A;
 border-radius:4px;color:#E8E8E6;font-family:'Geist Mono',monospace;font-size:13px;
 padding:7px 10px;margin-bottom:12px;user-select:text}
-input::placeholder{color:#6B6B6A}
-.help{font-size:12px;color:#6B6B6A;line-height:1.45}
+input::placeholder{color:#7E7E7D}
+.help{font-size:12px;color:#7E7E7D;line-height:1.45}
 .actions{display:flex;align-items:center;gap:10px;margin-top:14px}
 .res{flex:1;font-family:'Geist Mono',monospace;font-size:12px;color:#9A9A98;
 overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -61,7 +61,7 @@ button:disabled{opacity:0.4;cursor:default}
 button.p{background:#4A9EFF;border-color:#4A9EFF;color:#0F0F0F;font-weight:500}
 button.p:hover:not(:disabled){background:#3D8CE8}
 :focus-visible{outline:2px solid #4A9EFF;outline-offset:1px}
-.foot{margin-top:14px;padding-top:12px;border-top:1px solid #2A2A2A;font-size:12px;color:#6B6B6A}
+.foot{margin-top:14px;padding-top:12px;border-top:1px solid #2A2A2A;font-size:12px;color:#7E7E7D}
 </style></head><body>
 <header class="bar">
 <h1>Where should Ethos run?</h1>

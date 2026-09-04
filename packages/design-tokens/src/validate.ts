@@ -9,7 +9,9 @@ import { BUILTIN_SKINS, resolveSkin, type SkinRegistry } from './skins';
 //
 // Rules enforced:
 //   1. No purple/violet/indigo accents (hue 270-290°).
-//   2. WCAG textPrimary/bgBase contrast ratio ≥ 7 (DESIGN.md targets ~14).
+//   2. WCAG contrast on bgBase: textPrimary ≥ 7 (AAA — DESIGN.md targets
+//      ~14), textSecondary / textTertiary ≥ 4.5 (AA for normal text — the
+//      feedback & activity contract puts 13px durations on tertiary).
 //   3. Font family must include "Geist" (skins MUST NOT touch typography in v1).
 //   4. Radius scale stays at {4, 8, 14, 9999}.
 //   5. Motion durations within [0, 500] ms (0 disables motion, 500 caps).
@@ -101,6 +103,12 @@ export function contrastRatio(fgHex: string, bgHex: string): number {
 const PURPLE_HUE_MIN = 240;
 const PURPLE_HUE_MAX = 290;
 const MIN_CONTRAST = 7; // WCAG AAA for body text — DESIGN.md targets ~14:1
+// WCAG AA for normal text. Secondary and tertiary carry real reading lines
+// (status line, trail footer, durations), so they are held to AA rather than
+// left unchecked. The semantic four are deliberately NOT covered yet: `info`
+// is the researcher hue and the altitude-rail blue, and on the paper skin it
+// sits at 2.63:1 — moving it is an accent decision, not a contrast one.
+const MIN_CONTRAST_MUTED = 4.5;
 const RADIUS_SCALE = new Set([4, 8, 14, 9999]);
 const MOTION_MIN_MS = 0;
 const MOTION_MAX_MS = 500;
@@ -121,14 +129,27 @@ export function validateTokens(tokens: Tokens): ValidationResult {
     }
   }
 
-  // Rule 2 — body text vs base background must clear WCAG AAA.
-  const ratio = contrastRatio(tokens.surface.textPrimary, tokens.surface.bgBase);
-  if (ratio < MIN_CONTRAST) {
+  // Rule 2 — text vs base background. Primary clears AAA; the two muted
+  // ramps clear AA, which is the bar that applies to the 13px numbers and
+  // status words the feedback & activity contract puts on them.
+  const primaryRatio = contrastRatio(tokens.surface.textPrimary, tokens.surface.bgBase);
+  if (primaryRatio < MIN_CONTRAST) {
     findings.push({
       code: 'low-contrast',
-      message: `textPrimary/bgBase contrast ratio ${ratio.toFixed(2)} is below the WCAG AAA threshold of ${MIN_CONTRAST}`,
+      message: `textPrimary/bgBase contrast ratio ${primaryRatio.toFixed(2)} is below the WCAG AAA threshold of ${MIN_CONTRAST}`,
       path: 'surface.textPrimary',
     });
+  }
+  const mutedKeys: Array<'textSecondary' | 'textTertiary'> = ['textSecondary', 'textTertiary'];
+  for (const key of mutedKeys) {
+    const mutedRatio = contrastRatio(tokens.surface[key], tokens.surface.bgBase);
+    if (mutedRatio < MIN_CONTRAST_MUTED) {
+      findings.push({
+        code: 'low-contrast',
+        message: `${key}/bgBase contrast ratio ${mutedRatio.toFixed(2)} is below the WCAG AA threshold of ${MIN_CONTRAST_MUTED}`,
+        path: `surface.${key}`,
+      });
+    }
   }
 
   // Rule 3 — typography stays Geist. Skins MUST NOT swap the font family

@@ -90,7 +90,7 @@ export const DEFAULT_TOKENS: Tokens = {
     borderStrong: '#3A3A3A',
     textPrimary: '#E8E8E6',
     textSecondary: '#9A9A98',
-    textTertiary: '#6B6B6A',
+    textTertiary: '#7E7E7D',
   },
   accents: {
     researcher: '#4A9EFF',

@@ -32,8 +32,8 @@
   --ethos-border-subtle: #e8e8e4;
   --ethos-border-strong: #d0d0cc;
   --ethos-text-primary: #1a1a1a;
-  --ethos-text-secondary: #6b6b6a;
-  --ethos-text-tertiary: #94948f;
+  --ethos-text-secondary: #585857;
+  --ethos-text-tertiary: #70706b;
 
   /* Per-personality accents (researcher / engineer / reviewer) */
   --ethos-accent-researcher: #4a9eff;
@@ -83,7 +83,7 @@
   --ethos-border-strong: #3a3a3a;
   --ethos-text-primary: #e8e8e6;
   --ethos-text-secondary: #9a9a98;
-  --ethos-text-tertiary: #6b6b6a;
+  --ethos-text-tertiary: #7e7e7d;
 
   --ifm-color-primary: #4a9eff;
   --ifm-background-color: var(--ethos-bg-base);

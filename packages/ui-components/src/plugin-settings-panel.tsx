@@ -55,7 +55,7 @@ export function PluginSettingsPanel({
         <span
           style={{
             fontSize: 11,
-            color: 'var(--text-tertiary, #6b6b6a)',
+            color: 'var(--text-tertiary, #7e7e7d)',
             fontFamily: 'var(--font-mono, monospace)',
           }}
         >
@@ -140,7 +140,7 @@ function SectionLabel({ children }: { children: React.ReactNode }) {
         fontWeight: 700,
         letterSpacing: '0.08em',
         textTransform: 'uppercase',
-        color: 'var(--text-tertiary, #6b6b6a)',
+        color: 'var(--text-tertiary, #7e7e7d)',
       }}
     >
       {children}
@@ -203,7 +203,7 @@ function CredentialRow({
           <div
             style={{
               fontSize: 11,
-              color: preview ? 'var(--success, #4ade80)' : 'var(--text-tertiary, #6b6b6a)',
+              color: preview ? 'var(--success, #4ade80)' : 'var(--text-tertiary, #7e7e7d)',
             }}
           >
             {preview ?? 'Not connected'}
@@ -255,7 +255,7 @@ function CredentialRow({
               style={{
                 fontSize: 11,
                 fontFamily: 'var(--font-mono, monospace)',
-                color: 'var(--text-tertiary, #6b6b6a)',
+                color: 'var(--text-tertiary, #7e7e7d)',
               }}
             >
               {preview ?? 'Not set'}
@@ -333,7 +333,7 @@ function CredentialRow({
               borderRadius: 'var(--radius-sm, 4px)',
               border: '1px solid var(--border-subtle, #2a2a2a)',
               background: 'transparent',
-              color: 'var(--text-tertiary, #6b6b6a)',
+              color: 'var(--text-tertiary, #7e7e7d)',
               fontSize: 12,
               cursor: 'pointer',
             }}

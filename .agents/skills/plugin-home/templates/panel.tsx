@@ -129,7 +129,7 @@ export default function HomePanel({
       {/* Content */}
       <div style={{ minHeight: 120 }}>
         {loading ? (
-          <div style={{ color: 'var(--text-tertiary, #6b6b6a)', fontSize: 13 }}>Loading...</div>
+          <div style={{ color: 'var(--text-tertiary, #7e7e7d)', fontSize: 13 }}>Loading...</div>
         ) : error ? (
           <div style={{ color: 'var(--error, #f87171)', fontSize: 13 }}>
             {error}
@@ -160,7 +160,7 @@ export default function HomePanel({
             {data}
           </pre>
         ) : (
-          <div style={{ color: 'var(--text-tertiary, #6b6b6a)', fontSize: 13 }}>
+          <div style={{ color: 'var(--text-tertiary, #7e7e7d)', fontSize: 13 }}>
             Select a tab to load data.
           </div>
         )}

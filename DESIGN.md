@@ -54,8 +54,8 @@ Dark mode is **primary**. Light mode is **supported but not optimized** (used by
 | `--border-subtle` | `#2A2A2A` | `#E8E8E4` | Default borders |
 | `--border-strong` | `#3A3A3A` | `#D0D0CC` | Emphasized borders, dividers |
 | `--text-primary` | `#E8E8E6` | `#1A1A1A` | Main body text. Contrast ~14:1 / ~17:1 |
-| `--text-secondary` | `#9A9A98` | `#6B6B6A` | De-emphasized text |
-| `--text-tertiary` | `#6B6B6A` | `#94948F` | Muted, captions, section labels |
+| `--text-secondary` | `#9A9A98` | `#585857` | De-emphasized text. Contrast 6.80:1 / 6.81:1 |
+| `--text-tertiary` | `#7E7E7D` | `#70706B` | Muted, captions, section labels. Contrast 4.72:1 / 4.76:1 — WCAG AA for normal text, because the feedback contract puts durations here at 13px |
 
 ### Per-personality accent (the load-bearing identity affordance)
 
@@ -126,12 +126,24 @@ Two rules, both load-bearing:
 
 Used **only** to signal status, never as decoration. Always paired with an icon — never color alone.
 
-| Token | Hex | Usage |
-|---|---|---|
-| `--success` | `#4ADE80` | (matches engineer) — success states, completed tools |
-| `--warning` | `#F59E0B` | (matches reviewer) — pending review, soft warnings |
-| `--error` | `#F87171` | distinct red, never a personality color — failures, rejections |
-| `--info` | `#4A9EFF` | (matches researcher) — informational tags, neutral notifications |
+A semantic colour is tuned to the ground it sits on, so it has a dark and a
+light value. A personality accent does **not** — an identity hue is the same
+hue in both skins. Where a dark semantic and an accent share a hex they are
+still two different tokens that happen to agree on the primary skin: `--warning`
+is not the reviewer accent, and retuning one must never move the other.
+
+| Token | Dark | Light | Usage |
+|---|---|---|---|
+| `--success` | `#4ADE80` | `#177D3C` | Success states, completed tools. Dark value coincides with the engineer accent; the light value does not |
+| `--warning` | `#F59E0B` | `#986206` | Pending review, soft warnings. Dark value coincides with the reviewer accent; the light value does not |
+| `--error` | `#F87171` | `#CE2C2C` | Distinct red, never a personality color — failures, rejections |
+| `--info` | `#4A9EFF` | `#4A9EFF` | Informational tags, neutral notifications. The one semantic that does not retune: it is the researcher hue and the permanent altitude-rail blue, so it moves only as an accent decision |
+
+Light values keep their dark counterpart's hue and drop lightness until the
+pair clears WCAG AA on `--bg-base` (4.98 / 4.92 / 4.99:1); red also eases its
+saturation so a 5:1 red reads as brick rather than siren beside the ochre and
+the forest green. `--info` on paper-warm is 2.63:1 and is a known shortfall —
+see the 2026-09-04 decisions-log row.
 
 ## Spacing
 
@@ -604,3 +616,4 @@ The web UI specifically must avoid these patterns. Code review checks for them.
 | 2026-08-20 | The delegated-run card is NOT a fourth "Cards earn existence" exemption | Ruled on while landing the runner accent, and recorded so it is not relitigated when the card gets built. The run card is heavy — header, task line, live `now` line, meta row, an 18-row collapsible detail grid, a nested question card, a button row — and "does it fit a dense row" answers *no*. But that is the wrong test for it, because the rule governs the `Card` **primitive**, not the word "card": `ClarifyCard`, the composer and `CallStrip` are all bordered containers of comparable weight built from raw primitives, and none of them needed an exemption. The three granted exemptions share a property the run card lacks — each is a **repeated list unit** measured against the dense row it replaced. The run card is a singleton inline in a transcript with no row alternative to lose to, and Antd's `Card` (title slot, `extra`, fixed body padding) buys it nothing it would not immediately override, while its state-varying border and warm blocked tint want explicit CSS anyway. So: built from primitives, and the surfaces that ARE lists stay lists — the drawer Runs pane and the Tasks page rows remain dense rows, which is where the rule was doing real work all along. |
 | 2026-09-04 | The Recipes gallery is an approved exception to "no card grids anywhere" | User-directed. The gallery shipped as stacked rows, correctly, because this file names card grids as slop. The user then reviewed a clickable prototype alongside the shipped rows and asked for the grid, and this file's rule is "do not deviate without explicit user approval" — so the deviation is recorded rather than re-litigated the next time someone reads the anti-slop table. Scoped to that one page: not a precedent for Skills / MCP / Plugins / Personalities / Dashboards, and not a fourth `Card`-primitive exemption, since the cards are raw primitives and each is a real `<Link>` (focusable, middle-clickable). The rest of the Recipes flow stays rows — preflight groups, the install summary and the post-install checklist are all the same bordered row list. |
 | 2026-09-04 | Feedback & activity contract | Owner principle: show every action, never inside the answer, complete, acknowledge every ask. Tool chips leave the bubble; status line on send in a reserved slot; collapsed trail footer; one derived trail for footer + drawer; findings and settings feedback share the row vocabulary. Supersedes ToolChip's "inline between text spans" rationale. |
+| 2026-09-04 | Five token values raised to clear WCAG AA 4.5:1 on `--bg-base`, plus the light `--text-secondary` the fix depended on | Owner-approved accessibility correction, not a restyle. The feedback & activity contract landed the same day assigns `--text-tertiary` to **every** duration and elapsed number at 13px and `--warning` to `⚠ still working` / `⚠ N unverified` — 13px is normal text, so 4.5:1 applies to tokens that were previously only ever carrying captions. Measured against `--bg-base` with `contrastRatio()` in `packages/design-tokens/src/validate.ts`, five pairs failed: `--text-tertiary` dark `#6B6B6A` 3.59:1 → `#7E7E7D` 4.72:1; `--text-tertiary` light `#94948F` 2.91:1 → `#70706B` 4.76:1; `--warning` light `#F59E0B` 2.05:1 → `#986206` 4.92:1; `--success` light `#4ADE80` 1.67:1 → `#177D3C` 4.98:1; `--error` light `#F87171` 2.65:1 → `#CE2C2C` 4.99:1. Every value clears the bar with margin rather than sitting on 4.51, because a token pinned to the threshold fails the next time anyone nudges a background. **The sixth change is the one that needed a decision.** Raising a tertiary compresses the grey ramp toward secondary, and a hierarchy you cannot see is not a hierarchy. In dark that still works: secondary stays `#9A9A98` and the step is ΔL\* 10.8 (was 18.4). In light it did not — secondary was `#6B6B6A` at 5.10:1, which caps a compliant tertiary at ΔL\* 1.9, indistinguishable. So light `--text-secondary` moves too, `#6B6B6A` → `#585857` (5.10:1 → 6.81:1, ΔL\* 9.7), which also makes the two skins' ramps parallel — 15.62/6.80/4.72 dark against 16.64/6.81/4.76 light. The alternative was leaving the single worst failure in the file at 2.91:1, which is not a fix. **The `reviewer` accent is deliberately unchanged at `#F59E0B`, and so is `engineer` at `#4ADE80`.** `--warning` and `reviewer` were never one constant — `DEFAULT_TOKENS.accents.reviewer` and `DEFAULT_TOKENS.semantic.warning` are separate fields that happened to agree — and they now agree only on the dark skin. A personality's identity hue is load-bearing and does not retune per background; a status colour does. The semantic table gains a Light column to say so in the file rather than only in the code. Light semantics keep their dark hue exactly (37.7° / 141.9° / 0.0°) and drop lightness; red also eases saturation 91% → 65% so a 5:1 red reads as brick rather than siren next to an ochre and a forest green. `--info` is knowingly left failing at 2.63:1 on paper-warm: it is the researcher hue and the permanent altitude-rail blue, so moving it is an accent decision under the identity rule above, not a contrast one, and it is not in the approved set. The validator now enforces `--text-secondary` and `--text-tertiary` at AA 4.5 alongside `--text-primary` at AAA 7, so this cannot silently regress; it deliberately does NOT yet cover the semantics, because `paper.info` would fail it. |
