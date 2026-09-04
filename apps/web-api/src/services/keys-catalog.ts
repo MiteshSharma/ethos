@@ -129,9 +129,16 @@ export const KEY_CATALOG: readonly KeyCatalogEntry[] = [
     reflectsNamedSecret: true,
   },
   {
+    // One key, two consumers: the `x_search` tool and the Grok LLM provider.
+    // It stays under `tools` rather than moving or being duplicated — a second
+    // row against the same ref is a second write path, which the header note
+    // above rules out, and `tools.openai` below is the same shape already
+    // (`providers/openai/apiKey` serves image generation and the OpenAI
+    // provider). The Models pane edits the provider side; this row is the
+    // tool-side view of the same credential.
     id: 'tools.xai',
     category: 'tools',
-    label: 'xAI (X search)',
+    label: 'xAI (Grok + X search)',
     refPattern: 'providers/xai/apiKey',
     shape: { kind: 'single', field: 'apiKey' },
     getKeyUrl: 'https://console.x.ai/',

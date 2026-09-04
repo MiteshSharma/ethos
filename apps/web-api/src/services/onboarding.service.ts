@@ -59,6 +59,11 @@ export interface OnboardingServiceOptions {
   onSetupComplete?: () => void;
 }
 
+/** Mirrors `XAI_BASE_URL` in `@ethosagent/llm-xai`. Inlined rather than
+ *  imported so validation keeps no runtime dep on the provider package —
+ *  every other provider's endpoint is a literal here too. */
+const XAI_BASE_URL = 'https://api.x.ai/v1';
+
 const MODELS_TIMEOUT_MS = 8_000;
 const COMPLETION_TIMEOUT_MS = 10_000;
 
@@ -178,6 +183,7 @@ export class OnboardingService {
               m.includes('chat') ||
               m.includes('gpt') ||
               m.includes('claude') ||
+              m.includes('grok') ||
               m.includes('llama') ||
               m.includes('mistral') ||
               m.includes('gemma'),
@@ -227,6 +233,12 @@ export class OnboardingService {
         case 'azure':
           if (!input.baseUrl) throw new Error('baseUrl required for azure');
           return await this.openAiCompatibleModels(input.baseUrl, input.apiKey, controller.signal);
+        case 'xai':
+          // Hardcoded, not `input.baseUrl ?? default` like openrouter/openai:
+          // the xai provider pins XAI_BASE_URL and ignores a configured
+          // baseUrl, so honouring one here would validate a key against an
+          // endpoint the agent will never actually call.
+          return await this.openAiCompatibleModels(XAI_BASE_URL, input.apiKey, controller.signal);
         case 'codex':
           throw new Error('Codex uses device auth — call validateProvider directly');
       }
@@ -328,6 +340,9 @@ export class OnboardingService {
         return input.baseUrl ?? 'https://openrouter.ai/api/v1';
       case 'openai':
         return input.baseUrl ?? 'https://api.openai.com/v1';
+      case 'xai':
+        // Pinned — see the `xai` case in `fetchModels`.
+        return XAI_BASE_URL;
       case 'openai-compat':
       case 'azure':
       case 'codex':

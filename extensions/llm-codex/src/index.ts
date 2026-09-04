@@ -12,6 +12,7 @@ import { type ResponsesApiBody, streamResponsesApi } from './transport';
 export type { CodexCredentials } from './auth';
 export { exchangeForTokens, pollForAuthorization, requestDeviceCode } from './auth';
 export { CODEX_FALLBACK_MODELS } from './models';
+export { toResponsesInput, toResponsesTools } from './responses-adapter';
 export { CodexTokenStore } from './token-store';
 export { type ResponsesApiBody, streamResponsesApi } from './transport';
 
@@ -111,7 +112,14 @@ export class CodexProvider implements LLMProvider {
       // Best-effort: if counting fails, requestTokens stays undefined.
     }
 
-    yield* streamResponsesApi(RESPONSES_ENDPOINT, token, body, options.abortSignal, requestTokens);
+    yield* streamResponsesApi(
+      RESPONSES_ENDPOINT,
+      token,
+      body,
+      options.abortSignal,
+      requestTokens,
+      'Codex',
+    );
   }
 
   async countTokens(messages: Message[]): Promise<number> {

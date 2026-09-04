@@ -13,6 +13,7 @@ export const ENV_TO_REF: Record<string, string> = {
   GEMINI_API_KEY: 'providers/gemini/apiKey',
   GROQ_API_KEY: 'providers/groq/apiKey',
   DEEPSEEK_API_KEY: 'providers/deepseek/apiKey',
+  XAI_API_KEY: 'providers/xai/apiKey',
   OLLAMA_HOST: 'providers/ollama/host',
   EXA_API_KEY: 'providers/exa/apiKey',
   TAVILY_API_KEY: 'providers/tavily/apiKey',

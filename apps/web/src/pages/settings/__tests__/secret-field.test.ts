@@ -46,7 +46,7 @@ function entry(over: Partial<KeyEntryView> = {}): KeyEntryView {
   return {
     id: 'tools.xai',
     category: 'tools',
-    label: 'xAI (X search)',
+    label: 'xAI (Grok + X search)',
     shape: 'single',
     fields: [
       {

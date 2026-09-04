@@ -41,6 +41,14 @@ export function supportedProvidersHint(): string {
     .join(', ');
 }
 
+/** D9 — the readline wizard's base-URL default for non-local, non-Azure
+ *  providers. Returns the catalog `defaultBaseUrl` when the provider carries
+ *  one; otherwise the historical OpenRouter literal, unchanged. Exported for
+ *  the regression test that pins both halves. */
+export function resolveWizardBaseUrl(provider: string): string {
+  return getProvider(provider)?.defaultBaseUrl ?? 'https://openrouter.ai/api/v1';
+}
+
 export interface SetupResult {
   config: EthosConfig;
   /** W2.5 three-way close outcome from the TUI LaunchStep. The readline
@@ -307,9 +315,14 @@ async function runReadlineFallback({
       }
       apiVersion = (await ask(rl, 'API version (2024-10-21): ')).trim() || undefined;
     } else if (provider !== 'anthropic') {
-      baseUrl =
-        (await ask(rl, 'Base URL (https://openrouter.ai/api/v1): ')).trim() ||
-        'https://openrouter.ai/api/v1';
+      // D9 — consult the catalog before falling back to the OpenRouter literal:
+      // probeProvider live-validates the key against this URL before config is
+      // written, so a non-OpenRouter key sent to openrouter.ai is rejected and
+      // setup exits non-zero. PARTIAL BY CONSTRUCTION: `openai`, `anthropic`,
+      // `codex`, `azure` and `bedrock` carry no `defaultBaseUrl`, so the literal
+      // still applies to them. This is not a fix for every non-local provider.
+      const defaultBaseUrl = resolveWizardBaseUrl(provider);
+      baseUrl = (await ask(rl, `Base URL (${defaultBaseUrl}): `)).trim() || defaultBaseUrl;
     }
   }
 

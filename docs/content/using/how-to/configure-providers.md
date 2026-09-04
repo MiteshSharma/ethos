@@ -5,7 +5,7 @@ kind: how-to
 audience: user
 slug: configure-providers
 time: "5 min"
-updated: 2026-09-03
+updated: 2026-09-04
 ---
 
 ## Task
@@ -34,7 +34,7 @@ ethos setup
 
 The wizard writes `~/.ethos/config.yaml` and prompts for:
 
-- **Provider** — one of `anthropic`, `openai`, `codex`, `openrouter`, `azure`, `bedrock`, `ollama`, `vllm`.
+- **Provider** — one of `anthropic`, `openai`, `codex`, `openrouter`, `azure`, `bedrock`, `xai`, `ollama`, `vllm`.
 - **Model** — the model id for that provider (see the table below). For `azure`, this is the deployment name. For `ollama` and `vllm`, the wizard fetches the served model list from the endpoint's `GET /v1/models` and lets you pick.
 - **API key** — stored locally in `~/.ethos/config.yaml`. The local providers (`ollama`, `vllm`) and `bedrock` skip this prompt.
 - **Default [personality](../../getting-started/glossary.md#personality)** — pick one of the built-ins.
@@ -57,7 +57,7 @@ apiKey: sk-ant-XXXXXXXXXXXX
 personality: researcher
 ```
 
-For OpenAI-compatible providers (`openai`, `openrouter`, `ollama`, `vllm`), add `baseUrl` if you want a non-default endpoint:
+For OpenAI-compatible providers (`openai`, `openrouter`, `xai`, `ollama`, `vllm`), add `baseUrl` if you want a non-default endpoint:
 
 ```yaml
 provider: openrouter
@@ -88,6 +88,7 @@ personality: researcher
 | `openrouter` | `https://openrouter.ai/api/v1` | [openrouter.ai/keys](https://openrouter.ai/keys) | One key for Claude, GPT, Gemini, Llama, and 200+ more. |
 | `azure` | `https://<your-resource>.openai.azure.com` | [portal.azure.com](https://portal.azure.com) | `model:` is the deployment name; `apiVersion:` required (default `2024-10-21`). |
 | `bedrock` | n/a -- derived from `region:` | n/a -- AWS SigV4 | No API key; credentials come from an IAM role, SSO session, or the Ethos secret store. `region:` defaults to `us-east-1`. See [Run Ethos on AWS Bedrock](use-aws-bedrock.md). |
+| `xai` | `https://api.x.ai/v1` | [console.x.ai](https://console.x.ai/) | Grok models direct from xAI. Paid only — no free tier. The key is stored at `providers/xai/apiKey`. |
 | `ollama` | `http://localhost:11434/v1` | n/a — local | No API key; the wizard offers the served model list. |
 | `vllm` | `http://localhost:8000/v1` | n/a — local | No API key; the wizard offers the served model list. |
 
@@ -159,7 +160,7 @@ A streamed `ok` and a non-zero `usage` line means the provider, key, and model r
 
 ## Troubleshoot
 
-**`Unknown provider 'foo'. Did you mean 'anthropic'?`** — `ethos doctor` rejects provider strings outside the catalog. Set `provider:` to one of `anthropic`, `openai`, `codex`, `openrouter`, `azure`, `bedrock`, `ollama`, `vllm`.
+**`Unknown provider 'foo'. Did you mean 'anthropic'?`** — `ethos doctor` rejects provider strings outside the catalog. Set `provider:` to one of `anthropic`, `openai`, `codex`, `openrouter`, `azure`, `bedrock`, `xai`, `ollama`, `vllm`.
 
 **`401 Unauthorized` from the provider.** — The key is wrong, expired, or missing the right scope. Regenerate at the provider console and re-run `ethos setup auth`.
 

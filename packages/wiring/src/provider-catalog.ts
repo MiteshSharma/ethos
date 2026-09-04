@@ -64,6 +64,18 @@ export const PROVIDER_CATALOG: ProviderCatalogEntry[] = [
     costType: 'api-billing',
     signupUrl: 'https://console.aws.amazon.com/bedrock',
   },
+  {
+    id: 'xai',
+    label: 'xAI Grok',
+    description: 'Grok models direct from xAI — paid API, no free tier',
+    authType: 'api-key',
+    costType: 'api-billing',
+    // Deliberate: Grok is premium and paid with no free tier, so it does not
+    // sit beside Anthropic/OpenAI/OpenRouter in the recommended set.
+    recommended: false,
+    signupUrl: 'https://console.x.ai/',
+    defaultBaseUrl: 'https://api.x.ai/v1',
+  },
   // Coming soon
   {
     id: 'gemini',

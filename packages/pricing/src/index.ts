@@ -7,7 +7,7 @@
 import type { TokenUsage } from '@ethosagent/types';
 import { findRate } from './table';
 
-export { findRate, MODEL_PRICING, type ModelRate } from './table';
+export { findRate, MODEL_PRICING, type ModelRate, type TierBreak } from './table';
 
 /** Token counts a cost is derived from. Cache buckets default to 0. */
 export type CostTokens = Pick<TokenUsage, 'inputTokens' | 'outputTokens'> &
@@ -62,11 +62,27 @@ export function estimateCost(
     return { costUsd: 0, basis: 'unknown' };
   }
 
+  const cacheReadTokens = tokens.cacheReadTokens ?? 0;
+  const cacheCreationTokens = tokens.cacheCreationTokens ?? 0;
+
+  // Whole-request reprice above a prompt-size threshold (xAI). The comparison is
+  // driven by the PROMPT — input + cache reads + cache writes — and deliberately
+  // not by `inputTokens` alone: the provider's cliff is on how much context the
+  // request carries, and cached tokens are still in that context. Counting only
+  // `inputTokens` would put a 900K-token turn back under the threshold the
+  // moment prompt caching started working, which is precisely the long-context
+  // turn the tier exists to price. Output is excluded — it is not the prompt.
+  // The tier SELECTS a rate set for every bucket; it does not split tokens
+  // across two rates, because the provider does not prorate the overage either.
+  const promptTokens = tokens.inputTokens + cacheReadTokens + cacheCreationTokens;
+  const applicable =
+    rate.tierBreak && promptTokens > rate.tierBreak.abovePromptTokens ? rate.tierBreak : rate;
+
   const costUsd =
-    (tokens.inputTokens * rate.input +
-      tokens.outputTokens * rate.output +
-      (tokens.cacheReadTokens ?? 0) * rate.cacheRead +
-      (tokens.cacheCreationTokens ?? 0) * rate.cacheWrite) /
+    (tokens.inputTokens * applicable.input +
+      tokens.outputTokens * applicable.output +
+      cacheReadTokens * applicable.cacheRead +
+      cacheCreationTokens * applicable.cacheWrite) /
     MILLION;
 
   return { costUsd, basis: 'priced' };

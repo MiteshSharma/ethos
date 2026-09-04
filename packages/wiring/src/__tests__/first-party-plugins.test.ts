@@ -34,6 +34,9 @@ describe('first-party plugin activation', () => {
     const { activate: activateGeminiNative, PROVIDER_CONTRACT_MAJOR: gc } = await import(
       '@ethosagent/llm-gemini-native'
     );
+    const { activate: activateXai, PROVIDER_CONTRACT_MAJOR: xc } = await import(
+      '@ethosagent/llm-xai'
+    );
 
     // Path A: direct registration (standalone createLLM)
     const directRegistry = new DefaultLLMProviderRegistry();
@@ -74,6 +77,11 @@ describe('first-party plugin activation', () => {
           activate: activateGeminiNative,
           contractMajor: gc,
         },
+        {
+          id: '@ethosagent/llm-xai',
+          activate: activateXai,
+          contractMajor: xc,
+        },
       ],
       pluginRegistry,
       noopLog,
@@ -83,6 +91,12 @@ describe('first-party plugin activation', () => {
     const pluginNames = new Set(pluginRegistry.list());
 
     expect(pluginNames).toEqual(directNames);
+    // xAI is registered exactly once, on both paths. `xai` must NOT also appear
+    // in OPENAI_COMPAT_ALIASES or BUILTIN_CONFIG_PROVIDERS: the registry throws
+    // on a duplicate id and registerBuiltinProviders iterates both lists onto
+    // one registry, so a second entry is a boot crash for every user.
+    expect(directRegistry.list().filter((n) => n === 'xai')).toEqual(['xai']);
+    expect(pluginRegistry.list().filter((n) => n === 'xai')).toEqual(['xai']);
   });
 
   it('rejects mismatched pluginContractMajor', async () => {

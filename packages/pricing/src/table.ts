@@ -19,7 +19,9 @@
 // (`gpt-4o-mini` before `gpt-4o`). Substring matching is what lets one row
 // serve the same model across routes: `claude-sonnet-4` matches Anthropic's
 // `claude-sonnet-4-6`, Bedrock's `us.anthropic.claude-sonnet-4-20250514-v1:0`
-// and OpenRouter's `anthropic/claude-sonnet-4-6` without three rows.
+// and OpenRouter's `anthropic/claude-sonnet-4-6` without three rows. A row that
+// must NOT serve one of those routes says so with `excludeIdsContaining` — see
+// the xAI block for the one case that uses it, and why.
 //
 // PROVENANCE. Anthropic and the pre-existing OpenAI/Gemini/DeepSeek/Mistral
 // input+output rates are carried over verbatim from the two tables this package
@@ -27,6 +29,32 @@
 // and the newly-priced rows (gemini-2.5-*, deepseek-chat/reasoner) come from the
 // providers' published list prices. A model with no row is NOT guessed at — see
 // `estimateCost`, which returns 0 and reports it as unpriced.
+
+/**
+ * A whole-request reprice above a prompt-size threshold.
+ *
+ * xAI bills a 201K-token prompt at DOUBLE a 199K one end to end — the overage
+ * is not priced separately, the entire request moves to the second rate set. So
+ * this is a rate set, not a marginal rate: `estimateCost` picks one group or the
+ * other and never splits tokens across the two.
+ */
+export interface TierBreak {
+  /**
+   * Prompt tokens above which the whole request bills at the rates below.
+   * "Prompt tokens" is every bucket that occupies the context window — ordinary
+   * input plus cache reads plus cache writes — not `input` alone, because a
+   * cached long-context turn is still a long-context turn to the provider.
+   */
+  abovePromptTokens: number;
+  /** USD per 1M ordinary input (prompt) tokens above the threshold. */
+  input: number;
+  /** USD per 1M output (completion) tokens above the threshold. */
+  output: number;
+  /** USD per 1M cache-read tokens above the threshold. */
+  cacheRead: number;
+  /** USD per 1M cache-write tokens above the threshold. */
+  cacheWrite: number;
+}
 
 export interface ModelRate {
   /** Case-insensitive substring matched against the model id. */
@@ -39,6 +67,22 @@ export interface ModelRate {
   cacheRead: number;
   /** USD per 1M tokens written into the prompt cache. */
   cacheWrite: number;
+  /**
+   * Optional. Present only for providers that reprice the whole request above a
+   * prompt size (today: xAI). A row without it prices exactly as it always has.
+   */
+  tierBreak?: TierBreak;
+  /**
+   * Optional. Lower-case substrings that DISQUALIFY this row: an id containing
+   * any of them skips the row and keeps looking, so it falls through to a later
+   * row or to no row at all (`basis: 'unknown'`).
+   *
+   * This exists because `prefix` is a substring test with no provider
+   * dimension, so a row carrying one provider's DIRECT price also matches the
+   * same model served by a reseller at a different price. A row without this
+   * field matches exactly as it always has.
+   */
+  excludeIdsContaining?: readonly string[];
 }
 
 export const MODEL_PRICING: readonly ModelRate[] = [
@@ -75,10 +119,109 @@ export const MODEL_PRICING: readonly ModelRate[] = [
   //    and deliberately matches nothing here) ────────────────────────────────
   { prefix: 'mistral-large', input: 2.0, output: 6.0, cacheRead: 2.0, cacheWrite: 0 },
   { prefix: 'mistral-small', input: 0.1, output: 0.3, cacheRead: 0.1, cacheWrite: 0 },
+
+  // ── xAI Grok ──────────────────────────────────────────────────────────────
+  //
+  // Rates from https://docs.x.ai/docs/models as of 2026-09-03. Date-stamped
+  // deliberately: xAI's pricing PAGE moves faster than its docs, so treat these
+  // as stale on sight and re-fetch before editing.
+  //
+  // Every row carries a 200K-token `tierBreak` because xAI reprices the ENTIRE
+  // request above that prompt size — see `TierBreak`. With grok-4.6 at 500K and
+  // grok-4.3 at 1M context, crossing the break is the expected case here, not an
+  // edge case, and a flat rate would under-report those turns by 2x.
+  //
+  // `cacheWrite: 0` at BOTH tiers is not a measured xAI rate — xAI publishes no
+  // cache-write price, and the OpenAI-compat transport these models are served
+  // through reports `cacheCreationTokens: 0` on every call
+  // (extensions/llm-openai-compat/src/transport.ts:289), so the bucket is always
+  // empty. 0 is this table's standing convention for "provider does not bill a
+  // distinct cache-write" (see the header). It is a placeholder, not a finding:
+  // if xAI starts billing cache writes, this is the number that is wrong.
+  //
+  // OPENROUTER COLLISION, DECLINED. `findRate` is a substring test, so
+  // `x-ai/grok-4.6` would otherwise match the bare `grok-4.6` row below. Those
+  // ids are already reachable — packages/wiring/scripts/sources/openrouter.ts
+  // allowlists the `x-ai/grok` prefix — and pricing them off these rows would
+  // report xAI's DIRECT list price for a call OpenRouter billed at its own.
+  //
+  // So every row here carries `excludeIdsContaining: ['x-ai/']`, and an
+  // OpenRouter-routed Grok id keeps reporting `basis: 'unknown'` exactly as it
+  // did before these rows existed. The reasoning that would have justified
+  // reusing the direct price — that OpenRouter resells at the upstream
+  // per-token rate and takes its margin elsewhere — is an unverified premise
+  // about someone else's margin model, and an honest unknown beats a
+  // confidently-wrong number. Pricing those ids needs OpenRouter's own rates in
+  // an `x-ai/`-prefixed row; until someone has them, there is no row.
+  {
+    prefix: 'grok-4.6',
+    input: 2.0,
+    output: 6.0,
+    cacheRead: 0.5,
+    cacheWrite: 0,
+    excludeIdsContaining: ['x-ai/'],
+    tierBreak: {
+      abovePromptTokens: 200_000,
+      input: 4.0,
+      output: 12.0,
+      cacheRead: 1.0,
+      cacheWrite: 0,
+    },
+  },
+  {
+    prefix: 'grok-4.5',
+    input: 2.0,
+    output: 6.0,
+    cacheRead: 0.3,
+    cacheWrite: 0,
+    excludeIdsContaining: ['x-ai/'],
+    tierBreak: {
+      abovePromptTokens: 200_000,
+      input: 4.0,
+      output: 12.0,
+      cacheRead: 0.6,
+      cacheWrite: 0,
+    },
+  },
+  {
+    prefix: 'grok-4.3',
+    input: 1.25,
+    output: 2.5,
+    cacheRead: 0.2,
+    cacheWrite: 0,
+    excludeIdsContaining: ['x-ai/'],
+    tierBreak: {
+      abovePromptTokens: 200_000,
+      input: 2.5,
+      output: 5.0,
+      cacheRead: 0.4,
+      cacheWrite: 0,
+    },
+  },
+  {
+    prefix: 'grok-build-0.1',
+    input: 1.0,
+    output: 2.0,
+    cacheRead: 0.2,
+    cacheWrite: 0,
+    excludeIdsContaining: ['x-ai/'],
+    tierBreak: {
+      abovePromptTokens: 200_000,
+      input: 2.0,
+      output: 4.0,
+      cacheRead: 0.4,
+      cacheWrite: 0,
+    },
+  },
 ];
 
-/** First row whose prefix is a substring of `model`, or undefined. */
+/**
+ * First row whose prefix is a substring of `model` and whose
+ * `excludeIdsContaining` does not also match it, or undefined.
+ */
 export function findRate(model: string): ModelRate | undefined {
   const id = model.toLowerCase();
-  return MODEL_PRICING.find((r) => id.includes(r.prefix));
+  return MODEL_PRICING.find(
+    (r) => id.includes(r.prefix) && !r.excludeIdsContaining?.some((x) => id.includes(x)),
+  );
 }

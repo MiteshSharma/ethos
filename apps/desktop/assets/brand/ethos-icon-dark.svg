@@ -4,7 +4,7 @@
       <feDropShadow dx="0" dy="0" stdDeviation="12" flood-color="#4A9EFF" flood-opacity="0.5"/>
     </filter>
   </defs>
-  <rect x="16" y="16" width="480" height="480" rx="108" fill="#0F0F0F"/>
+  <circle cx="256" cy="256" r="240" fill="#0F0F0F"/>
   <path fill="#4A9EFF" fill-rule="evenodd" filter="url(#glow)"
     d="M256 81 A175 175 0 1 1 256 431 A175 175 0 1 1 256 81 Z
        M256 178 A78 78 0 1 0 256 334 A78 78 0 1 0 256 178 Z"/>

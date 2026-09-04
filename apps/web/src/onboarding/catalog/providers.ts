@@ -4,7 +4,8 @@ export type CatalogProviderId =
   | 'openrouter'
   | 'openai-compat'
   | 'ollama'
-  | 'codex';
+  | 'codex'
+  | 'xai';
 
 export interface ProviderCatalogEntry {
   id: CatalogProviderId;
@@ -19,7 +20,7 @@ export interface ProviderCatalogEntry {
     keyless?: boolean;
   };
   /** The ProviderId we wire through to the server */
-  wiresAs: 'anthropic' | 'openrouter' | 'openai-compat' | 'ollama' | 'codex';
+  wiresAs: 'anthropic' | 'openrouter' | 'openai-compat' | 'ollama' | 'codex' | 'xai';
 }
 
 export const PROVIDER_CATALOG: ProviderCatalogEntry[] = [
@@ -51,6 +52,19 @@ export const PROVIDER_CATALOG: ProviderCatalogEntry[] = [
     signupUrl: 'https://openrouter.ai/keys',
     baseUrl: { default: 'https://openrouter.ai/api/v1' },
     wiresAs: 'openrouter',
+  },
+  {
+    id: 'xai',
+    // Deliberate: Grok is premium and paid with no free tier, so `recommended`
+    // stays falsy and it renders behind "Show all providers" — same call
+    // already recorded in packages/wiring/src/provider-catalog.ts. No `baseUrl`
+    // block: the provider pins https://api.x.ai/v1 and ignores any configured
+    // value, so prompting for a URL would offer a choice that does nothing.
+    label: 'xAI Grok',
+    description: 'Grok models direct from xAI — paid API, no free tier.',
+    authType: 'api-key',
+    signupUrl: 'https://console.x.ai/',
+    wiresAs: 'xai',
   },
   {
     id: 'openai-compat',

@@ -5,6 +5,7 @@ import { bedrockFactory } from '@ethosagent/llm-bedrock';
 import { codexFactory } from '@ethosagent/llm-codex';
 import { geminiNativeFactory } from '@ethosagent/llm-gemini-native';
 import { OPENAI_COMPAT_ALIASES, openaiCompatFactory } from '@ethosagent/llm-openai-compat';
+import { xaiFactory } from '@ethosagent/llm-xai';
 import type {
   ConfigOnlyProviderManifest,
   LLMProviderFactory,
@@ -61,6 +62,13 @@ export function registerBuiltinProviders(registry: LLMProviderRegistry): void {
     return geminiNativeFactory(ctx);
   };
   registry.register('gemini-native', validatedGeminiNative);
+
+  // xAI (Grok): no SSRF gate — the provider pins its own baseUrl and ignores
+  // the config's, so there is no operator-supplied URL to validate. Registered
+  // exactly once: `xai` is deliberately absent from OPENAI_COMPAT_ALIASES and
+  // from BUILTIN_CONFIG_PROVIDERS, because the registry THROWS on a duplicate id
+  // and both lists are iterated onto this same registry.
+  registry.register('xai', xaiFactory);
 
   // Config-only providers from built-in manifests
   for (const manifest of BUILTIN_CONFIG_PROVIDERS) {

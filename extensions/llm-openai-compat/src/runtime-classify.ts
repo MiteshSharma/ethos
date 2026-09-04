@@ -38,6 +38,13 @@ export const HOSTED_PROVIDER_ALIASES: ReadonlySet<string> = new Set([
   'mistral',
   'together',
   'fireworks',
+  // xAI is served by its own extension (@ethosagent/llm-xai), which pins
+  // https://api.x.ai/v1. `detectLocalRuntime` is still called with the CONFIG's
+  // baseUrl (packages/wiring/src/index.ts), so a leftover or proxied
+  // `baseUrl:` on :11434/:1234/:8080 would otherwise classify a paid hosted
+  // provider as a local runtime — silently costing $0 and taking the local
+  // context-window path.
+  'xai',
 ]);
 
 /**

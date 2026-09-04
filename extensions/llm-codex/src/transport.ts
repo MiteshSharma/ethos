@@ -80,9 +80,12 @@ export interface ResponsesApiBody {
   model: string;
   input: unknown[];
   stream: true;
-  store: boolean;
-  reasoning: { effort: string; summary: string };
-  include: string[];
+  // `store`, `reasoning` and `include` are Codex's choices, not the API's
+  // requirements. They are optional so a second consumer of this transport can
+  // omit what it does not want rather than send an empty placeholder.
+  store?: boolean;
+  reasoning?: { effort: string; summary: string };
+  include?: string[];
   instructions?: string;
   tools?: unknown[];
   tool_choice?: string;
@@ -106,7 +109,14 @@ export async function* streamResponsesApi(
   body: ResponsesApiBody,
   signal?: AbortSignal,
   requestTokens?: { system: number; tools: number; messages: number },
+  providerLabel?: string,
 ): AsyncIterable<CompletionChunk> {
+  // This transport is shared by every provider that speaks the Responses API
+  // (ARCHITECTURE.md:264-265), so the failure message must name the caller's
+  // vendor — an xAI 401 reported as a Codex error sends the operator to the
+  // wrong console. Callers pass their own label; with none, stay neutral.
+  const apiLabel = providerLabel ? `${providerLabel} Responses API` : 'Responses API';
+
   const response = await fetch(endpoint, {
     method: 'POST',
     headers: {
@@ -119,11 +129,11 @@ export async function* streamResponsesApi(
 
   if (!response.ok) {
     const text = await response.text().catch(() => '');
-    throw new Error(`Codex Responses API error ${response.status}: ${text || response.statusText}`);
+    throw new Error(`${apiLabel} error ${response.status}: ${text || response.statusText}`);
   }
 
   if (!response.body) {
-    throw new Error('Codex Responses API returned no body');
+    throw new Error(`${apiLabel} returned no body`);
   }
 
   // Track tool calls in flight for mapping deltas to tool IDs.
@@ -196,11 +206,20 @@ export async function* streamResponsesApi(
               usage?: {
                 input_tokens?: number;
                 output_tokens?: number;
+                cached_tokens?: number;
+                input_tokens_details?: { cached_tokens?: number };
               };
             }
           | undefined;
         const inputTokens = resp?.usage?.input_tokens ?? 0;
         const outputTokens = resp?.usage?.output_tokens ?? 0;
+        // Prompt-cache hits. The Responses API nests them under
+        // `input_tokens_details`; some vendors flatten them onto `usage`, so read
+        // both and fall back to 0 when neither is reported. This reads 0 for xAI
+        // until a stable per-session cache key reaches `CompletionOptions`
+        // (deferred in plan/uncompleted-tasks.md) — expected, not a bug.
+        const cacheReadTokens =
+          resp?.usage?.input_tokens_details?.cached_tokens ?? resp?.usage?.cached_tokens ?? 0;
 
         // Codex model ids that the shared table knows price normally; the
         // rest resolve to 0 AND report `pricing.unknown_model`, so a
@@ -210,7 +229,7 @@ export async function* streamResponsesApi(
         const usage: TokenUsage = {
           inputTokens,
           outputTokens,
-          cacheReadTokens: 0,
+          cacheReadTokens,
           cacheCreationTokens: 0,
           estimatedCostUsd: costEstimate.costUsd,
           requestTokens,

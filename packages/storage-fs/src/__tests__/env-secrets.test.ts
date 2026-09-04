@@ -41,6 +41,7 @@ describe('resolveEnvKey', () => {
     expect(resolveEnvKey('OPENAI_API_KEY')).toBe('providers/openai/apiKey');
     expect(resolveEnvKey('EXA_API_KEY')).toBe('providers/exa/apiKey');
     expect(resolveEnvKey('REPLICATE_API_TOKEN')).toBe('providers/replicate/apiToken');
+    expect(resolveEnvKey('XAI_API_KEY')).toBe('providers/xai/apiKey');
   });
 
   it('returns null for unknown env keys', () => {
@@ -90,6 +91,10 @@ describe('REF_TO_ENV', () => {
 
   it('maps providers/replicate/apiToken → REPLICATE_API_TOKEN', () => {
     expect(REF_TO_ENV.get('providers/replicate/apiToken')).toBe('REPLICATE_API_TOKEN');
+  });
+
+  it('maps providers/xai/apiKey → XAI_API_KEY', () => {
+    expect(REF_TO_ENV.get('providers/xai/apiKey')).toBe('XAI_API_KEY');
   });
 
   it('has an entry for every key in ENV_TO_REF', () => {
@@ -147,6 +152,17 @@ describe('EnvSecretsResolver.get', () => {
     const resolver = new EnvSecretsResolver();
     const val = await resolver.get('totally/unknown/ref');
     expect(val).toBeNull();
+  });
+
+  it('resolves providers/xai/apiKey from XAI_API_KEY', async () => {
+    process.env.XAI_API_KEY = 'xai-test';
+    const resolver = new EnvSecretsResolver();
+    expect(await resolver.get('providers/xai/apiKey')).toBe('xai-test');
+  });
+
+  it('returns null — not an empty string — when XAI_API_KEY is unset', async () => {
+    const resolver = new EnvSecretsResolver();
+    expect(await resolver.get('providers/xai/apiKey')).toBeNull();
   });
 
   it('reads from process.env at call time (not at construction time)', async () => {

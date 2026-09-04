@@ -58,6 +58,7 @@
     "@ethosagent/llm-codex": "workspace:*",
     "@ethosagent/llm-gemini-native": "workspace:*",
     "@ethosagent/llm-openai-compat": "workspace:*",
+    "@ethosagent/llm-xai": "workspace:*",
     "@ethosagent/logger": "workspace:*",
     "@ethosagent/memory-approval": "workspace:*",
     "@ethosagent/memory-capture": "workspace:*",

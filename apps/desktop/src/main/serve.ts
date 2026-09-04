@@ -55,11 +55,12 @@ export function getDataDir(): string {
  * `call_capture` in its toolset had no STT provider even when the CLI's
  * `ethos serve` worked fine against the exact same `~/.ethos/config.yaml`.
  *
- * `callCapture.personalityId` closes a startup crash: `voice` (a built-in
- * personality) ships the `call_capture` toolset capability unconditionally,
- * and `validateCallCaptureBinding()` throws whenever exactly one personality
- * holds that capability and `callCapture.personalityId` is unset in the
- * effective `WiringConfig`. Desktop's own `callCapturePersonalityId` store
+ * `callCapture.personalityId` closes a startup crash: a personality could
+ * ship the `call_capture` toolset capability unconditionally (no built-in
+ * currently does; a custom one might), and `validateCallCaptureBinding()`
+ * throws whenever exactly one personality holds that capability and
+ * `callCapture.personalityId` is unset in the effective `WiringConfig`.
+ * Desktop's own `callCapturePersonalityId` store
  * field (see `store.ts`) has no Settings UI to ever set it, so without this
  * fallback a fresh desktop install — or any user who hasn't hand-edited the
  * Electron store's JSON directly — hit that throw on every startup, taking

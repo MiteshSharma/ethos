@@ -24,6 +24,12 @@ const PATTERNS: ReadonlyArray<{ label: string; tag: string; regex: RegExp }> = [
   },
   { label: 'Stripe key', tag: '[REDACTED:stripe-key]', regex: /sk_live_[A-Za-z0-9]{24,}/g },
   { label: 'Groq API key', tag: '[REDACTED:groq-key]', regex: /gsk_[A-Za-z0-9]{20,}/g },
+  // xAI documents keys only as "xai- followed by a long alphanumeric string" and
+  // publishes no fixed length, so the floor is a conservative 20 (same as Groq's)
+  // rather than a guessed exact width: long enough that prose cannot trip it,
+  // short enough that no real key is missed. Confidence: MED on the body length,
+  // HIGH on the `xai-` prefix.
+  { label: 'xAI API key', tag: '[REDACTED:xai-key]', regex: /xai-[A-Za-z0-9]{20,}/g },
   {
     label: 'Generic secret',
     tag: '[REDACTED:generic-secret]',

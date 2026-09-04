@@ -393,6 +393,32 @@ export const MODEL_CATALOG: ModelCatalogEntry[] = [
     label: 'compact, prior gen',
     contextWindow: 200_000,
   },
+  // xAI Grok — direct API. baseUrl: https://api.x.ai/v1
+  // No sampling `profile` on any of these rows, deliberately: whether Grok
+  // accepts `temperature`, `top_p` and `seed` is unverified against a live
+  // endpoint (xai-grok-provider open question 2), and `applySamplingDefaults`
+  // would put a catalog profile's values on the wire on every turn. Add a
+  // profile only once that probe passes.
+  {
+    providerId: 'xai',
+    modelId: 'grok-4.6',
+    label: 'most capable',
+    contextWindow: 500_000,
+    default: true,
+  },
+  { providerId: 'xai', modelId: 'grok-4.5', label: 'prior gen', contextWindow: 500_000 },
+  {
+    providerId: 'xai',
+    modelId: 'grok-4.3',
+    label: 'long context, cheaper',
+    contextWindow: 1_000_000,
+  },
+  {
+    providerId: 'xai',
+    modelId: 'grok-build-0.1',
+    label: 'code-specialized',
+    contextWindow: 256_000,
+  },
 ];
 
 /**

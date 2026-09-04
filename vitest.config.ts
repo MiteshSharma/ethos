@@ -51,6 +51,7 @@ export const srcAliases = {
   '@ethosagent/llm-bedrock': resolve('./extensions/llm-bedrock/src'),
   '@ethosagent/llm-openai-compat': resolve('./extensions/llm-openai-compat/src'),
   '@ethosagent/llm-codex': resolve('./extensions/llm-codex/src'),
+  '@ethosagent/llm-xai': resolve('./extensions/llm-xai/src'),
   '@ethosagent/logger': resolve('./packages/logger/src'),
   '@ethosagent/pricing': resolve('./packages/pricing/src'),
 };

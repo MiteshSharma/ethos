@@ -66,6 +66,18 @@ describe('KEY_CATALOG', () => {
     ]);
   });
 
+  it('keeps the one xAI key as a single tools row serving Grok and x_search', () => {
+    const xai = KEY_CATALOG.filter((e) => e.refPattern === 'providers/xai/apiKey');
+    // One entry, not one per consumer — two rows would be two write paths.
+    expect(xai).toHaveLength(1);
+    expect(xai[0]?.id).toBe('tools.xai');
+    expect(xai[0]?.category).toBe('tools');
+    expect(xai[0]?.label).toBe('xAI (Grok + X search)');
+    // Not a NamedSecretsService provider (that vault is exa/tavily/brave only),
+    // so the row stays directly editable here.
+    expect(xai[0]?.reflectsNamedSecret).toBeUndefined();
+  });
+
   it('gives every indexed entry a <n> placeholder, and no other entry one', () => {
     for (const entry of KEY_CATALOG) {
       const hasPlaceholder = refsForEntry(entry).some((ref) => ref.includes('<n>'));

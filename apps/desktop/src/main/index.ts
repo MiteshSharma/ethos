@@ -332,6 +332,7 @@ async function createWindow(): Promise<void> {
     y: bounds?.y,
     resizable: !isOnboarding,
     show: false,
+    ...(app.isPackaged ? {} : { icon: join(app.getAppPath(), 'assets', 'brand', 'icon-1024.png') }),
     webPreferences: {
       preload: join(__dirname, '..', 'preload', 'index.js'),
       contextIsolation: true,
@@ -397,6 +398,10 @@ app
     }
 
     registerIpcHandlers();
+
+    if (!app.isPackaged && process.platform === 'darwin') {
+      app.dock?.setIcon(join(app.getAppPath(), 'assets', 'brand', 'icon-1024.png'));
+    }
 
     // Asked once, before anything boots, so choosing remote never starts a local
     // backend. An unset `connectionMode` is the only trigger.
