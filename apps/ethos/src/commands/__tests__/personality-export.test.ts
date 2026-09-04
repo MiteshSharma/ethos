@@ -1,5 +1,10 @@
-import { describe, expect, it } from 'vitest';
-import { buildTar, type Entry, parseTar } from '../backup';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { gunzipSync } from 'node:zlib';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { buildTar, type Entry, parseTar, parseVaultManifest } from '../backup';
+import { runPersonalityExport } from '../personality-export';
 
 // ---------------------------------------------------------------------------
 // Test group 1: Backup archive content
@@ -100,7 +105,7 @@ describe('secrets.manifest.yaml format', () => {
       'mcp_auth:',
       '  - server: github',
       '    description: OAuth token for MCP server "github" (stripped from export)',
-      '    fill_with: "ethos mcp auth github"',
+      "    fill_with: ethos mcp auth 'github'",
       '',
     ].join('\n');
     const entries: Entry[] = [
@@ -282,5 +287,430 @@ describe('backup — cron/jobs.json inclusion', () => {
     if (cronEntry) {
       expect(cronEntry[1].toString()).toBe(cronContent);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Test group 8: secrets.manifest.yaml paste lines are shell-quoted
+// ---------------------------------------------------------------------------
+
+/**
+ * Decode ONE POSIX single-quoted argument back to its literal text, refusing
+ * anything a shell would not read as a single word: a character outside the
+ * quotes, an unterminated quote, or junk between two quoted runs. A name that
+ * survives this round trip cannot have broken out of the quoting.
+ */
+function decodeSingleQuoted(arg: string): string {
+  let text = '';
+  let i = 0;
+  while (i < arg.length) {
+    if (arg[i] !== "'") throw new Error(`unquoted text at ${i}: ${arg}`);
+    const close = arg.indexOf("'", i + 1);
+    if (close < 0) throw new Error(`unterminated quote: ${arg}`);
+    text += arg.slice(i + 1, close);
+    i = close + 1;
+    if (i < arg.length) {
+      if (arg.slice(i, i + 2) !== "\\'") throw new Error(`junk between quotes: ${arg}`);
+      text += "'";
+      i += 2;
+    }
+  }
+  return text;
+}
+
+const argsAfter = (manifest: string, prefix: string): string[] =>
+  manifest
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line.startsWith(prefix))
+    .map((line) => line.slice(prefix.length));
+
+// Every `fill_with:` line in the export manifest exists to be PASTED into a
+// terminal. Its argument is a config.yaml field name or an MCP server DIRECTORY
+// name — both read off disk verbatim, neither re-checked. Unquoted, one with a
+// space produces a broken command and one with `$(…)` or `;` produces a line
+// that runs something else entirely.
+describe('personality export — secrets manifest paste lines', () => {
+  let stateDir: string;
+  let prevStateDir: string | undefined;
+
+  beforeEach(async () => {
+    stateDir = await mkdtemp(join(tmpdir(), 'ethos-export-quote-'));
+    prevStateDir = process.env.ETHOS_STATE_DIR;
+    process.env.ETHOS_STATE_DIR = stateDir;
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+  });
+
+  afterEach(async () => {
+    vi.restoreAllMocks();
+    if (prevStateDir === undefined) delete process.env.ETHOS_STATE_DIR;
+    else process.env.ETHOS_STATE_DIR = prevStateDir;
+    await rm(stateDir, { recursive: true, force: true });
+  });
+
+  // Field names are lowercased by the config scan; server names are not.
+  const FIELDS = ['has space token', 'has;semicolon token', 'has$(id)sub token', "o'brien token"];
+  const SERVERS = ['git hub', 'a;rm -rf ~', '$(id)', "o'brien"];
+
+  async function exportManifest(): Promise<string> {
+    const dir = join(stateDir, 'personalities', 'demo');
+    await mkdir(dir, { recursive: true });
+    await writeFile(
+      join(dir, 'config.yaml'),
+      ['name: Demo', ...FIELDS.map((f) => `${f}: sk-must-never-print`), ''].join('\n'),
+    );
+    await writeFile(join(dir, 'SOUL.md'), '# Demo\n');
+    await writeFile(join(dir, 'toolset.yaml'), '- read_file\n');
+    for (const server of SERVERS) {
+      await mkdir(join(dir, 'mcp', server), { recursive: true });
+      await writeFile(join(dir, 'mcp', server, 'access_token'), 'tok-must-never-print');
+    }
+
+    const out = join(stateDir, 'bundle.tar.gz');
+    await runPersonalityExport(['demo', '--output', out]);
+    const entries = parseTar(gunzipSync(await readFile(out)));
+    const manifest = entries.find(([relPath]) => relPath === 'secrets.manifest.yaml');
+    if (!manifest) throw new Error('bundle has no secrets.manifest.yaml');
+    return manifest[1].toString('utf8');
+  }
+
+  it('quotes an unknown secret field so no metacharacter reaches the shell', async () => {
+    const manifest = await exportManifest();
+
+    expect(manifest).toContain(`    fill_with: ethos secrets set 'has space token' <value>`);
+    expect(manifest).toContain(`    fill_with: ethos secrets set 'has;semicolon token' <value>`);
+    expect(manifest).toContain(`    fill_with: ethos secrets set 'has$(id)sub token' <value>`);
+    expect(manifest).toContain(`    fill_with: ethos secrets set 'o'\\''brien token' <value>`);
+
+    const args = argsAfter(manifest, 'fill_with: ethos secrets set ').map((rest) =>
+      rest.slice(0, rest.lastIndexOf(' <value>')),
+    );
+    expect(args).toHaveLength(FIELDS.length);
+    expect(args.map(decodeSingleQuoted).sort()).toEqual([...FIELDS].sort());
+  });
+
+  it('quotes a stripped MCP server name so no metacharacter reaches the shell', async () => {
+    const manifest = await exportManifest();
+
+    expect(manifest).toContain(`    fill_with: ethos mcp auth 'git hub'`);
+    expect(manifest).toContain(`    fill_with: ethos mcp auth 'a;rm -rf ~'`);
+    expect(manifest).toContain(`    fill_with: ethos mcp auth '$(id)'`);
+    expect(manifest).toContain(`    fill_with: ethos mcp auth 'o'\\''brien'`);
+
+    const args = argsAfter(manifest, 'fill_with: ethos mcp auth ');
+    expect(args).toHaveLength(SERVERS.length);
+    expect(args.map(decodeSingleQuoted).sort()).toEqual([...SERVERS].sort());
+  });
+
+  // The quoting stops at the command argument. `- key:` and `- server:` are
+  // DATA the import path parses back, so they stay verbatim.
+  it('leaves the - key: / - server: data fields unquoted and parsing unchanged', async () => {
+    const manifest = await exportManifest();
+
+    for (const field of FIELDS) expect(manifest).toContain(`  - key: ${field}\n`);
+    for (const server of SERVERS) expect(manifest).toContain(`  - server: ${server}\n`);
+
+    // Round trip through the reader the import path uses: every key comes back
+    // byte-identical, and no manifest line leaks a secret value.
+    const keys = parseVaultManifest(manifest)
+      .map((h) => h.key)
+      .filter((k): k is string => k !== undefined);
+    expect(keys.sort()).toEqual([...FIELDS].sort());
+    expect(manifest).not.toContain('sk-must-never-print');
+    expect(manifest).not.toContain('tok-must-never-print');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Test group 9: plugins.manifest.yaml paste lines are shell-quoted
+// ---------------------------------------------------------------------------
+
+// `install:` is the same paste-line class as `fill_with:` above. Its argument is
+// either a `plugins:` id out of the personality's config.yaml or a `name` read
+// out of a package.json under ~/.ethos/plugins/node_modules — both read off disk
+// verbatim, and both travelling in a bundle whoever authored it controls.
+//
+// plugins.manifest.yaml is DISPLAY ONLY: `runPersonalityImport` never parses it,
+// it only lists the filename in `skipFiles` so the file is not written into the
+// personality directory. So the quoting changes nothing that is read back, and
+// the only thing the line can hurt is the operator who pastes it.
+describe('personality export — plugins manifest paste lines', () => {
+  let stateDir: string;
+  let prevStateDir: string | undefined;
+
+  beforeEach(async () => {
+    stateDir = await mkdtemp(join(tmpdir(), 'ethos-export-plugins-quote-'));
+    prevStateDir = process.env.ETHOS_STATE_DIR;
+    process.env.ETHOS_STATE_DIR = stateDir;
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+  });
+
+  afterEach(async () => {
+    vi.restoreAllMocks();
+    if (prevStateDir === undefined) delete process.env.ETHOS_STATE_DIR;
+    else process.env.ETHOS_STATE_DIR = prevStateDir;
+    await rm(stateDir, { recursive: true, force: true });
+  });
+
+  // A `plugins:` id cannot hold a space: the `plugins:` config line is split on
+  // whitespace, so a space makes two ids rather than one hostile one. The space
+  // case is carried by the package NAME, which comes out of JSON and can hold
+  // anything.
+  const IDS = ['a;rm', '$(id)', "o'brien"];
+  const HOSTILE_PACKAGE = "pkg name;$(id) o'brien";
+  const INSTALL_PREFIX = 'install: ethos plugin install ';
+
+  /**
+   * Export `demo` and hand back its plugins.manifest.yaml. With no `packages`,
+   * ~/.ethos/plugins/node_modules never exists and the export takes the
+   * ids-only branch; with packages, it takes the resolved branch for whichever
+   * ids a package.json claims and the ids-only fallback for the rest.
+   */
+  async function exportPluginsManifest(
+    packages: Array<{ dir: string; json: Record<string, unknown> }> = [],
+  ): Promise<string> {
+    const dir = join(stateDir, 'personalities', 'demo');
+    await mkdir(dir, { recursive: true });
+    await writeFile(join(dir, 'config.yaml'), `name: Demo\nplugins: ${IDS.join(' ')}\n`);
+    await writeFile(join(dir, 'SOUL.md'), '# Demo\n');
+    await writeFile(join(dir, 'toolset.yaml'), '- read_file\n');
+
+    for (const pkg of packages) {
+      const pkgDir = join(stateDir, 'plugins', 'node_modules', pkg.dir);
+      await mkdir(pkgDir, { recursive: true });
+      await writeFile(join(pkgDir, 'package.json'), JSON.stringify(pkg.json));
+    }
+
+    const out = join(stateDir, 'bundle.tar.gz');
+    await runPersonalityExport(['demo', '--output', out]);
+    const entries = parseTar(gunzipSync(await readFile(out)));
+    const manifest = entries.find(([relPath]) => relPath === 'plugins.manifest.yaml');
+    if (!manifest) throw new Error('bundle has no plugins.manifest.yaml');
+    return manifest[1].toString('utf8');
+  }
+
+  it('quotes a plugin id when no plugin is installed to resolve it', async () => {
+    const manifest = await exportPluginsManifest();
+
+    expect(manifest).toContain(`    install: ethos plugin install 'a;rm'`);
+    expect(manifest).toContain(`    install: ethos plugin install '$(id)'`);
+    expect(manifest).toContain(`    install: ethos plugin install 'o'\\''brien'`);
+
+    const args = argsAfter(manifest, INSTALL_PREFIX);
+    expect(args).toHaveLength(IDS.length);
+    expect(args.map(decodeSingleQuoted).sort()).toEqual([...IDS].sort());
+  });
+
+  it('quotes a resolved package name, and the id when nothing resolves it', async () => {
+    const manifest = await exportPluginsManifest([
+      {
+        dir: 'hostile-plugin',
+        json: { name: HOSTILE_PACKAGE, version: '1.2.3', ethos: { id: 'a;rm' } },
+      },
+    ]);
+
+    expect(manifest).toContain(`    install: ethos plugin install 'pkg name;$(id) o'\\''brien'`);
+
+    const args = argsAfter(manifest, INSTALL_PREFIX);
+    expect(args).toHaveLength(IDS.length);
+    expect(args.map(decodeSingleQuoted).sort()).toEqual(
+      [HOSTILE_PACKAGE, '$(id)', "o'brien"].sort(),
+    );
+  });
+
+  // The quoting stops at the command argument. `- id:`, `package:` and
+  // `version:` are data lines, not commands, and stay exactly as they were.
+  it('leaves the - id: / package: / version: data fields unquoted', async () => {
+    const manifest = await exportPluginsManifest([
+      {
+        dir: 'hostile-plugin',
+        json: { name: HOSTILE_PACKAGE, version: '1.2.3', ethos: { id: 'a;rm' } },
+      },
+    ]);
+
+    for (const id of IDS) expect(manifest).toContain(`  - id: ${id}\n`);
+    expect(manifest).toContain(`    package: "${HOSTILE_PACKAGE}"\n`);
+    expect(manifest).toContain('    version: "1.2.3"\n');
+    // Never a double-quoted YAML string wrapping the command: `\'` is not a
+    // YAML escape, so `"… '\''…"` would not parse.
+    expect(manifest).not.toContain('install: "ethos plugin install');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Test group 10: a newline is not a shell problem — it is a FORMAT problem
+// ---------------------------------------------------------------------------
+//
+// Single-quoting stops a metacharacter breaking out WITHIN a line and does
+// nothing about a newline, which does not break out of the shell at all: it
+// breaks out of the manifest. A name carrying one writes NEW lines — another
+// `fill_with:`/`install:` the operator is told to paste, another `- key:` /
+// `- server:` the import path parses back as data. Both files here are built by
+// string concatenation from names read off disk verbatim.
+describe('personality export — a name that would split a manifest is refused', () => {
+  let stateDir: string;
+  let prevStateDir: string | undefined;
+
+  beforeEach(async () => {
+    stateDir = await mkdtemp(join(tmpdir(), 'ethos-export-split-'));
+    prevStateDir = process.env.ETHOS_STATE_DIR;
+    process.env.ETHOS_STATE_DIR = stateDir;
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+  });
+
+  afterEach(async () => {
+    vi.restoreAllMocks();
+    if (prevStateDir === undefined) delete process.env.ETHOS_STATE_DIR;
+    else process.env.ETHOS_STATE_DIR = prevStateDir;
+    await rm(stateDir, { recursive: true, force: true });
+  });
+
+  /**
+   * Everything that is NOT a comment. The refusal notice names the refused
+   * string (escaped, on one line) on purpose, so a bare `toContain` would see
+   * it; what must not exist is a forged line a READER would take as data.
+   */
+  const dataLines = (manifest: string): string =>
+    manifest
+      .split('\n')
+      .filter((l) => !l.trimStart().startsWith('#'))
+      .join('\n');
+
+  /** `\n` is the only control character a manifest may contain. */
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: finding them is the point
+  const RAW_CONTROL = /[\u0000-\u0009\u000b-\u001f\u007f]/;
+
+  async function seed(configLines: string[]): Promise<string> {
+    const dir = join(stateDir, 'personalities', 'demo');
+    await mkdir(dir, { recursive: true });
+    await writeFile(join(dir, 'config.yaml'), `${['name: Demo', ...configLines, ''].join('\n')}`);
+    await writeFile(join(dir, 'SOUL.md'), '# Demo\n');
+    await writeFile(join(dir, 'toolset.yaml'), '- read_file\n');
+    return dir;
+  }
+
+  async function exportAndRead(name: string): Promise<string | undefined> {
+    const out = join(stateDir, 'bundle.tar.gz');
+    await runPersonalityExport(['demo', '--output', out]);
+    const entries = parseTar(gunzipSync(await readFile(out)));
+    return entries.find(([relPath]) => relPath === name)?.[1].toString('utf8');
+  }
+
+  // A config.yaml field name cannot hold an LF — the scan splits the file on
+  // `\n` first — but it can hold a CR, and CR is a line terminator to a real
+  // YAML reader and to anything that trims a line's end.
+  it('leaves out a secret field name carrying a carriage return', async () => {
+    await seed(['clean_token: sk-must-never-print', 'evil\r  - key: PWNED_token: x']);
+
+    const manifest = await exportAndRead('secrets.manifest.yaml');
+    expect(manifest).toBeDefined();
+    if (!manifest) return;
+
+    expect(dataLines(manifest)).not.toContain('PWNED');
+    expect(manifest).not.toMatch(RAW_CONTROL);
+    expect(manifest).toContain('  - key: clean_token');
+    expect(manifest).toContain('# ⚠ 1 name(s) REFUSED');
+    expect(manifest).toContain('\\u000d');
+    // The reader the import path uses sees exactly the one real key.
+    expect(
+      parseVaultManifest(manifest)
+        .map((h) => h.key)
+        .filter((k) => k !== undefined),
+    ).toEqual(['clean_token']);
+    expect(manifest).not.toContain('sk-must-never-print');
+  });
+
+  // MCP server names are DIRECTORY names, and Unix permits a newline in one.
+  it('leaves out an MCP server directory name carrying a newline', async () => {
+    const dir = await seed([]);
+    for (const server of ['github', 'evil\n  - server: PWNED']) {
+      await mkdir(join(dir, 'mcp', server), { recursive: true });
+      await writeFile(join(dir, 'mcp', server, 'access_token'), 'tok-must-never-print');
+    }
+
+    const manifest = await exportAndRead('secrets.manifest.yaml');
+    expect(manifest).toBeDefined();
+    if (!manifest) return;
+
+    expect(dataLines(manifest)).not.toContain('PWNED');
+    expect(manifest).not.toMatch(RAW_CONTROL);
+    expect(manifest).toContain('  - server: github');
+    expect(manifest).toContain('# ⚠ 1 name(s) REFUSED');
+    expect(manifest).toContain('\\u000a');
+    expect(
+      dataLines(manifest)
+        .split('\n')
+        .filter((l) => l.includes('- server:')),
+    ).toHaveLength(1);
+    expect(manifest).not.toContain('tok-must-never-print');
+  });
+
+  // `name` and `version` come out of a bundled package.json, so unlike an id
+  // off a whitespace-split config line they really can hold a literal newline.
+  it('falls back to the id when a resolved package NAME carries a newline', async () => {
+    await seed(['plugins: acme']);
+    const pkgDir = join(stateDir, 'plugins', 'node_modules', 'acme');
+    await mkdir(pkgDir, { recursive: true });
+    await writeFile(
+      join(pkgDir, 'package.json'),
+      JSON.stringify({
+        name: 'acme\n    install: ethos plugin install PWNED',
+        version: '1.2.3',
+        ethos: { id: 'acme' },
+      }),
+    );
+
+    const manifest = await exportAndRead('plugins.manifest.yaml');
+    expect(manifest).toBeDefined();
+    if (!manifest) return;
+
+    expect(dataLines(manifest)).not.toContain('PWNED');
+    expect(manifest).not.toMatch(RAW_CONTROL);
+    // The plugin is still named and still installable, by its id.
+    expect(manifest).toContain('  - id: acme');
+    expect(manifest).toContain(`    install: ethos plugin install 'acme'\n`);
+    expect(manifest).not.toContain('    package:');
+    expect(manifest).toContain('# ⚠ 1 name(s) REFUSED');
+  });
+
+  it('falls back to the id when a resolved package VERSION carries a newline', async () => {
+    await seed(['plugins: acme']);
+    const pkgDir = join(stateDir, 'plugins', 'node_modules', 'acme');
+    await mkdir(pkgDir, { recursive: true });
+    await writeFile(
+      join(pkgDir, 'package.json'),
+      JSON.stringify({
+        name: 'acme',
+        version: '1.2.3"\n    install: ethos plugin install PWNED',
+        ethos: { id: 'acme' },
+      }),
+    );
+
+    const manifest = await exportAndRead('plugins.manifest.yaml');
+    expect(manifest).toBeDefined();
+    if (!manifest) return;
+
+    expect(dataLines(manifest)).not.toContain('PWNED');
+    expect(manifest).not.toMatch(RAW_CONTROL);
+    expect(manifest).toContain('  - id: acme');
+    expect(manifest).not.toContain('    version:');
+    expect(manifest).toContain('# ⚠ 1 name(s) REFUSED');
+  });
+
+  // `\s+` already drops CR and LF from an id, but not the rest of the C0
+  // range, so an id still reaches the emitter carrying something a YAML
+  // reader would choke on and a terminal would swallow.
+  it('leaves out a plugin id carrying a control character', async () => {
+    await seed([`plugins: clean evil${String.fromCharCode(1)}x`]);
+
+    const manifest = await exportAndRead('plugins.manifest.yaml');
+    expect(manifest).toBeDefined();
+    if (!manifest) return;
+
+    expect(manifest).not.toMatch(RAW_CONTROL);
+    expect(manifest).toContain('  - id: clean');
+    expect(manifest).not.toContain('  - id: evil');
+    expect(manifest).toContain('# ⚠ 1 name(s) REFUSED');
+    expect(manifest).toContain('\\u0001');
   });
 });

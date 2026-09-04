@@ -79,6 +79,8 @@ export async function runStatus(cmdArgs: string[] = []): Promise<void> {
       },
       adapters: buildAdapterJson(config),
       personalities: { count: personalityCount, dir: pdir },
+      cron: countCronJobs(),
+      backups: buildBackupJson(),
       errorLog: { exists: errorLogExists(), recentCount: readRecentErrors(10).length },
       exit: hardErrors > 0 ? 1 : 0,
     };
@@ -125,14 +127,31 @@ export async function runStatus(cmdArgs: string[] = []): Promise<void> {
   }
 
   // ---- Cron ------------------------------------------------------------
-  const cronDb = join(ethosDir(), 'cron', 'jobs.db');
-  if (existsSync(cronDb)) {
-    const s = statSync(cronDb);
+  const cron = countCronJobs();
+  if (cron.status === 'absent') {
+    console.log(`${c.dim}- cron          no scheduled jobs yet${c.reset}`);
+  } else if (cron.status === 'unreadable') {
     console.log(
-      `${G} ${c.bold}cron${c.reset}          jobs.db present ${c.dim}(${(s.size / 1024).toFixed(1)} KB, modified ${s.mtime.toISOString().slice(0, 10)}; run ${c.reset}${c.bold}ethos cron list${c.dim} for counts)${c.reset}`,
+      `${W} ${c.bold}cron${c.reset}          store unreadable or malformed ${c.dim}(${join(ethosDir(), 'cron', 'jobs.json')}: ${cron.detail})${c.reset}`,
     );
   } else {
-    console.log(`${c.dim}- cron          no scheduled jobs yet${c.reset}`);
+    console.log(
+      `${G} ${c.bold}cron${c.reset}          ${cron.total} job${cron.total === 1 ? '' : 's'}` +
+        `, ${cron.enabled} enabled ${c.dim}(run ${c.reset}${c.bold}ethos cron list${c.dim} for details)${c.reset}`,
+    );
+  }
+
+  // ---- Backups ---------------------------------------------------------
+  const last = lastBackup();
+  if (last === null) {
+    console.log(
+      `${c.dim}- backups       none in ${backupDir()} (run ${c.reset}${c.bold}ethos backup${c.dim})${c.reset}`,
+    );
+  } else {
+    console.log(
+      `${G} ${c.bold}backups${c.reset}       last ${last.mtime.toISOString().slice(0, 16).replace('T', ' ')}` +
+        ` ${c.dim}(${(last.size / 1024 / 1024).toFixed(1)} MB, ${last.name}${last.count > 1 ? `, ${last.count} kept` : ''})${c.reset}`,
+    );
   }
 
   // ---- MCP servers -----------------------------------------------------
@@ -276,6 +295,88 @@ function countChannelFilters(config: EthosConfig): number {
     }
   }
   return n;
+}
+
+/**
+ * Cron jobs live in `cron/jobs.json` — a `CronJob[]` written by
+ * `CronScheduler` (`extensions/cron/src/index.ts`). There has never been a
+ * `cron/jobs.db`: the check this replaces looked for a file nothing in the
+ * repo writes, so it always reported "no scheduled jobs yet".
+ *
+ * The three states are distinct on purpose. A store that cannot be read or
+ * parsed is an UNKNOWN number of jobs, and reporting it as `0` — as this did —
+ * states as a fact the one thing that was not established. That is the same
+ * mistake the `jobs.db` check this replaced made, one layer down.
+ */
+export type CronStoreState =
+  | { status: 'absent' }
+  | { status: 'ok'; total: number; enabled: number }
+  | { status: 'unreadable'; detail: string };
+
+export function countCronJobs(): CronStoreState {
+  const path = join(ethosDir(), 'cron', 'jobs.json');
+  if (!existsSync(path)) return { status: 'absent' };
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(path, 'utf-8'));
+    if (!Array.isArray(parsed)) return { status: 'unreadable', detail: 'not a JSON array' };
+    const enabled = parsed.filter(
+      (j) => typeof j === 'object' && j !== null && (!('enabled' in j) || j.enabled !== false),
+    ).length;
+    return { status: 'ok', total: parsed.length, enabled };
+  } catch (err) {
+    return { status: 'unreadable', detail: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+/**
+ * Where backups are kept. `backup.dir` is not a config field yet (T4 of
+ * plan/phases/agent-state-backup.md adds it); until then this is the plan's
+ * documented default and the path `ethos backup` writes to.
+ */
+export function backupDir(): string {
+  return join(ethosDir(), 'backups');
+}
+
+export interface LastBackup {
+  name: string;
+  size: number;
+  mtime: Date;
+  /** How many archives are kept in the directory. */
+  count: number;
+}
+
+/** The newest `.tar.gz` in the backup directory, or `null` when there is none. */
+export function lastBackup(): LastBackup | null {
+  const dir = backupDir();
+  if (!existsSync(dir)) return null;
+  let newest: LastBackup | null = null;
+  let count = 0;
+  try {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      if (!entry.isFile() || !entry.name.endsWith('.tar.gz')) continue;
+      count++;
+      const s = statSync(join(dir, entry.name));
+      if (newest === null || s.mtime > newest.mtime) {
+        newest = { name: entry.name, size: s.size, mtime: s.mtime, count: 0 };
+      }
+    }
+  } catch {
+    return null;
+  }
+  return newest === null ? null : { ...newest, count };
+}
+
+function buildBackupJson(): {
+  dir: string;
+  count: number;
+  last: { name: string; bytes: number; at: string } | null;
+} {
+  const last = lastBackup();
+  return {
+    dir: backupDir(),
+    count: last?.count ?? 0,
+    last: last && { name: last.name, bytes: last.size, at: last.mtime.toISOString() },
+  };
 }
 
 function countMeshPeers(meshDir: string): number {

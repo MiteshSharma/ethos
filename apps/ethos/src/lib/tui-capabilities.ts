@@ -78,7 +78,30 @@ export function makeTuiNotificationSubscriber(
   };
 }
 
-/** Single source for the skill-evolver proposal notice (readline + TUI). */
+/**
+ * Wrap one argument in POSIX single quotes, ending and reopening the quote
+ * around every embedded `'`. Inside single quotes a shell expands nothing, so
+ * spaces, `;`, `&`, backticks and `$(…)` are all literal.
+ *
+ * The same four lines live in `apps/ethos/src/commands/backup.ts`,
+ * `apps/ethos/src/commands/personality-export.ts`,
+ * `packages/wiring/src/backup/secrets-manifest.ts`, `extensions/cron/src/index.ts`
+ * and `apps/web`'s AddMcpModal. Copied rather than shared: each surface keeps
+ * its own module-private copy.
+ */
+function shellQuote(arg: string): string {
+  return `'${arg.replaceAll("'", `'\\''`)}'`;
+}
+
+/**
+ * Single source for the skill-evolver proposal notice (readline + TUI).
+ *
+ * The apply command is quoted because `skillId` is MODEL-controlled, not
+ * operator-supplied: `skill_propose` derives it from the LLM's `targetFile`
+ * argument. This line exists to be PASTED into a shell, so an id with `;` or
+ * `$(…)` in it would produce a line that runs something else entirely. The
+ * `.md` suffix goes inside the quotes — the whole argument is one word.
+ */
 export function formatSkillProposedNotice(skillId: string): string {
-  return `[skill-evolver] Proposed skill: ${skillId} — run \`ethos evolve apply ${skillId}.md\` to activate`;
+  return `[skill-evolver] Proposed skill: ${skillId} — run \`ethos evolve apply ${shellQuote(`${skillId}.md`)}\` to activate`;
 }

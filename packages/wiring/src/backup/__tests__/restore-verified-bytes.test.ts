@@ -153,8 +153,8 @@ describe('restore verifies the entries it captures but never installs', () => {
     hook.afterFirstPass = async () => {
       swapInArchive(
         out,
-        'fill_with: ethos secrets set ANTHROPIC_API_KEY',
-        'fill_with: ethos secrets set EVIL_INJECTED_KEY',
+        `fill_with: ethos secrets set 'ANTHROPIC_API_KEY'`,
+        `fill_with: ethos secrets set 'EVIL_INJECTED_KEY'`,
       );
     };
 
@@ -180,8 +180,8 @@ describe('restore verifies the entries it captures but never installs', () => {
     hook.afterFirstPass = async () => {
       swapInArchive(
         out,
-        'fill_with: ethos secrets set ANTHROPIC_API_KEY',
-        'fill_with: ethos secrets set EVIL_INJECTED_KEY',
+        `fill_with: ethos secrets set 'ANTHROPIC_API_KEY'`,
+        `fill_with: ethos secrets set 'EVIL_INJECTED_KEY'`,
       );
     };
 

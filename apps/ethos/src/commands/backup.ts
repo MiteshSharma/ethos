@@ -1,7 +1,15 @@
-// ethos backup / ethos import — snapshot and restore ~/.ethos/
+// `ethos backup` / `ethos import` — thin shims over the backup core.
 //
-// backup: tar.gz of config.yaml, MEMORY.md, USER.md, cron/jobs.json, personalities/
-// import: extract and merge into ~/.ethos/
+// Everything that decides WHAT goes into an archive, how a live database is
+// copied consistently, and whether a restore is safe lives in
+// `packages/wiring/src/backup/`. That core is library code: it returns reports
+// and never prints. This file is the other half — flags, prompts and the words
+// an operator reads.
+//
+// The ustar helpers further down are NOT the backup format. They belong to the
+// personality-bundle path (`ethos personality export` / `ethos personality
+// import`), which is a different archive with a different manifest, and they
+// stay until that lane is moved onto the streaming writer too.
 
 import { execFileSync } from 'node:child_process';
 import { createHash, createHmac, randomBytes } from 'node:crypto';
@@ -9,7 +17,6 @@ import {
   createReadStream,
   createWriteStream,
   existsSync,
-  lstatSync,
   mkdirSync,
   readdirSync,
   readFileSync,
@@ -18,280 +25,754 @@ import {
 } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, join, resolve, sep } from 'node:path';
+import { Writable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { createGunzip, createGzip } from 'node:zlib';
 import { ethosDir } from '@ethosagent/config';
 import { isExactVersion, isValidNpmPackageName, isValidPluginId } from '@ethosagent/plugin-loader';
 import { type BundleManifest, EthosError } from '@ethosagent/types';
+import {
+  ALL_SCOPES,
+  createBackup,
+  DEFAULT_SCOPES,
+  type InjectSecretsResult,
+  injectSecrets,
+  type PreparedSecrets,
+  parseScopes,
+  prepareSecretEntries,
+  prepareSecrets,
+  type RestoreReport,
+  restoreBackup,
+  type ScopeName,
+  type SecretEntryInput,
+} from '@ethosagent/wiring';
 import { writeJson } from '../json-output';
 import { getSecretsResolver } from '../wiring';
+import { hasFlag, parseFlagValue } from './serve-helpers';
 
-const BACKUP_FILES = ['config.yaml', 'MEMORY.md', 'USER.md'];
-const BACKUP_EXTRAS = ['cron/jobs.json'];
-const MCP_TOKEN_FILENAMES = new Set(['access_token', 'refresh_token', 'expires_at']);
+const USAGE_BACKUP =
+  'Usage: ethos backup [--out <path>] [--scope identity,state,telemetry] [--bootstrap] [--json]';
+const USAGE_IMPORT =
+  'Usage: ethos import <archive> [--scope <names>] [--dry-run] [--force] [--secrets <file | - | prompt>] [--json]';
 
-const _USAGE_BACKUP = 'Usage: ethos backup [output-path]';
-const USAGE_IMPORT = 'Usage: ethos import <backup-path> [--secrets <manifest-file | ->]';
+/** Where `ethos backup` writes when no path is given (plan D5, `backup.dir`). */
+export function defaultBackupDir(): string {
+  return join(ethosDir(), 'backups');
+}
+
+// ---------------------------------------------------------------------------
+// ethos backup
+// ---------------------------------------------------------------------------
 
 export async function runBackup(argv: string[]): Promise<void> {
   const jsonMode = argv.includes('--json');
-  const filtered = argv.filter((a) => a !== '--json');
-  const outPath =
-    filtered[0] ?? `ethos-backup-${timestamp()}-${randomBytes(4).toString('hex')}.tar.gz`;
+  const bootstrap = hasFlag(argv, ['--bootstrap']);
+
+  const requested = readScopes(argv);
+  if (requested.error !== undefined) {
+    return fail(jsonMode, 'scope_invalid', requested.error, [USAGE_BACKUP]);
+  }
+  const scopes = requested.scopes ?? [...DEFAULT_SCOPES];
+
+  const outFlag = parseFlagValue(argv, ['--out']);
+  if (outFlag === '') {
+    return fail(jsonMode, 'input_invalid', '--out requires a path.', [USAGE_BACKUP]);
+  }
+  const positional = positionalArgs(argv, ['--out', '--scope']);
+  const outPath = resolve(
+    outFlag ?? positional[0] ?? join(defaultBackupDir(), defaultArchiveName()),
+  );
+
   const dataDir = ethosDir();
+  // The CLI is a command-line process, so it may block on `VACUUM INTO` (D2).
+  // Only a serving process is required to use the async `backup()` copy.
+  const result = await createBackup({
+    dataDir,
+    outPath,
+    scopes,
+    snapshot: 'vacuum',
+    secrets: await getSecretsResolver(),
+  });
 
-  const { entries, strippedTokens } = collectEntries(dataDir);
-  if (entries.length === 0) {
-    if (jsonMode) {
-      writeJson({ ok: true, path: outPath, fileCount: 0 });
-      return;
-    }
-    console.log('Nothing to backup — ~/.ethos/ is empty.');
-    return;
-  }
+  const command = bootstrapCommand(result.path, result.scopes);
 
-  const manifestYaml = buildSecretsManifest(dataDir, strippedTokens);
-  entries.push({ relPath: 'secrets.manifest.yaml', content: Buffer.from(manifestYaml) });
-
-  await writeTarGz(entries, outPath);
   if (jsonMode) {
-    writeJson({ ok: true, path: outPath, fileCount: entries.length });
+    writeJson({
+      ok: true,
+      path: result.path,
+      scopes: result.scopes,
+      fileCount: result.fileCount,
+      bytes: result.bytes,
+      createdAt: result.manifest.createdAt,
+      unclassifiedDatabases: result.unclassifiedDatabases,
+      sensitive: result.scopes.includes('state'),
+      ...(bootstrap ? { bootstrap: command } : {}),
+    });
     return;
   }
-  console.log(`✓ Backup written to: ${outPath} (${entries.length} files)`);
+
+  console.log(`✓ Backup written to: ${result.path}`);
+  console.log(
+    `  ${result.fileCount} file(s), ${formatBytes(result.bytes)} · scopes: ${result.scopes.join(', ')}`,
+  );
+  if (result.scopes.includes('state')) {
+    console.log('');
+    console.log('  The state scope carries conversation history (sessions, cards, memory).');
+    console.log('  Treat it as sensitive as the machine it came from.');
+  }
   console.log('');
-  console.log('  Note: API keys and MCP tokens were NOT backed up. Re-enter credentials');
-  console.log('  via `ethos keys set` or environment variables after restore.');
+  console.log('  API keys and MCP tokens were NOT archived. The archive lists what is');
+  console.log('  missing in secrets.manifest.yaml — refill with `ethos import --secrets prompt`.');
+  for (const db of result.unclassifiedDatabases) {
+    console.log(`  ⚠ ${db} is a database no scope owns — it was NOT archived.`);
+  }
+  if (bootstrap) {
+    console.log('');
+    console.log('  To restore this backup on a new machine:');
+    console.log('');
+    console.log('    curl -fsSL https://ethosagent.ai/install.sh | bash');
+    console.log(`    ${command}`);
+    console.log('    ethos doctor');
+  }
 }
+
+/** Default archive name. The random suffix keeps two runs in one second apart. */
+function defaultArchiveName(): string {
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+  return `ethos-backup-${stamp}-${randomBytes(4).toString('hex')}.tar.gz`;
+}
+
+/**
+ * Wrap one argument in POSIX single quotes, ending and reopening the quote
+ * around every embedded `'`. Inside single quotes a shell expands nothing, so
+ * spaces, `;`, `&`, backticks and `$(…)` are all literal.
+ */
+function shellQuote(arg: string): string {
+  return `'${arg.replaceAll("'", `'\\''`)}'`;
+}
+
+/**
+ * The one command that restores this archive somewhere else (plan §4).
+ *
+ * The path is operator-supplied (`--out`) and this line exists specifically to
+ * be PASTED into a shell on a new machine, so it is quoted: unquoted, a path
+ * with a space produces a broken command and a path with `$(…)` or `;` in it
+ * produces a line that runs something else entirely.
+ *
+ * The scopes are not quoted. They are `ScopeName`s that `parseScopes` already
+ * checked against a closed list, so there is nothing in them a shell could read.
+ */
+function bootstrapCommand(archivePath: string, scopes: readonly ScopeName[]): string {
+  return `ethos import ${shellQuote(archivePath)} --scope ${scopes.join(',')} --secrets prompt`;
+}
+
+/**
+ * The line an operator is told to paste after a personality import (G5+G6).
+ *
+ * `personalityId` comes off the imported archive — `manifest.personalityId` on
+ * the bundle path, a `personalities/<id>/` path SEGMENT on the legacy one — so
+ * whoever authored the archive chose it. `VALID_ID_RE` rejects anything but
+ * alphanumerics, hyphens and underscores in both branches before control
+ * reaches here, and that check is the lock that matters; this quoting is the
+ * second one on the same door, so the paste line stays a single safe word even
+ * if a later caller prints it without having gone through that gate.
+ */
+export function doctorCommand(personalityId: string): string {
+  return `ethos personality doctor ${shellQuote(personalityId)}`;
+}
+
+// ---------------------------------------------------------------------------
+// ethos import
+// ---------------------------------------------------------------------------
 
 export async function runImport(argv: string[]): Promise<void> {
   const jsonMode = argv.includes('--json');
-  const secretsIdx = argv.indexOf('--secrets');
-  const secretsPath = secretsIdx >= 0 ? argv[secretsIdx + 1] : undefined;
-  if (secretsIdx >= 0 && (!secretsPath || secretsPath.startsWith('--'))) {
-    console.error('--secrets requires a manifest file path or "-" for stdin.');
-    console.error(USAGE_IMPORT);
-    process.exitCode = 1;
-    return;
-  }
-  const filtered = argv.filter(
-    (a, i) => a !== '--json' && a !== '--secrets' && !(i > 0 && argv[i - 1] === '--secrets'),
-  );
-  const srcPath = filtered[0];
-  if (!srcPath) {
-    console.error(USAGE_IMPORT);
-    process.exitCode = 1;
-    return;
-  }
-  if (!existsSync(srcPath)) {
-    console.error(`File not found: ${srcPath}`);
-    process.exitCode = 1;
-    return;
+  const dryRun = hasFlag(argv, ['--dry-run']);
+  const force = hasFlag(argv, ['--force']);
+
+  const secretsArg = parseFlagValue(argv, ['--secrets']);
+  if (secretsArg === '' || secretsArg?.startsWith('--')) {
+    return fail(
+      jsonMode,
+      'input_invalid',
+      '--secrets requires a manifest file, "-" for stdin, or "prompt".',
+      [USAGE_IMPORT],
+    );
   }
 
-  const dataDir = ethosDir();
-  mkdirSync(dataDir, { recursive: true });
+  // `--secrets prompt` is a walk on the TTY — questions, notices and OAuth
+  // command hints. `--json` promises one machine-readable document on stdout.
+  // The two cannot both be honoured, so refuse the combination outright rather
+  // than interleave prompts with the payload. Everything else this command
+  // prints under `--json` is the JSON document and nothing else.
+  if (jsonMode && secretsArg === 'prompt') {
+    return fail(
+      jsonMode,
+      'input_invalid',
+      '--secrets prompt is interactive and cannot be combined with --json.',
+      ['Pass --secrets <file> or --secrets - instead, or drop --json.', USAGE_IMPORT],
+    );
+  }
 
-  const resolvedBase = resolve(dataDir) + sep;
-  const entries = await readTarGz(srcPath);
-  for (const [relPath, content] of entries) {
-    const dest = join(dataDir, relPath);
-    const resolvedDest = resolve(dest);
-    if (!resolvedDest.startsWith(resolvedBase)) {
-      throw new EthosError({
-        code: 'IMPORT_BLOCKED',
-        cause: `Path traversal blocked: "${relPath}" escapes ${dataDir}`,
-        action: 'Check the archive contents — it may be corrupted or malicious.',
-      });
+  const requested = readScopes(argv);
+  if (requested.error !== undefined) {
+    return fail(jsonMode, 'scope_invalid', requested.error, [USAGE_IMPORT]);
+  }
+  const scopes = requested.scopes;
+
+  const archivePath = positionalArgs(argv, ['--scope', '--secrets'])[0];
+  if (!archivePath) return fail(jsonMode, 'input_invalid', 'No archive given.', [USAGE_IMPORT]);
+  if (!existsSync(archivePath)) {
+    return fail(jsonMode, 'file_not_found', `File not found: ${archivePath}`);
+  }
+
+  // Read, parse and VALIDATE the whole secrets payload before the restore
+  // commits. A typo'd path, an unreadable file, a stdin that never arrives, a
+  // ref the vault would refuse, or a manifest with nothing injectable in it
+  // must fail with the tree untouched — after the restore, the same failure can
+  // only be reported, not undone.
+  //
+  // `prepareSecrets` is the same step `injectSecrets` is fed below, so the
+  // check made here and the write made later cannot disagree about what is
+  // writable.
+  //
+  // `prompt` is the one source that cannot move earlier: its questions are
+  // built from `report.secretsManifest`, which does not exist until the archive
+  // has been read. It stays below, and the split outcome is what keeps its
+  // failure from reading as a failed restore.
+  let payload: PreparedSecrets | null = null;
+  if (!dryRun && secretsArg !== undefined && secretsArg !== 'prompt') {
+    let raw: string;
+    try {
+      raw = await readSecretsSource(secretsArg);
+    } catch (err) {
+      // The path and the reason. Never any part of the file's contents.
+      return fail(jsonMode, 'secrets_unreadable', describeError(err), [USAGE_IMPORT]);
     }
-    mkdirSync(join(dataDir, relPath, '..'), { recursive: true });
-    writeFileSync(dest, content);
+    const source =
+      secretsArg === '-' ? 'The secrets manifest on stdin' : `Secrets manifest ${secretsArg}`;
+    // `error` and `failedRef` name a ref and a rule. Never a value — and the
+    // prepared writes, which DO carry values, are never interpolated anywhere.
+    const preflight = prepareSecrets(raw);
+    if (!preflight.ok) {
+      return fail(jsonMode, 'secrets_invalid', `${source} cannot be injected: ${preflight.error}`, [
+        USAGE_IMPORT,
+      ]);
+    }
+    if (preflight.prepared.length === 0) {
+      return fail(
+        jsonMode,
+        'secrets_invalid',
+        `${source} has no values under a \`global:\` or \`personalities:\` section — nothing would be injected.`,
+        [USAGE_IMPORT],
+      );
+    }
+    payload = preflight.prepared;
   }
 
-  if (secretsPath) {
-    const count = await injectSecrets(secretsPath);
-    if (!jsonMode) console.log(`✓ Injected ${count} secret(s)`);
-  }
+  const report = await restoreBackup({
+    dataDir: ethosDir(),
+    archivePath,
+    ...(scopes ? { scopes } : {}),
+    dryRun,
+    force,
+  });
+
+  // The restore has committed. From here, injecting secrets is a SECOND
+  // outcome: it can fail over a tree that is fully restored, and saying "the
+  // import failed" about that would be false where it matters most.
+  const secrets = await applySecrets(secretsArg, payload, report, dryRun);
 
   if (jsonMode) {
-    writeJson({ ok: true, importedFiles: entries.length });
+    writeJson({
+      // `ok` is the whole command; `restoreOk` is the destructive half alone.
+      // They differ exactly when the files landed and the vault write did not.
+      ok: secrets.error === undefined,
+      restoreOk: true,
+      dryRun: report.dryRun,
+      scopes: report.scopes,
+      createdAt: report.createdAt,
+      restored: report.restored,
+      skipped: report.skipped,
+      displaced: report.displaced,
+      ...(report.displacedTo ? { displacedTo: report.displacedTo } : {}),
+      inUseCheck: report.inUseCheck,
+      lockedDatabases: report.lockedDatabases,
+      restartRequired: report.restartRequired,
+      warnings: report.warnings,
+      ...(secrets.injected === null ? {} : { secretsInjected: secrets.injected }),
+      // The three outcomes, tellable apart without reading prose: `ok` alone
+      // means everything landed; `ok: false` with `secretsInjected: 0` means
+      // nothing did; `ok: false` with a non-zero count means the vault is
+      // half filled, and `secretsWrittenRefs` is exactly which half.
+      ...(secrets.error === undefined
+        ? {}
+        : {
+            secretsWrittenRefs: secrets.writtenRefs ?? [],
+            ...(secrets.failedRef === undefined ? {} : { secretsFailedRef: secrets.failedRef }),
+            secretsError: secrets.error,
+          }),
+    });
+    if (secrets.error !== undefined) process.exitCode = 1;
     return;
   }
 
-  // Check for secrets manifest among extracted entries
-  const manifestEntry = entries.find(([name]) => name === 'secrets.manifest.yaml');
-  if (manifestEntry) {
-    const manifestContent = manifestEntry[1].toString('utf8');
-    const hints = parseManifestHints(manifestContent);
-    console.log(`✓ Imported ${entries.length} files into ~/.ethos/`);
+  printRestoreReport(report, secrets);
+  if (secrets.error !== undefined) process.exitCode = 1;
+}
+
+function printRestoreReport(report: RestoreReport, secrets: SecretsOutcome): void {
+  const verb = report.dryRun ? 'Would restore' : 'Restored';
+  console.log(
+    `${report.dryRun ? '·' : '✓'} ${verb} ${report.restored.length} file(s) into ${ethosDir()}`,
+  );
+  console.log(
+    `  scopes: ${report.scopes.join(', ') || 'none'} · archive created ${report.createdAt}`,
+  );
+  if (report.dryRun) {
+    console.log('  Dry run — nothing on disk was changed.');
+  }
+
+  if (report.displaced.length > 0) {
+    const where = report.displacedTo ?? '.pre-restore/<timestamp>';
+    console.log(
+      `  ${report.displaced.length} existing file(s) ${report.dryRun ? 'would be moved' : 'moved'} to ${where}/`,
+    );
+  }
+  if (report.skipped.length > 0) {
+    console.log(`  ${report.skipped.length} archive entry/entries were not restored.`);
+  }
+
+  // `lockedDatabases: []` is not "nothing was running" — it is only that when
+  // the check actually ran. Say which of the two this is, every time.
+  console.log('');
+  if (report.inUseCheck === 'held') {
+    console.log(
+      report.lockedDatabases.length > 0
+        ? `  in-use check: ran — ${report.lockedDatabases.length} database(s) were idle and held for the restore.`
+        : '  in-use check: ran — there was no existing database to displace.',
+    );
+  } else if (report.inUseCheck === 'skipped_dry_run') {
+    console.log('  in-use check: NOT made — a dry run cannot take the locks that answer it.');
+    console.log('    A real restore may still be refused because something is running.');
+  } else {
+    console.log('  in-use check: SKIPPED — you passed --force.');
+    console.log('    Nothing verified that another process did not have these databases open.');
+  }
+
+  for (const warning of report.warnings) {
+    console.log(`  ⚠ ${warning.message}`);
+  }
+
+  if (secrets.error !== undefined) {
+    // The destructive half is done. Say that first, then say what failed, then
+    // give a remedy that is not "run the destructive half again".
+    //
+    // There is no rollback across a vault, so "the write did not happen" is a
+    // claim only the nothing-written case may make. When some refs landed, the
+    // operator is told which — the alternative is a machine holding a mix of
+    // new and old credentials with a report describing neither.
+    const written = secrets.writtenRefs ?? [];
+    const hints = report.secretsManifest ? parseVaultManifest(report.secretsManifest) : [];
+    const remaining = hints.filter((hint) => !written.includes(vaultRef(hint)));
+    console.log('');
+    if (written.length === 0) {
+      console.log(`✗ The restore is complete. Injecting secrets FAILED: ${secrets.error}`);
+      console.log('  Every file listed above is on disk — only the vault write did not happen.');
+    } else {
+      console.log(`✗ The restore is complete. Injecting secrets FAILED PARTWAY: ${secrets.error}`);
+      console.log(
+        `  Every file listed above is on disk, and ${written.length} secret(s) reached the vault:`,
+      );
+      for (const ref of written) console.log(`    ${ref}`);
+      console.log('  Everything below is NOT in the vault.');
+    }
+    console.log('  Re-running `ethos import --secrets` would restore the archive a second');
+    console.log('  time, which is not the fix. Set the missing values straight into the vault:');
+    const missing = remaining.map((hint) => hint.fillWith);
+    if (
+      secrets.failedRef !== undefined &&
+      !remaining.some((hint) => vaultRef(hint) === secrets.failedRef)
+    ) {
+      // Quoted for the same reason the manifest's own `fill_with:` lines are:
+      // this is a line to paste, and the ref is a vault filename.
+      missing.unshift(`ethos secrets set ${shellQuote(secrets.failedRef)} <value>`);
+    }
+    if (missing.length === 0) missing.push('ethos secrets set <ref> <value>');
+    for (const line of missing) console.log(`    ${line}`);
+  } else if (secrets.injected !== null) {
+    console.log('');
+    console.log(`✓ Injected ${secrets.injected} secret(s).`);
+  } else if (report.secretsManifest) {
+    const hints = parseVaultManifest(report.secretsManifest);
     if (hints.length > 0) {
       console.log('');
-      console.log('  Secrets to re-enter:');
-      let globalHeaderPrinted = false;
-      let lastPersonality = '';
-      for (let i = 0; i < hints.length; i++) {
-        const hint = hints[i];
-        if (!hint) continue;
-        const num = i + 1;
-        if (hint.type === 'global') {
-          if (!globalHeaderPrinted) {
-            console.log('     Global:');
-            globalHeaderPrinted = true;
-          }
-          console.log(`       ${num}. ${hint.label.padEnd(24)}→  ${hint.fillWith}`);
-        } else {
-          if (hint.personality !== lastPersonality) {
-            console.log(`     Personality: ${hint.personality}`);
-            lastPersonality = hint.personality;
-          }
-          console.log(`       ${num}. MCP: ${hint.label.padEnd(20)}→  ${hint.fillWith}`);
-        }
-      }
+      console.log(`  ${hints.length} secret(s) are missing — the archive carries none:`);
+      for (const hint of hints) console.log(`    ${hint.fillWith}`);
       console.log('');
-      console.log('  Run: ethos doctor  to verify when ready.');
-    } else {
-      console.log('');
-      console.log('  Secrets were not restored. Fill credentials with `ethos keys set`');
-      console.log('  or set environment variables, then run `ethos doctor` to verify.');
+      console.log('  Or refill them one at a time: ethos import <archive> --secrets prompt');
     }
-  } else {
-    console.log(`✓ Imported ${entries.length} files into ~/.ethos/`);
+  }
+
+  if (report.restartRequired && !report.dryRun) {
     console.log('');
-    console.log('  Secrets were not restored. Fill credentials with `ethos keys set`');
-    console.log('  or set environment variables, then run `ethos doctor` to verify.');
+    console.log('  Restart Ethos — config.yaml and mcp.json are read at boot, so a running');
+    console.log('  serve/gateway/chat is still using the previous ones.');
+  }
+  console.log('');
+  console.log('  Run: ethos doctor  to verify.');
+}
+
+// ---------------------------------------------------------------------------
+// --secrets
+// ---------------------------------------------------------------------------
+
+/**
+ * What happened to `--secrets` after the restore committed. Three outcomes:
+ * everything landed (`error` absent), nothing landed (`error` set,
+ * `injected: 0`), or the vault is half filled (`error` set, `injected > 0`).
+ */
+interface SecretsOutcome {
+  /** Values written into the vault. `null` when injection was not attempted. */
+  injected: number | null;
+  /** Refs that ARE in the vault. Set whenever injection was attempted. */
+  writtenRefs?: string[];
+  /** The ref whose write was refused or failed. */
+  failedRef?: string;
+  /** Why injection failed. Refs and paths only — a value is never in here. */
+  error?: string;
+}
+
+/**
+ * Write the secrets, over a tree that is already restored.
+ *
+ * `payload` is the pre-read `file`/`-` source, already prepared and validated
+ * before the restore; `prompt` walks the archive's manifest here, because that
+ * is the earliest it exists — and goes through `prepareSecretEntries`, which
+ * composes and validates a ref with exactly the code `prepareSecrets` uses, so
+ * a prompted ref is held to the rules a file's ref is. A throw is captured rather
+ * than propagated: the caller reports the restore and this as the two separate
+ * facts they are.
+ */
+async function applySecrets(
+  arg: string | undefined,
+  payload: PreparedSecrets | null,
+  report: RestoreReport,
+  dryRun: boolean,
+): Promise<SecretsOutcome> {
+  // A dry run promised to change nothing, and writing secrets is a change.
+  if (dryRun || arg === undefined) return { injected: null };
+  try {
+    const secrets = await getSecretsResolver();
+    let prepared = payload;
+    if (prepared === null) {
+      const entries = await promptForSecrets(report.secretsManifest);
+      if (entries === null) return { injected: 0, writtenRefs: [] };
+      const result = prepareSecretEntries(entries);
+      if (!result.ok) {
+        return {
+          injected: 0,
+          writtenRefs: [],
+          failedRef: result.failedRef,
+          error: result.error,
+        };
+      }
+      prepared = result.prepared;
+    }
+    return toOutcome(await injectSecrets(prepared, secrets));
+  } catch (err) {
+    // Reaching here means injection never started — `injectSecrets` reports a
+    // failed write instead of throwing, so the only throws left are resolving
+    // the vault and the prompt walk itself. Nothing was written.
+    return { injected: 0, writtenRefs: [], error: describeError(err) };
   }
 }
 
+/**
+ * Vault failures name the ref and the path they could not write; the value is
+ * never part of the message (`FileSecretsResolver.set`), and no field of
+ * `InjectSecretsResult` carries one either.
+ */
+function toOutcome(result: InjectSecretsResult): SecretsOutcome {
+  return {
+    injected: result.writtenRefs.length,
+    writtenRefs: result.writtenRefs,
+    ...(result.failedRef === undefined ? {} : { failedRef: result.failedRef }),
+    ...(result.error === undefined ? {} : { error: result.error }),
+  };
+}
+
+/** The full vault ref a manifest hint names — how `injectSecrets` reports it. */
+function vaultRef(hint: VaultHint): string {
+  if (hint.key === undefined) return '';
+  return hint.personality ? `personalities/${hint.personality}/${hint.key}` : hint.key;
+}
+
+function describeError(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+async function readSecretsSource(path: string): Promise<string> {
+  if (path === '-') {
+    const chunks: Buffer[] = [];
+    for await (const chunk of process.stdin) chunks.push(Buffer.from(chunk));
+    return Buffer.concat(chunks).toString('utf8');
+  }
+  if (!existsSync(path)) {
+    throw new EthosError({
+      code: 'FILE_NOT_FOUND',
+      cause: `Secrets manifest not found: ${path}`,
+      action: 'Provide a valid path to a secrets manifest file.',
+    });
+  }
+  return readFileSync(path, 'utf8');
+}
+
+/** One line the archive's `secrets.manifest.yaml` asked to be refilled. */
+interface VaultHint {
+  /** `undefined` for a global key. */
+  personality?: string;
+  /** Vault key, relative to its namespace. Absent for an MCP OAuth flow. */
+  key?: string;
+  /** MCP server whose OAuth tokens were stripped. */
+  server?: string;
+  fillWith: string;
+}
+
+/**
+ * Read the manifest the CORE writes (`secrets-manifest.ts`) — names only. The
+ * `global:` / `personalities:` / `other:` sections each carry `key` (or
+ * `server`) plus the command that refills it.
+ */
+export function parseVaultManifest(raw: string): VaultHint[] {
+  const hints: VaultHint[] = [];
+  let section: 'none' | 'global' | 'personalities' | 'other' = 'none';
+  let personality: string | undefined;
+  let sub: 'secrets' | 'mcp_auth' | undefined;
+  let pendingKey: string | undefined;
+  let pendingServer: string | undefined;
+
+  for (const line of raw.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+    const indent = line.length - line.trimStart().length;
+
+    if (indent === 0 && trimmed.endsWith(':')) {
+      const header = trimmed.slice(0, -1);
+      section =
+        header === 'global' || header === 'personalities' || header === 'other' ? header : 'none';
+      personality = undefined;
+      sub = undefined;
+      continue;
+    }
+    if (section === 'personalities' && indent === 2 && trimmed.endsWith(':')) {
+      personality = trimmed.slice(0, -1);
+      sub = undefined;
+      continue;
+    }
+    if (section === 'personalities' && indent === 4 && trimmed.endsWith(':')) {
+      const header = trimmed.slice(0, -1);
+      sub = header === 'secrets' || header === 'mcp_auth' ? header : undefined;
+      continue;
+    }
+
+    const key = trimmed.match(/^-\s*key:\s*(.+)$/);
+    if (key) {
+      pendingKey = key[1];
+      pendingServer = undefined;
+      continue;
+    }
+    const server = trimmed.match(/^-\s*server:\s*(.+)$/);
+    if (server) {
+      pendingServer = server[1];
+      pendingKey = undefined;
+      continue;
+    }
+    const fill = trimmed.match(/^fill_with:\s*(.+)$/);
+    if (!fill?.[1]) continue;
+    const fillWith = fill[1];
+    if (pendingKey !== undefined) {
+      hints.push({
+        ...(section === 'personalities' && personality ? { personality } : {}),
+        key: pendingKey,
+        fillWith,
+      });
+      pendingKey = undefined;
+    } else if (pendingServer !== undefined && sub === 'mcp_auth') {
+      hints.push({
+        ...(personality ? { personality } : {}),
+        server: pendingServer,
+        fillWith,
+      });
+      pendingServer = undefined;
+    }
+  }
+  return hints;
+}
+
+/**
+ * Walk the archive's manifest and ask for each missing value, one at a time.
+ * Returns the structured pairs, or `null` when there is nothing to fill.
+ *
+ * The destination is carried STRUCTURALLY — the `personality`/`key` this walk
+ * already parsed out of the manifest, handed to `prepareSecretEntries` as they
+ * are. It used to serialise each pair back into `key: "value"` manifest text so
+ * that `prepareSecrets` could split it apart again, which meant a key holding a
+ * `:` (a legal vault ref) was cut at its first colon and the value landed under
+ * the wrong ref, mangled, while the command reported success — and a key
+ * holding a newline manufactured whole extra entries. There is no text
+ * intermediate now, so there is no delimiter left to misread, and a value's
+ * leading and trailing whitespace survives because nothing re-reads it.
+ *
+ * Nothing typed here is echoed, and no value is ever printed back — not in the
+ * confirmation, not in an error. Blank input skips a key rather than writing
+ * an empty string over a good secret.
+ */
+async function promptForSecrets(manifest: string | undefined): Promise<SecretEntryInput[] | null> {
+  if (!manifest) {
+    console.log('  This archive carries no secrets manifest — nothing to fill.');
+    return null;
+  }
+  const hints = parseVaultManifest(manifest);
+  const fillable = hints.filter((h) => h.key !== undefined);
+  const oauth = hints.filter((h) => h.server !== undefined);
+  if (fillable.length === 0 && oauth.length === 0) {
+    console.log('  This archive lists no secrets — nothing to fill.');
+    return null;
+  }
+
+  const entries: SecretEntryInput[] = [];
+
+  if (fillable.length > 0) {
+    console.log('');
+    console.log(`  ${fillable.length} secret(s) to re-enter. Press Enter to skip one.`);
+    console.log('');
+  }
+  for (const hint of fillable) {
+    const key = hint.key;
+    if (key === undefined) continue;
+    const label = hint.personality ? `${hint.personality} / ${key}` : key;
+    const value = await promptHidden(`    ${label}: `);
+    // Emptiness, separately from trimming: a blank line skips this key, but a
+    // value that is deliberately whitespace is written exactly as typed.
+    if (value === '') continue;
+    // A readline answer cannot hold one, so this is the belt to the braces —
+    // the value now goes straight into the vault with no format in between.
+    if (value.includes('\n') || value.includes('\r')) {
+      console.log(`    ⚠ ${label} skipped — a secret value cannot contain a newline.`);
+      continue;
+    }
+    entries.push({
+      ...(hint.personality ? { personality: hint.personality } : {}),
+      key,
+      value,
+    });
+  }
+
+  if (oauth.length > 0) {
+    console.log('');
+    console.log('  These are OAuth flows, not values — run them when you are ready:');
+    for (const hint of oauth) console.log(`    ${hint.fillWith}`);
+  }
+
+  return entries.length === 0 ? null : entries;
+}
+
+/** Ask on the TTY without echoing what is typed. */
+function promptHidden(question: string): Promise<string> {
+  return new Promise((res, rej) => {
+    let muted = false;
+    const out = new Writable({
+      write(chunk, _enc, cb) {
+        if (!muted) process.stdout.write(chunk);
+        cb();
+      },
+    });
+    import('node:readline')
+      .then(({ createInterface }) => {
+        const rl = createInterface({ input: process.stdin, output: out, terminal: true });
+        rl.question(question, (answer) => {
+          rl.close();
+          process.stdout.write('\n');
+          // NOT trimmed: the answer is carried structurally to the vault with
+          // no format in between, so leading and trailing whitespace survives,
+          // and trimming here would silently alter the secret it is preserving.
+          // An empty line is still a skip — the caller tests for that.
+          res(answer);
+        });
+        muted = true;
+      })
+      .catch(rej);
+  });
+}
+
 // ---------------------------------------------------------------------------
-// Helpers
+// Shared flag handling
 // ---------------------------------------------------------------------------
 
-function timestamp(): string {
-  return new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+/**
+ * `--scope identity,state`. `scopes: undefined` when the flag is absent.
+ *
+ * A bad flag is a returned message rather than a throw: it is the operator
+ * mistyping, not an exceptional condition, and the caller turns it into the
+ * same `--json`-aware refusal every other flag error gets.
+ */
+function readScopes(argv: string[]): { scopes?: ScopeName[]; error?: string } {
+  const raw = parseFlagValue(argv, ['--scope']);
+  if (raw === undefined) return {};
+  const empty = { error: `--scope requires one of: ${ALL_SCOPES.join(', ')}` };
+  if (raw === '') return empty;
+  try {
+    const scopes = parseScopes(raw);
+    return scopes.length === 0 ? empty : { scopes };
+  } catch (err) {
+    return { error: err instanceof Error ? err.message : String(err) };
+  }
 }
+
+/** Everything that is not a flag or a flag's separated value. */
+function positionalArgs(argv: string[], valueFlags: string[]): string[] {
+  const out: string[] = [];
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+    if (arg === undefined) continue;
+    if (valueFlags.includes(arg)) {
+      i++;
+      continue;
+    }
+    if (arg.startsWith('-')) continue;
+    out.push(arg);
+  }
+  return out;
+}
+
+function fail(jsonMode: boolean, code: string, message: string, extra: string[] = []): void {
+  if (jsonMode) {
+    writeJson({ ok: false, error: { code, message } });
+  } else {
+    console.error(message);
+    for (const line of extra) console.error(line);
+  }
+  process.exitCode = 1;
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+  return `${(bytes / 1024 / 1024 / 1024).toFixed(2)} GB`;
+}
+
+// ---------------------------------------------------------------------------
+// Personality-bundle tar (POSIX ustar, in memory)
+//
+// NOT the backup format — see the file header. `ethos personality export`
+// writes it and `runPersonalityImport` below reads it back.
+// ---------------------------------------------------------------------------
 
 export interface Entry {
   relPath: string;
   content: Buffer;
-}
-
-interface CollectResult {
-  entries: Entry[];
-  /** Map of personality id → Set of server dirs whose tokens were stripped */
-  strippedTokens: Map<string, Set<string>>;
-}
-
-function walkDir(
-  dir: string,
-  relBase: string,
-  entries: Entry[],
-  personalityId: string,
-  strippedTokens: Map<string, Set<string>>,
-): void {
-  for (const name of readdirSync(dir)) {
-    const full = join(dir, name);
-    const rel = join(relBase, name);
-    const st = lstatSync(full);
-    if (st.isSymbolicLink()) continue;
-    if (st.isDirectory()) {
-      walkDir(full, rel, entries, personalityId, strippedTokens);
-    } else if (st.isFile()) {
-      if (MCP_TOKEN_FILENAMES.has(basename(full))) {
-        // Determine the server directory: the parent of this token file
-        // relBase is like "personalities/alice/mcp/github" — extract server name
-        const relFromPersonality = relBase.slice(`personalities/${personalityId}/`.length);
-        const parts = relFromPersonality.split('/');
-        // The server name is typically the last segment of the parent path
-        const serverName = parts[parts.length - 1] ?? basename(dir);
-        let servers = strippedTokens.get(personalityId);
-        if (!servers) {
-          servers = new Set();
-          strippedTokens.set(personalityId, servers);
-        }
-        servers.add(serverName);
-        continue;
-      }
-      entries.push({ relPath: rel, content: readFileSync(full) });
-    }
-  }
-}
-
-function collectEntries(dataDir: string): CollectResult {
-  const entries: Entry[] = [];
-  const strippedTokens = new Map<string, Set<string>>();
-
-  for (const file of BACKUP_FILES) {
-    const p = join(dataDir, file);
-    if (existsSync(p)) entries.push({ relPath: file, content: readFileSync(p) });
-  }
-
-  for (const file of BACKUP_EXTRAS) {
-    const p = join(dataDir, file);
-    if (existsSync(p)) entries.push({ relPath: file, content: readFileSync(p) });
-  }
-
-  const personalitiesDir = join(dataDir, 'personalities');
-  if (existsSync(personalitiesDir)) {
-    for (const id of readdirSync(personalitiesDir)) {
-      const pDir = join(personalitiesDir, id);
-      const pSt = lstatSync(pDir);
-      if (pSt.isSymbolicLink() || !pSt.isDirectory()) continue;
-      walkDir(pDir, join('personalities', id), entries, id, strippedTokens);
-    }
-  }
-
-  return { entries, strippedTokens };
-}
-
-function buildSecretsManifest(dataDir: string, strippedTokens: Map<string, Set<string>>): string {
-  const lines: string[] = [
-    '# Generated by ethos backup — re-enter these secrets after restoring',
-    `backed_up_at: ${new Date().toISOString()}`,
-  ];
-
-  // Read keys.json to capture key names (not values)
-  const keysPath = join(dataDir, 'keys.json');
-  let keyNames: string[] = [];
-  if (existsSync(keysPath)) {
-    try {
-      const raw = readFileSync(keysPath, 'utf8');
-      const parsed: unknown = JSON.parse(raw);
-      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-        keyNames = Object.keys(parsed as Record<string, unknown>);
-      }
-    } catch {
-      // Ignore malformed keys.json
-    }
-  }
-
-  if (keyNames.length > 0) {
-    lines.push('');
-    lines.push('global:');
-    for (const key of keyNames) {
-      lines.push(`  - key: ${key}`);
-      lines.push(`    fill_with: ethos keys set ${key} <value>`);
-    }
-  }
-
-  if (strippedTokens.size > 0) {
-    lines.push('');
-    lines.push('personalities:');
-    const sortedIds = [...strippedTokens.keys()].sort();
-    for (const pid of sortedIds) {
-      const servers = strippedTokens.get(pid);
-      if (!servers || servers.size === 0) continue;
-      lines.push(`  ${pid}:`);
-      lines.push('    mcp_auth:');
-      const sortedServers = [...servers].sort();
-      for (const server of sortedServers) {
-        lines.push(`      - server: ${server}`);
-        lines.push(`        fill_with: ethos mcp auth ${server}`);
-      }
-    }
-  }
-
-  lines.push('');
-  return lines.join('\n');
 }
 
 // Minimal tar format (POSIX ustar) — no external deps
@@ -499,123 +980,40 @@ function parseManifestHints(raw: string): ManifestHint[] {
 }
 
 // ---------------------------------------------------------------------------
-// Secrets manifest — simple line-based format (not YAML)
-//
-// Format:
-//   global:
-//     KEY: value
-//   personalities:
-//     <id>:
-//       KEY: value
-//
-// Values are trimmed. Matching quotes (single or double) are stripped.
-// Lines starting with # are comments. Blank lines are ignored.
+// Secrets injection from a file or stdin (personality import + `ethos import`)
 // ---------------------------------------------------------------------------
 
+/**
+ * Read an operator-written manifest and write every value into the vault.
+ *
+ * The personality-import lane treats a failed injection as fatal, as it always
+ * has — but the throw now names what already landed, because `injectSecrets`
+ * cannot roll those back.
+ */
+async function injectSecretsFromPath(secretsPath: string): Promise<number> {
+  const preflight = prepareSecrets(await readSecretsSource(secretsPath));
+  const result = preflight.ok
+    ? await injectSecrets(preflight.prepared, await getSecretsResolver())
+    : { writtenRefs: [], failedRef: preflight.failedRef, error: preflight.error };
+  if (result.error !== undefined) {
+    const written = result.writtenRefs;
+    throw new EthosError({
+      code: 'SECRETS_UNAVAILABLE',
+      cause:
+        written.length === 0
+          ? `Injecting secrets failed, none were written: ${result.error}`
+          : `Injecting secrets failed after ${written.length} were written (${written.join(', ')}): ${result.error}`,
+      action:
+        written.length === 0
+          ? 'Fix the manifest and re-run with --secrets.'
+          : 'Those refs are already in the vault. Set the remaining ones with `ethos secrets set <ref> <value>`.',
+    });
+  }
+  return result.writtenRefs.length;
+}
+
+/** A personality id is a path segment; anything else is traversal. */
 const VALID_ID_RE = /^[a-zA-Z0-9][a-zA-Z0-9_-]*$/;
-
-interface ParsedSecrets {
-  global: Map<string, string>;
-  personalities: Map<string, Map<string, string>>;
-}
-
-function stripQuotes(s: string): string {
-  if (s.length >= 2 && ((s[0] === '"' && s.at(-1) === '"') || (s[0] === "'" && s.at(-1) === "'"))) {
-    return s.slice(1, -1);
-  }
-  return s;
-}
-
-function parseSecretsManifest(raw: string): ParsedSecrets {
-  const global = new Map<string, string>();
-  const personalities = new Map<string, Map<string, string>>();
-
-  let section: 'none' | 'global' | 'personalities' = 'none';
-  let currentPersonality: string | undefined;
-
-  for (const line of raw.split('\n')) {
-    const trimmed = line.trimEnd();
-    if (!trimmed || trimmed.startsWith('#')) continue;
-
-    const indent = line.length - line.trimStart().length;
-
-    if (indent === 0 && trimmed.endsWith(':')) {
-      const header = trimmed.slice(0, -1);
-      if (header === 'global') {
-        section = 'global';
-        currentPersonality = undefined;
-      } else if (header === 'personalities') {
-        section = 'personalities';
-        currentPersonality = undefined;
-      }
-      continue;
-    }
-
-    if (section === 'personalities' && indent === 2 && trimmed.endsWith(':')) {
-      currentPersonality = trimmed.slice(0, -1);
-      if (!personalities.has(currentPersonality)) {
-        personalities.set(currentPersonality, new Map());
-      }
-      continue;
-    }
-
-    const colonIdx = trimmed.indexOf(':');
-    if (colonIdx < 0) continue;
-    const key = trimmed.slice(0, colonIdx).trim();
-    const value = stripQuotes(trimmed.slice(colonIdx + 1).trim());
-
-    if (section === 'global' && indent >= 2) {
-      global.set(key, value);
-    } else if (section === 'personalities' && indent >= 4 && currentPersonality) {
-      const pMap = personalities.get(currentPersonality);
-      if (pMap) pMap.set(key, value);
-    }
-  }
-
-  return { global, personalities };
-}
-
-async function injectSecrets(secretsPath: string): Promise<number> {
-  let raw: string;
-  if (secretsPath === '-') {
-    const chunks: Buffer[] = [];
-    for await (const chunk of process.stdin) {
-      chunks.push(chunk as Buffer);
-    }
-    raw = Buffer.concat(chunks).toString('utf8');
-  } else {
-    if (!existsSync(secretsPath)) {
-      throw new EthosError({
-        code: 'FILE_NOT_FOUND',
-        cause: `Secrets manifest not found: ${secretsPath}`,
-        action: 'Provide a valid path to a secrets manifest file.',
-      });
-    }
-    raw = readFileSync(secretsPath, 'utf8');
-  }
-
-  const parsed = parseSecretsManifest(raw);
-  const secrets = await getSecretsResolver();
-  let count = 0;
-
-  for (const [key, value] of parsed.global) {
-    await secrets.set(key, value);
-    count++;
-  }
-
-  if (parsed.personalities.size > 0) {
-    const { PersonalityScopedSecrets } = await import('@ethosagent/storage-fs');
-    for (const [pid, kvs] of parsed.personalities) {
-      const scoped = new PersonalityScopedSecrets(secrets, pid);
-      for (const [key, value] of kvs) {
-        await scoped.set(key, value);
-        count++;
-      }
-    }
-  }
-
-  return count;
-}
 
 // ---------------------------------------------------------------------------
 // Helpers for manifest-aware personality import
@@ -1149,7 +1547,7 @@ export async function runPersonalityImport(argv: string[]): Promise<void> {
 
     // Handle --secrets
     if (secretsPath) {
-      const count = await injectSecrets(secretsPath);
+      const count = await injectSecretsFromPath(secretsPath);
       console.log(`  Injected ${count} secret(s).`);
     }
 
@@ -1162,7 +1560,7 @@ export async function runPersonalityImport(argv: string[]): Promise<void> {
         console.log(`    - ${warn}`);
       }
     }
-    console.log(`  Run: ethos personality doctor ${personalityId}  to verify.`);
+    console.log(`  Run: ${doctorCommand(personalityId)}  to verify.`);
   } else {
     // -----------------------------------------------------------------------
     // Legacy fallback — no ETHOS.md manifest
@@ -1245,7 +1643,7 @@ export async function runPersonalityImport(argv: string[]): Promise<void> {
     }
 
     if (secretsPath) {
-      const count = await injectSecrets(secretsPath);
+      const count = await injectSecretsFromPath(secretsPath);
       console.log(`✓ Injected ${count} secret(s)`);
     }
 
@@ -1269,11 +1667,11 @@ export async function runPersonalityImport(argv: string[]): Promise<void> {
           }
         }
         console.log('');
-        console.log(`  Run: ethos personality doctor ${personalityId}  to verify when ready.`);
+        console.log(`  Run: ${doctorCommand(personalityId)}  to verify when ready.`);
       }
     } else {
       console.log(`✓ Personality "${personalityId}" imported.`);
-      console.log(`  Run: ethos personality doctor ${personalityId}  to verify.`);
+      console.log(`  Run: ${doctorCommand(personalityId)}  to verify.`);
     }
   }
 }

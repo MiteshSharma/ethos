@@ -235,11 +235,113 @@ function scanMcpForStrippedServers(personalityDir: string): string[] {
   return stripped;
 }
 
-function buildSecretsManifest(id: string, personalityDir: string): string | null {
-  const secretFields = scanConfigForSecrets(personalityDir);
-  const strippedServers = scanMcpForStrippedServers(personalityDir);
+/**
+ * Wrap one argument in POSIX single quotes, ending and reopening the quote
+ * around every embedded `'`. Inside single quotes a shell expands nothing, so
+ * spaces, `;`, `&`, backticks and `$(…)` are all literal.
+ *
+ * Every `fill_with:` and `install:` line below exists to be PASTED into a
+ * terminal, and the argument in it comes off disk verbatim — a config.yaml
+ * field name, an MCP server DIRECTORY name, a `plugins:` id, or a `name` read
+ * out of a package.json under `~/.ethos/plugins/node_modules`. One with a space
+ * produces a broken command; one with `$(…)` or `;` produces a line that runs
+ * something else entirely. All of them are plain YAML scalars whose ARGUMENT is
+ * single-quoted, never a double-quoted YAML string wrapping the command: `\'`
+ * is not a YAML escape, so `"… '\''…"` would not even parse. The `- id:`,
+ * `- key:`, `- server:`, `package:` and `version:` lines beside them are NOT
+ * quoted — they are data, not commands.
+ *
+ * The same four lines live in `packages/wiring/src/backup/secrets-manifest.ts`,
+ * `apps/ethos/src/commands/backup.ts`, `extensions/cron/src/index.ts` and
+ * `apps/web`'s AddMcpModal. Copied rather than imported: backup.ts keeps its
+ * own module-private.
+ */
+function shellQuote(arg: string): string {
+  return `'${arg.replaceAll("'", `'\\''`)}'`;
+}
 
-  if (secretFields.length === 0 && strippedServers.length === 0) return null;
+/**
+ * Characters that must never reach a manifest line.
+ *
+ * `shellQuote` above stops a metacharacter breaking out WITHIN a line. It does
+ * nothing about a newline, because a newline does not break out of the shell —
+ * it breaks out of the FORMAT. Both manifests here are line-oriented and built
+ * by concatenation, so a name carrying `\n` writes extra `fill_with:` and
+ * `install:` lines the operator is told to paste, and extra `- key:` /
+ * `- server:` lines the import path parses back as data, all of them
+ * indistinguishable from ones this file meant to write. Every argument comes
+ * off disk verbatim — a config.yaml field name, an MCP server DIRECTORY name, a
+ * `name`/`version` out of a bundled package.json — and Unix permits a newline
+ * in a filename, so this is not theoretical.
+ *
+ * The class is every C0 control and DEL, the C1 range, and U+2028/U+2029 —
+ * which YAML 1.1 treats as line breaks, so a real YAML reader would split on
+ * them even though `split('\n')` does not.
+ *
+ * The same rule lives in `packages/wiring/src/backup/secrets-manifest.ts`,
+ * copied for the same reason `shellQuote` is: `apps/*` is downstream of
+ * `packages/wiring`, and that module keeps its own private.
+ */
+// biome-ignore lint/suspicious/noControlCharactersInRegex: matching them is the point
+const UNSAFE_IN_MANIFEST = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/;
+
+// biome-ignore lint/suspicious/noControlCharactersInRegex: matching them is the point
+const ESCAPE_IN_NOTICE = /[\u0000-\u001f\u007f-\u009f\u2028\u2029"\\]/gu;
+
+/**
+ * Render a refused name for the `# ` notice, on ONE line — a notice that split
+ * the manifest would be the bug it is reporting.
+ */
+function describeRefused(name: string): string {
+  const escaped = name.replaceAll(
+    ESCAPE_IN_NOTICE,
+    (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`,
+  );
+  return `"${escaped}"`;
+}
+
+/**
+ * The refusal notice both manifests end with, as `#` comment lines — the import
+ * path's readers (`parseVaultManifest`, and the bundle reader that only skips
+ * `plugins.manifest.yaml`) ignore `#`, so this is read by the operator and by
+ * nothing else.
+ */
+function refusalNotice(refused: string[]): string[] {
+  if (refused.length === 0) return [];
+  return [
+    '',
+    `# ⚠ ${refused.length} name(s) REFUSED — each contains a control character, which`,
+    '#   would have split this file into lines that are not what they look like,',
+    '#   so what it names is left out above. Rename and export again:',
+    ...refused
+      .slice()
+      .sort()
+      .map((name) => `#     ${describeRefused(name)}`),
+  ];
+}
+
+function buildSecretsManifest(id: string, personalityDir: string): string | null {
+  const scannedFields = scanConfigForSecrets(personalityDir);
+  const scannedServers = scanMcpForStrippedServers(personalityDir);
+
+  // Omitted with a notice rather than failing the whole export: the personality
+  // itself is what the operator asked to export and it is unaffected, so
+  // refusing the bundle over one oddly named MCP directory blocks the goal for
+  // no gain. The notice travels WITH the manifest, which is the right audience
+  // — whoever fills these in is on the import side, not the export side.
+  const refused: string[] = [];
+  const secretFields: string[] = [];
+  const strippedServers: string[] = [];
+  for (const field of scannedFields) {
+    if (UNSAFE_IN_MANIFEST.test(field)) refused.push(field);
+    else secretFields.push(field);
+  }
+  for (const server of scannedServers) {
+    if (UNSAFE_IN_MANIFEST.test(server)) refused.push(server);
+    else strippedServers.push(server);
+  }
+
+  if (scannedFields.length === 0 && scannedServers.length === 0) return null;
 
   const lines: string[] = [
     '# Generated by ethos personality export',
@@ -256,12 +358,12 @@ function buildSecretsManifest(id: string, personalityDir: string): string | null
       if (display) {
         lines.push(`  - key: ${display.key}`);
         lines.push(`    description: ${display.description}`);
-        lines.push(`    fill_with: "${display.fillWith}"`);
+        lines.push(`    fill_with: ${display.fillWith}`);
       } else {
         // Unknown secret field — emit a generic entry
         lines.push(`  - key: ${field}`);
         lines.push(`    description: Secret field "${field}" (stripped from export)`);
-        lines.push(`    fill_with: "ethos secrets set ${field} <value>"`);
+        lines.push(`    fill_with: ethos secrets set ${shellQuote(field)} <value>`);
       }
     }
   }
@@ -272,9 +374,11 @@ function buildSecretsManifest(id: string, personalityDir: string): string | null
     for (const name of strippedServers) {
       lines.push(`  - server: ${name}`);
       lines.push(`    description: OAuth token for MCP server "${name}" (stripped from export)`);
-      lines.push(`    fill_with: "ethos mcp auth ${name}"`);
+      lines.push(`    fill_with: ethos mcp auth ${shellQuote(name)}`);
     }
   }
+
+  lines.push(...refusalNotice(refused));
 
   lines.push('');
   return lines.join('\n');
@@ -293,8 +397,19 @@ function buildPluginsManifest(personalityDir: string, dataDir: string): string |
   if (!pluginsLine) return null;
 
   const rawValue = pluginsLine.slice('plugins:'.length).trim();
-  const pluginIds = rawValue.split(/\s+/).filter(Boolean);
-  if (pluginIds.length === 0) return null;
+  const scannedIds = rawValue.split(/\s+/).filter(Boolean);
+  if (scannedIds.length === 0) return null;
+
+  // Splitting on `\s+` already drops CR, LF, TAB and FF, but not the rest of
+  // the C0 range, DEL or C1 — so an id still reaches the emitter with something
+  // that would split a line, and is left out with a notice like every other
+  // identifier here.
+  const refused: string[] = [];
+  const pluginIds: string[] = [];
+  for (const id of scannedIds) {
+    if (UNSAFE_IN_MANIFEST.test(id)) refused.push(id);
+    else pluginIds.push(id);
+  }
 
   const pluginsNodeModules = join(dataDir, 'plugins', 'node_modules');
   if (!existsSync(pluginsNodeModules)) {
@@ -304,8 +419,9 @@ function buildPluginsManifest(personalityDir: string, dataDir: string): string |
       '# Install these plugins on the target machine:',
       'plugins:',
       ...pluginIds.map((id) =>
-        [`  - id: ${id}`, `    install: "ethos plugin install ${id}"`].join('\n'),
+        [`  - id: ${id}`, `    install: ethos plugin install ${shellQuote(id)}`].join('\n'),
       ),
+      ...refusalNotice(refused),
       '',
     ];
     return lines.join('\n');
@@ -359,17 +475,30 @@ function buildPluginsManifest(personalityDir: string, dataDir: string): string |
 
   for (const id of pluginIds) {
     const found = resolved.find((r) => r.id === id);
-    if (found) {
+    // `name` and `version` are the only identifiers here that come out of JSON
+    // rather than off a `\s`-split config line, so they are the only ones that
+    // can hold a literal newline. A resolution that cannot be written falls
+    // back to the id-only entry — the plugin is still named and still
+    // installable, only the package/version detail is withheld — and the notice
+    // says the resolution was dropped rather than that nothing was found.
+    const writable =
+      found !== undefined &&
+      !UNSAFE_IN_MANIFEST.test(found.packageName) &&
+      !UNSAFE_IN_MANIFEST.test(found.version);
+    if (found !== undefined && writable) {
       lines.push(`  - id: ${found.id}`);
       lines.push(`    package: "${found.packageName}"`);
       lines.push(`    version: "${found.version}"`);
-      lines.push(`    install: "ethos plugin install ${found.packageName}"`);
+      lines.push(`    install: ethos plugin install ${shellQuote(found.packageName)}`);
     } else {
-      // Not found in node_modules — emit with just the ID
+      if (found !== undefined) refused.push(`${found.packageName}@${found.version}`);
+      // Not found in node_modules, or its name/version cannot be written —
+      // emit with just the ID
       lines.push(`  - id: ${id}`);
-      lines.push(`    install: "ethos plugin install ${id}"`);
+      lines.push(`    install: ethos plugin install ${shellQuote(id)}`);
     }
   }
+  lines.push(...refusalNotice(refused));
   lines.push('');
   return lines.join('\n');
 }

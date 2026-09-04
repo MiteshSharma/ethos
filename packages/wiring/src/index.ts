@@ -1570,3 +1570,13 @@ export { createOAuthService } from './oauth-factory';
 // ---------------------------------------------------------------------------
 
 export * from './security-kernel';
+
+// ---------------------------------------------------------------------------
+// Backup / restore (plan agent-state-backup, T2)
+// ---------------------------------------------------------------------------
+//
+// The archive format, the scope table and the create/restore pair. Re-exported
+// on the barrel so the CLI shims, the scheduled task and the web RPC all reach
+// one implementation.
+
+export * from './backup';

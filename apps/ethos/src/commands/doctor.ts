@@ -15,6 +15,10 @@
 // are warn-only — the user opted into the skill, not the doctor).
 
 import { spawnSync } from 'node:child_process';
+// Raw `node:fs` for the same reasons `runDoctorFix` already reaches for
+// `chmod`: Storage has no permissions API, and the integrity check hands a raw
+// path to SQLite (the documented store carve-out in AGENTS.md).
+import { existsSync, readdirSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -253,6 +257,13 @@ export interface DoctorFailFlags {
   awsFailed: boolean;
   requiredSecretMissing: boolean;
   dbUnopenable: boolean;
+  /** `PRAGMA integrity_check` failed on at least one store — corruption is a
+   *  hard failure, the same weight as `dbUnopenable`. Optional so existing
+   *  call sites/tests need no change; absent behaves as `false`. */
+  dbIntegrityFailed?: boolean;
+  /** `~/.ethos/secrets/` is reachable by group or other. Optional; absent
+   *  behaves as `false`. */
+  secretsDirTooOpen?: boolean;
   gatewayStale: boolean;
   channelRejected: boolean;
   /** Unreachable-but-not-rejected — warn only, never a hard fail. */
@@ -282,6 +293,8 @@ export function computeDoctorExit(f: DoctorFailFlags): number {
     f.awsFailed ||
     f.requiredSecretMissing ||
     f.dbUnopenable ||
+    f.dbIntegrityFailed === true ||
+    f.secretsDirTooOpen === true ||
     f.gatewayStale ||
     f.channelRejected ||
     f.callCaptureDepsMissing === true ||
@@ -319,6 +332,215 @@ async function checkSessionsDb(storage: Storage): Promise<DbCheckResult> {
   } catch (err) {
     return { ok: false, absent: false, error: err instanceof Error ? err.message : String(err) };
   }
+}
+
+// ---------------------------------------------------------------------------
+// Store integrity, vault permissions, skills/teams sanity (plan
+// agent-state-backup §4)
+// ---------------------------------------------------------------------------
+
+export interface IntegrityResult {
+  /** `dataDir`-relative database path. */
+  database: string;
+  status: 'ok' | 'absent' | 'failed';
+  /** What `PRAGMA integrity_check` said, or why it could not be run. */
+  detail?: string;
+}
+
+/** What one `WAL_STORES` pattern names on THIS machine. */
+interface StoreExpansion {
+  paths: string[];
+  /** Set when the directory is there but could not be listed. Carries the errno. */
+  error?: string;
+}
+
+/**
+ * Expand one `WAL_STORES` location into the paths it names on THIS machine.
+ * `*` matches one directory segment (`teams/*​/board.db`).
+ *
+ * A directory that is ABSENT expands to nothing — those stores do not exist
+ * here, which is the truth. Any other failure is "I could not look", and
+ * returning nothing for it would delete registered databases from the
+ * integrity report and let `doctor` pass without having checked them. That
+ * becomes a failed result instead, so it is printed and counts toward the exit.
+ */
+function expandStorePath(dataDir: string, pattern: string): StoreExpansion {
+  const star = pattern.indexOf('*');
+  if (star < 0) return { paths: [pattern] };
+  const before = pattern.slice(0, star).replace(/\/$/, '');
+  const after = pattern.slice(star + 1).replace(/^\//, '');
+  const dir = join(dataDir, before);
+  try {
+    return {
+      paths: readdirSync(dir, { withFileTypes: true })
+        .filter((e) => e.isDirectory())
+        .map((e) => `${before}/${e.name}/${after}`)
+        .sort(),
+    };
+  } catch (err) {
+    const code = err instanceof Error && 'code' in err ? String(err.code) : 'unknown';
+    if (code === 'ENOENT') return { paths: [] };
+    return { paths: [], error: `cannot list ${before}/ (${code})` };
+  }
+}
+
+/**
+ * Run `PRAGMA integrity_check` over every database the repo declares.
+ *
+ * The list is `WAL_STORES` — the same registry the backup scope table is built
+ * from and the drift gate holds to the repo — rather than a hardcoded name, so
+ * a store added anywhere is covered here the moment it is classified. Excluded
+ * stores (delivery-ledger, inbound-dedup, notify-queue) are checked too:
+ * whether a database is worth backing up and whether it is corrupt are
+ * different questions.
+ */
+export async function checkDatabaseIntegrity(dataDir: string): Promise<IntegrityResult[]> {
+  const { WAL_STORES } = await import('@ethosagent/wiring');
+  const { default: Database } = await import('@ethosagent/sqlite');
+
+  const paths = new Set<string>();
+  const unreadable: IntegrityResult[] = [];
+  for (const store of WAL_STORES) {
+    for (const pattern of [store.database, ...(store.alsoAt ?? [])]) {
+      const expansion = expandStorePath(dataDir, pattern);
+      for (const path of expansion.paths) paths.add(path);
+      if (expansion.error !== undefined) {
+        unreadable.push({ database: pattern, status: 'failed', detail: expansion.error });
+      }
+    }
+  }
+
+  const out: IntegrityResult[] = [...unreadable];
+  for (const rel of [...paths].sort()) {
+    const full = join(dataDir, rel);
+    if (!existsSync(full)) {
+      out.push({ database: rel, status: 'absent' });
+      continue;
+    }
+    let db: InstanceType<typeof Database> | undefined;
+    try {
+      // Opened read-WRITE on purpose. A read-only open of a WAL database whose
+      // `-shm` index is absent cannot create one and fails outright, which
+      // would report a healthy store as corrupt. `integrity_check` itself
+      // writes nothing.
+      db = new Database(full);
+      const rows: unknown[] = db.prepare('PRAGMA integrity_check').all();
+      const first = rows[0];
+      const verdict =
+        first && typeof first === 'object' && 'integrity_check' in first
+          ? String(first.integrity_check)
+          : 'no result';
+      out.push(
+        verdict === 'ok'
+          ? { database: rel, status: 'ok' }
+          : { database: rel, status: 'failed', detail: verdict },
+      );
+    } catch (err) {
+      out.push({
+        database: rel,
+        status: 'failed',
+        detail: err instanceof Error ? err.message : String(err),
+      });
+    } finally {
+      db?.close();
+    }
+  }
+  return out;
+}
+
+export interface VaultModeResult {
+  path: string;
+  present: boolean;
+  /** Octal permission bits, e.g. `'700'`. Absent when the directory is not there. */
+  mode?: string;
+  /** True when group or other hold ANY bit on the vault directory. */
+  tooOpen: boolean;
+}
+
+/**
+ * `~/.ethos/secrets/` holds credential files; nothing but the owner may reach
+ * it. `FileSecretsResolver` already chmods the directory to 0700 on every
+ * `set`, so anything else here was done to it from outside.
+ *
+ * The test is "group or other hold any bit", not "the mode is exactly 0700" —
+ * 0500 is tighter, not looser, and calling it a failure would be wrong.
+ */
+/**
+ * The one sentence `doctor` says about the vault's mode. Exported for the same
+ * reason `computeDoctorExit` is: the claim is the thing under test.
+ *
+ * It prints the mode that was READ. The line this replaces printed a constant
+ * `0700` for every mode that passed, which is a false statement about the
+ * tighter ones the check deliberately accepts.
+ */
+export function describeSecretsDirMode(result: VaultModeResult): string {
+  if (!result.present) return 'secrets/ not created yet.';
+  return result.tooOpen
+    ? `secrets/ is mode ${result.mode}, not owner-only`
+    : `secrets/ is mode ${result.mode} (owner only)`;
+}
+
+export function checkSecretsDirMode(dataDir: string): VaultModeResult {
+  const path = join(dataDir, 'secrets');
+  if (!existsSync(path)) return { path, present: false, tooOpen: false };
+  const mode = statSync(path).mode & 0o777;
+  return {
+    path,
+    present: true,
+    mode: mode.toString(8).padStart(3, '0'),
+    tooOpen: (mode & 0o077) !== 0,
+  };
+}
+
+export interface DirSanityIssue {
+  /** `dataDir`-relative path the issue is about. */
+  path: string;
+  message: string;
+}
+
+/**
+ * `skills/<id>/SKILL.md`, or `skills/<scope>/<slug>/SKILL.md` — the two layouts
+ * `UniversalScanner` reads. A directory matching neither is a skill that will
+ * never load, which is worth saying before the user wonders why.
+ */
+export function checkSkillsDir(dataDir: string): DirSanityIssue[] {
+  const root = join(dataDir, 'skills');
+  if (!existsSync(root)) return [];
+  const issues: DirSanityIssue[] = [];
+  for (const entry of readdirSync(root, { withFileTypes: true })) {
+    if (!entry.isDirectory() || entry.name.startsWith('.')) continue;
+    const dir = join(root, entry.name);
+    if (existsSync(join(dir, 'SKILL.md'))) continue;
+    const nested = readdirSync(dir, { withFileTypes: true }).some(
+      (sub) => sub.isDirectory() && existsSync(join(dir, sub.name, 'SKILL.md')),
+    );
+    if (!nested) {
+      issues.push({
+        path: `skills/${entry.name}`,
+        message: `no SKILL.md in skills/${entry.name}/ or any subdirectory — this skill will not load`,
+      });
+    }
+  }
+  return issues;
+}
+
+/**
+ * A team's data lives at `teams/<name>/`, its manifest at `teams/<name>.yaml`.
+ * A data directory with no manifest is a team nothing can start.
+ */
+export function checkTeamsDir(dataDir: string): DirSanityIssue[] {
+  const root = join(dataDir, 'teams');
+  if (!existsSync(root)) return [];
+  const issues: DirSanityIssue[] = [];
+  for (const entry of readdirSync(root, { withFileTypes: true })) {
+    if (!entry.isDirectory() || entry.name.startsWith('.')) continue;
+    if (existsSync(join(root, `${entry.name}.yaml`))) continue;
+    issues.push({
+      path: `teams/${entry.name}`,
+      message: `teams/${entry.name}/ has no teams/${entry.name}.yaml manifest — this team cannot start`,
+    });
+  }
+  return issues;
 }
 
 interface GatewayHealthResult {
@@ -513,6 +735,10 @@ export async function runDoctor(args: string[] = [], options?: DoctorOptions): P
 
     // W2.3 — DB, gateway heartbeat, and channel-token liveness.
     const db = await checkSessionsDb(storage);
+    const integrity = await checkDatabaseIntegrity(ethosDir());
+    const secretsDir = checkSecretsDirMode(ethosDir());
+    const skillIssues = checkSkillsDir(ethosDir());
+    const teamIssues = checkTeamsDir(ethosDir());
     const gateway = await checkGatewayHealth(storage);
     const skipChannelProbe =
       args.includes('--skip-channel-probe') || process.env.ETHOS_SKIP_VALIDATION === '1';
@@ -536,6 +762,8 @@ export async function runDoctor(args: string[] = [], options?: DoctorOptions): P
       awsFailed,
       requiredSecretMissing,
       dbUnopenable: !db.ok,
+      dbIntegrityFailed: integrity.some((r) => r.status === 'failed'),
+      secretsDirTooOpen: secretsDir.tooOpen,
       gatewayStale: gateway.status === 'stale',
       channelRejected,
       channelUnreachable,
@@ -557,6 +785,10 @@ export async function runDoctor(args: string[] = [], options?: DoctorOptions): P
       skillCliIssues: await buildSkillsCliJson(),
       awsSecrets: awsSecretsStatus,
       db: { ok: db.ok, absent: db.absent, ...(db.error ? { error: db.error } : {}) },
+      storeIntegrity: integrity,
+      secretsDir,
+      skillIssues,
+      teamIssues,
       gateway,
       channels: channels.map((c) => ({
         platform: c.platform,
@@ -826,6 +1058,55 @@ export async function runDoctor(args: string[] = [], options?: DoctorOptions): P
   console.log('');
 
   // -------------------------------------------------------------------------
+  // Store integrity (plan agent-state-backup §4)
+  // -------------------------------------------------------------------------
+
+  console.log(`${c.bold}Store integrity${c.reset}`);
+  const integrity = await checkDatabaseIntegrity(ethosDir());
+  const present = integrity.filter((r) => r.status !== 'absent');
+  const broken = integrity.filter((r) => r.status === 'failed');
+  if (present.length === 0) {
+    console.log(`  ${c.dim}–  No databases created yet.${c.reset}`);
+  } else if (broken.length === 0) {
+    console.log(
+      `  ${c.green}✓${c.reset}  PRAGMA integrity_check ok on ${present.length} store(s) ${c.dim}(${integrity.length - present.length} not created yet)${c.reset}`,
+    );
+  } else {
+    for (const row of broken) {
+      console.log(`  ${c.red}✗${c.reset}  ${row.database}: ${c.dim}${row.detail}${c.reset}`);
+    }
+    console.log(
+      `  ${c.dim}Restore from a backup: ${c.reset}${c.bold}ethos import <archive>${c.reset}`,
+    );
+  }
+  console.log('');
+
+  // -------------------------------------------------------------------------
+  // Secrets vault, skills and teams (plan agent-state-backup §4)
+  // -------------------------------------------------------------------------
+
+  console.log(`${c.bold}Data directory${c.reset}`);
+  const secretsDir = checkSecretsDirMode(ethosDir());
+  if (!secretsDir.present) {
+    console.log(`  ${c.dim}–  ${describeSecretsDirMode(secretsDir)}${c.reset}`);
+  } else if (secretsDir.tooOpen) {
+    console.log(
+      `  ${c.red}✗${c.reset}  ${describeSecretsDirMode(secretsDir)} — run ${c.bold}ethos doctor --fix${c.reset}`,
+    );
+  } else {
+    console.log(`  ${c.green}✓${c.reset}  ${describeSecretsDirMode(secretsDir)}`);
+  }
+  const dirIssues = [...checkSkillsDir(ethosDir()), ...checkTeamsDir(ethosDir())];
+  if (dirIssues.length === 0) {
+    console.log(`  ${c.green}✓${c.reset}  skills/ and teams/ layouts look right`);
+  } else {
+    for (const issue of dirIssues) {
+      console.log(`  ${c.yellow}⚠${c.reset}  ${issue.message}`);
+    }
+  }
+  console.log('');
+
+  // -------------------------------------------------------------------------
   // Gateway heartbeat (W2.3) — mirrors web-api /healthz semantics
   // -------------------------------------------------------------------------
 
@@ -914,6 +1195,18 @@ export async function runDoctor(args: string[] = [], options?: DoctorOptions): P
     );
     exitCode = 1;
   }
+  if (broken.length > 0) {
+    console.log(
+      `${c.red}✗ ${broken.length} store(s) failed PRAGMA integrity_check — see Store integrity above.${c.reset}`,
+    );
+    exitCode = 1;
+  }
+  if (secretsDir.tooOpen) {
+    console.log(
+      `${c.red}✗ secrets/ is readable beyond its owner (mode ${secretsDir.mode}) — run ${c.cyan}ethos doctor --fix${c.reset}${c.red}.${c.reset}`,
+    );
+    exitCode = 1;
+  }
   if (gateway.status === 'stale') {
     console.log(
       `${c.red}✗ Gateway heartbeat is stale — the gateway process may have died.${c.reset}`,
@@ -960,13 +1253,17 @@ async function runDoctorFix(): Promise<void> {
   console.log(`${c.bold}ethos doctor --fix${c.reset}`);
   console.log('');
 
-  // 1. Ensure ~/.ethos/personalities/ exists
-  const personalitiesDir = join(dir, 'personalities');
-  if (!(await storage.exists(personalitiesDir))) {
-    await storage.mkdir(personalitiesDir);
-    console.log(`  ${c.green}✓ Fixed:${c.reset}  Created ${personalitiesDir}`);
-  } else {
-    console.log(`  ${c.green}✓${c.reset}  ${personalitiesDir} exists`);
+  // 1. Ensure the directories every surface expects exist. `backups/` is where
+  //    `ethos backup` and the scheduled job write; the rest are read by the
+  //    personality registry, the skill scanner and the team supervisor.
+  for (const name of ['personalities', 'skills', 'teams', 'backups']) {
+    const path = join(dir, name);
+    if (!(await storage.exists(path))) {
+      await storage.mkdir(path);
+      console.log(`  ${c.green}✓ Fixed:${c.reset}  Created ${path}`);
+    } else {
+      console.log(`  ${c.green}✓${c.reset}  ${path} exists`);
+    }
   }
 
   // 2. Seed MEMORY.md and USER.md
@@ -1004,7 +1301,19 @@ async function runDoctorFix(): Promise<void> {
     }
   }
 
-  // 5. Validate provider in config
+  // 5. Tighten ~/.ethos/secrets/ to 0700 (owner only)
+  const secretsPath = join(dir, 'secrets');
+  if (await storage.exists(secretsPath)) {
+    try {
+      await chmod(secretsPath, 0o700);
+      console.log(`  ${c.green}✓ Fixed:${c.reset}  Set ${secretsPath} to 0700`);
+    } catch {
+      console.log(`  ${c.yellow}⚠${c.reset}  Could not chmod ${secretsPath}`);
+      exitCode = 1;
+    }
+  }
+
+  // 6. Validate provider in config
   const config = await readRawConfig(storage);
   if (config) {
     const { PROVIDER_CATALOG } = await import('@ethosagent/wiring/provider-catalog');

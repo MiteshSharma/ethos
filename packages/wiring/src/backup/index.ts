@@ -39,8 +39,14 @@ export {
 } from './scopes';
 export {
   buildSecretsManifest,
+  type InjectSecretsResult,
   injectSecrets,
+  type PreparedSecrets,
+  type PrepareSecretsResult,
+  prepareSecretEntries,
+  prepareSecrets,
   SECRETS_MANIFEST_PATH,
+  type SecretEntryInput,
   type SecretsManifestInit,
 } from './secrets-manifest';
 export { type SnapshotMode, snapshotSqlite } from './snapshot';
