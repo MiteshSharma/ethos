@@ -1962,6 +1962,31 @@ export interface EthosConfig {
    */
   nightlyPass?: { enabled?: boolean; cron?: string };
   /**
+   * Scheduled local snapshots of `~/.ethos` (plan agent-state-backup §3).
+   * ON unless explicitly disabled: an agent's state is its memory, its
+   * sessions and its personalities, and the deployment that most needs a
+   * backup is the one whose operator never went looking for the setting.
+   * Rotation (`keep`) bounds what that costs on disk.
+   *
+   * `dir` defaults to `<ethosDir>/backups`, computed in code — `${ETHOS_HOME}`
+   * is NOT a token config.yaml expands (D5). A relative value resolves under
+   * the data dir. `scope` names are validated where the backup runs, not here;
+   * the scope roster belongs to `@ethosagent/wiring`, which this package must
+   * not depend on. Config keys:
+   *   backup.enabled: true
+   *   backup.cron: 0 4 * * *
+   *   backup.scope: identity,state
+   *   backup.keep: 7
+   *   backup.dir: /mnt/snapshots
+   */
+  backup?: {
+    enabled?: boolean;
+    cron?: string;
+    scope?: string[];
+    keep?: number;
+    dir?: string;
+  };
+  /**
    * Proactive memory capture (memory-experience pillar B). Default-off. See
    * `MemoryCaptureConfig`. Parsed from flat `memoryCapture.<field>` keys.
    */
@@ -3091,6 +3116,14 @@ export async function writeConfig(
       lines.push(`nightlyPass.enabled: ${config.nightlyPass.enabled}`);
     if (config.nightlyPass.cron) lines.push(`nightlyPass.cron: ${config.nightlyPass.cron}`);
   }
+  if (config.backup) {
+    const bk = config.backup;
+    if (bk.enabled !== undefined) lines.push(`backup.enabled: ${bk.enabled}`);
+    if (bk.cron) lines.push(`backup.cron: ${bk.cron}`);
+    if (bk.scope && bk.scope.length > 0) lines.push(`backup.scope: ${bk.scope.join(',')}`);
+    if (bk.keep !== undefined) lines.push(`backup.keep: ${bk.keep}`);
+    if (bk.dir) lines.push(`backup.dir: ${bk.dir}`);
+  }
   if (config.memoryCapture) {
     const mc = config.memoryCapture;
     if (mc.enabled !== undefined) lines.push(`memoryCapture.enabled: ${mc.enabled}`);
@@ -4125,6 +4158,12 @@ function parseConfigYaml(src: string): EthosConfig {
       kv[`nightlyPass.${np[1]}`] = np[2].trim().replace(/^["']|["']$/g, '');
       continue;
     }
+    // backup.<field>: <value>
+    const bk = line.match(/^backup\.(\w+):\s*(.+)$/);
+    if (bk) {
+      kv[`backup.${bk[1]}`] = bk[2].trim().replace(/^["']|["']$/g, '');
+      continue;
+    }
     // weeklyDigest.<field>: <value>
     const wd = line.match(/^weeklyDigest\.(\w+):\s*(.+)$/);
     if (wd) {
@@ -4735,6 +4774,7 @@ function parseConfigYaml(src: string): EthosConfig {
               .filter((o) => o.length > 0),
           }
         : undefined,
+    backup: buildBackupConfig(kv),
     nightlyPass:
       kv['nightlyPass.enabled'] !== undefined || kv['nightlyPass.cron'] !== undefined
         ? {
@@ -5546,6 +5586,28 @@ function buildStorageConfig(kv: Record<string, string>): EthosConfig['storage'] 
     ...(encryption ? { encryption: true } : {}),
     ...(backend ? { backend } : {}),
     ...(hasS3 ? { s3 } : {}),
+  };
+}
+
+function buildBackupConfig(kv: Record<string, string>): EthosConfig['backup'] {
+  const present = Object.keys(kv).some((k) => k.startsWith('backup.'));
+  if (!present) return undefined;
+  const keepRaw = kv['backup.keep'];
+  // Validated as a WHOLE string, not with `parseInt`, which stops at the first
+  // non-digit: "7days" would parse as 7 and "1.5" as 1, both silently accepted
+  // by a message that promises a positive integer. `isSafeInteger` then rejects
+  // a value past 2^53 that `Number` would have rounded to something else.
+  const keep = keepRaw !== undefined && /^\d+$/.test(keepRaw) ? Number(keepRaw) : Number.NaN;
+  if (keepRaw !== undefined && !(Number.isSafeInteger(keep) && keep >= 1)) {
+    throw new Error(`Invalid backup.keep "${keepRaw}". Expected a positive integer.`);
+  }
+  const scope = splitList(kv['backup.scope']);
+  return {
+    ...(kv['backup.enabled'] !== undefined ? { enabled: kv['backup.enabled'] === 'true' } : {}),
+    ...(kv['backup.cron'] ? { cron: kv['backup.cron'] } : {}),
+    ...(scope.length > 0 ? { scope } : {}),
+    ...(keepRaw !== undefined ? { keep } : {}),
+    ...(kv['backup.dir'] ? { dir: kv['backup.dir'] } : {}),
   };
 }
 

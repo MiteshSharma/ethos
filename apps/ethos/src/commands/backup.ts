@@ -28,11 +28,14 @@ import { basename, join, resolve, sep } from 'node:path';
 import { Writable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { createGunzip, createGzip } from 'node:zlib';
-import { ethosDir } from '@ethosagent/config';
+import { type EthosConfig, ethosDir, readRawConfig } from '@ethosagent/config';
 import { isExactVersion, isValidNpmPackageName, isValidPluginId } from '@ethosagent/plugin-loader';
 import { type BundleManifest, EthosError } from '@ethosagent/types';
 import {
   ALL_SCOPES,
+  acquireBackupLock,
+  type BackupResult,
+  backupDirectory,
   createBackup,
   DEFAULT_SCOPES,
   type InjectSecretsResult,
@@ -47,7 +50,7 @@ import {
   type SecretEntryInput,
 } from '@ethosagent/wiring';
 import { writeJson } from '../json-output';
-import { getSecretsResolver } from '../wiring';
+import { getSecretsResolver, getStorage } from '../wiring';
 import { hasFlag, parseFlagValue } from './serve-helpers';
 
 const USAGE_BACKUP =
@@ -55,9 +58,17 @@ const USAGE_BACKUP =
 const USAGE_IMPORT =
   'Usage: ethos import <archive> [--scope <names>] [--dry-run] [--force] [--secrets <file | - | prompt>] [--json]';
 
-/** Where `ethos backup` writes when no path is given (plan D5, `backup.dir`). */
-export function defaultBackupDir(): string {
-  return join(ethosDir(), 'backups');
+/**
+ * Where `ethos backup` writes when no path is given (plan D5, `backup.dir`).
+ *
+ * One resolver for the whole system: the scheduled job, `ethos status` and this
+ * command all go through `backupDirectory`, so an operator who sets
+ * `backup.dir` does not get `status` reading one directory while `ethos backup`
+ * writes into another. Config is optional — a deployment that has none still
+ * gets `<ethosDir>/backups`.
+ */
+export function defaultBackupDir(config?: EthosConfig | null): string {
+  return backupDirectory(config ?? undefined);
 }
 
 // ---------------------------------------------------------------------------
@@ -78,21 +89,69 @@ export async function runBackup(argv: string[]): Promise<void> {
   if (outFlag === '') {
     return fail(jsonMode, 'input_invalid', '--out requires a path.', [USAGE_BACKUP]);
   }
+  // Config is consulted here for exactly one thing: which directory to write
+  // into. `serve`/`gateway`/`status` are right to refuse to start on a broken
+  // config; this is the get-my-data-out command, and a broken config is
+  // precisely when someone needs it to work. So a config that will not parse
+  // degrades to the default directory and says so — it never refuses.
+  //
+  // Deliberately narrow: only the config READ is caught. Everything below it
+  // still fails the way it always did.
+  let config: EthosConfig | null = null;
+  let configFallback: string | undefined;
+  try {
+    config = await readRawConfig(getStorage());
+  } catch (err) {
+    // `describeError` on a config parse error names the field and the rule
+    // (`Invalid backup.keep "0"` …), never a credential — `readRawConfig` does
+    // not resolve `${secrets:…}` refs, and the plaintext-secret check reports
+    // the field, not the value.
+    configFallback =
+      `${join(ethosDir(), 'config.yaml')} could not be read (${describeError(err)}) — ` +
+      `backup.dir was ignored; the default backup directory ${defaultBackupDir()} was used.`;
+  }
+  const backupDir = defaultBackupDir(config);
   const positional = positionalArgs(argv, ['--out', '--scope']);
-  const outPath = resolve(
-    outFlag ?? positional[0] ?? join(defaultBackupDir(), defaultArchiveName()),
-  );
+  const outPath = resolve(outFlag ?? positional[0] ?? join(backupDir, defaultArchiveName()));
 
   const dataDir = ethosDir();
-  // The CLI is a command-line process, so it may block on `VACUUM INTO` (D2).
-  // Only a serving process is required to use the async `backup()` copy.
-  const result = await createBackup({
-    dataDir,
-    outPath,
-    scopes,
-    snapshot: 'vacuum',
-    secrets: await getSecretsResolver(),
-  });
+
+  // The other half of the `backups/.lock` sentinel the scheduled job takes
+  // (plan §3). Without it the lock is one-directional: the 04:00 job waits for
+  // a manual run that never holds anything, and the two stream the same
+  // databases into two archives at once.
+  //
+  // The race is over the SOURCE, not the destination, so the lock is taken even
+  // when `--out` points somewhere else entirely.
+  //
+  // No wait (`timeoutMs: 0`): the scheduled job can afford to block for five
+  // seconds because it has nowhere to report to. A person at a terminal is
+  // better served by an immediate refusal naming what holds the lock than by a
+  // stall that ends in the same refusal. Stale locks are still reclaimed —
+  // that is the helper's job, not this one's.
+  let release: () => void;
+  try {
+    release = await acquireBackupLock(backupDir, { timeoutMs: 0 });
+  } catch (err) {
+    return fail(jsonMode, 'backup_locked', describeError(err));
+  }
+
+  let result: BackupResult;
+  try {
+    // The CLI is a command-line process, so it may block on `VACUUM INTO` (D2).
+    // Only a serving process is required to use the async `backup()` copy.
+    result = await createBackup({
+      dataDir,
+      outPath,
+      scopes,
+      snapshot: 'vacuum',
+      secrets: await getSecretsResolver(),
+    });
+  } finally {
+    // A failed backup must not leave the directory locked — the next run, and
+    // the next scheduled one, would be refused by a holder that is long gone.
+    release();
+  }
 
   const command = bootstrapCommand(result.path, result.scopes);
 
@@ -106,6 +165,7 @@ export async function runBackup(argv: string[]): Promise<void> {
       createdAt: result.manifest.createdAt,
       unclassifiedDatabases: result.unclassifiedDatabases,
       sensitive: result.scopes.includes('state'),
+      ...(configFallback ? { configFallback } : {}),
       ...(bootstrap ? { bootstrap: command } : {}),
     });
     return;
@@ -115,6 +175,7 @@ export async function runBackup(argv: string[]): Promise<void> {
   console.log(
     `  ${result.fileCount} file(s), ${formatBytes(result.bytes)} · scopes: ${result.scopes.join(', ')}`,
   );
+  if (configFallback) console.log(`  ⚠ ${configFallback}`);
   if (result.scopes.includes('state')) {
     console.log('');
     console.log('  The state scope carries conversation history (sessions, cards, memory).');

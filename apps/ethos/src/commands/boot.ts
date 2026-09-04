@@ -70,6 +70,8 @@ import {
   initPairingDb,
   type MessagingSendFn,
   sanitize,
+  seedAllSystemJobs,
+  systemJobProblem,
   wrapUntrusted,
 } from '@ethosagent/wiring';
 import { runBootReconciliation } from '../boot-reconciliation';
@@ -1017,35 +1019,21 @@ export async function runBoot(args: string[], config: EthosConfig | null): Promi
   void watcherManager.start().catch((err) => {
     console.error('[watcher] failed to start watcher manager:', err);
   });
-  const seedSystemJobs = async () => {
-    await scheduler.seedSystemJob({
-      name: 'Observability Prune',
-      schedule: '0 3 * * *',
-      systemTask: 'observability-prune',
+  // Reconcile the system cron jobs against config (plan D7). Not just a
+  // seeder: a schedule edited in config.yaml is patched onto the existing job,
+  // and a feature switched off has its job removed instead of firing forever.
+  // Only the jobs in that table are touched — watcher ticks are seeded per
+  // watcher by the watcher manager and are left alone.
+  void seedAllSystemJobs(scheduler, cfg)
+    .then((outcomes) => {
+      for (const o of outcomes) {
+        const problem = systemJobProblem(o);
+        if (problem) console.error(`[cron] ${problem}`);
+      }
+    })
+    .catch((err) => {
+      console.error('[cron] system job reconciliation failed:', err);
     });
-    if (cfg.nightlyPass?.enabled) {
-      await scheduler.seedSystemJob({
-        name: 'Nightly Pass',
-        schedule: cfg.nightlyPass.cron ?? '0 3 * * *',
-        systemTask: 'nightly-pass',
-      });
-    }
-    if (cfg.weeklyDigest?.enabled) {
-      await scheduler.seedSystemJob({
-        name: 'Weekly Digest',
-        schedule: cfg.weeklyDigest.cron ?? '0 9 * * 1',
-        systemTask: 'weekly-digest',
-      });
-    }
-    if (cfg.evolverCronEnabled) {
-      await scheduler.seedSystemJob({
-        name: 'Skill Evolver',
-        schedule: cfg.evolverSchedule ?? '0 3 * * *',
-        systemTask: 'skill-evolver',
-      });
-    }
-  };
-  void seedSystemJobs();
 
   // -------------------------------------------------------------------------
   // §3b step 8 — adapters started. HARD PRECONDITION for step 9: a delivery

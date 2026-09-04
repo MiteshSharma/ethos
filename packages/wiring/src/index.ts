@@ -1580,3 +1580,10 @@ export * from './security-kernel';
 // one implementation.
 
 export * from './backup';
+
+// ---------------------------------------------------------------------------
+// Scheduled backup + system cron job reconciliation (plan agent-state-backup, T4)
+// ---------------------------------------------------------------------------
+
+export * from './backup-schedule';
+export * from './system-jobs';

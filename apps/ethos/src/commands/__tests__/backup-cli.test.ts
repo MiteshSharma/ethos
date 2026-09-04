@@ -12,7 +12,12 @@ import { join } from 'node:path';
 import { Readable } from 'node:stream';
 import Database from '@ethosagent/sqlite';
 import { InMemorySecretsResolver } from '@ethosagent/storage-fs';
-import { buildSecretsManifest, injectSecrets, prepareSecrets } from '@ethosagent/wiring';
+import {
+  acquireBackupLock,
+  buildSecretsManifest,
+  injectSecrets,
+  prepareSecrets,
+} from '@ethosagent/wiring';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { getSecretsResolver } from '../../wiring';
 import {
@@ -225,6 +230,156 @@ describe('ethos backup — flags', () => {
       expect(line).toContain(`mitesh'\\''s out.tar.gz`);
       expect(line).not.toContain(`ethos import ${archive}`);
     });
+  });
+});
+
+// The sentinel is only a lock if BOTH halves take it. The scheduled job takes
+// it (`runScheduledBackup`); these are the manual half — a lock the CLI never
+// took would let the 04:00 job and a person stream the same databases into two
+// archives at once, which is the failure the sentinel exists to prevent.
+describe('ethos backup — the backups/.lock sentinel', () => {
+  it('refuses a second backup while the lock is held, and names what holds it', async () => {
+    await seedDataDir(stateDir);
+    const dir = join(stateDir, 'backups');
+    const release = await acquireBackupLock(dir);
+    try {
+      // `--out` points OUTSIDE the backup directory: the race is over the
+      // source databases, not the destination, so the lock still applies.
+      const archive = join(stateDir, 'never.tar.gz');
+      await runBackup(['--out', archive]);
+      expect(process.exitCode).toBe(1);
+      expect(errOut.join('\n')).toContain('another backup is already in progress');
+      expect(errOut.join('\n')).toContain(join(dir, '.lock'));
+      await expect(stat(archive)).rejects.toThrow();
+    } finally {
+      release();
+    }
+  });
+
+  it('reports the refusal in the --json envelope', async () => {
+    await seedDataDir(stateDir);
+    const release = await acquireBackupLock(join(stateDir, 'backups'));
+    try {
+      await runBackup(['--out', join(stateDir, 'never.tar.gz'), '--json']);
+      expect(lastJson()).toMatchObject({
+        ok: false,
+        error: {
+          code: 'backup_locked',
+          message: expect.stringContaining('another backup is already in progress'),
+        },
+      });
+      expect(process.exitCode).toBe(1);
+    } finally {
+      release();
+    }
+  });
+
+  it('takes the lock in the configured backup.dir, not only the default one', async () => {
+    await seedDataDir(stateDir);
+    await writeFile(
+      join(stateDir, 'config.yaml'),
+      'provider: anthropic\nmodel: m\npersonality: demo\nbackup.dir: snapshots\n',
+    );
+    const release = await acquireBackupLock(join(stateDir, 'snapshots'));
+    try {
+      await runBackup(['--out', join(stateDir, 'never.tar.gz')]);
+      expect(process.exitCode).toBe(1);
+      expect(errOut.join('\n')).toContain(join(stateDir, 'snapshots', '.lock'));
+    } finally {
+      release();
+    }
+  });
+
+  it('releases the lock after a successful backup', async () => {
+    await seedDataDir(stateDir);
+    await backupTo(['--json']);
+    expect(lastJson().ok).toBe(true);
+    await expect(stat(join(stateDir, 'backups', '.lock'))).rejects.toThrow();
+
+    // And the next run is not refused by the previous one.
+    out = [];
+    await runBackup(['--out', join(stateDir, 'second.tar.gz'), '--json']);
+    expect(lastJson().ok).toBe(true);
+  });
+
+  it('releases the lock after a failed backup', async () => {
+    await seedDataDir(stateDir);
+    // The out-path's parent is a FILE, so writing the archive cannot succeed.
+    await writeFile(join(stateDir, 'not-a-dir'), 'x');
+    await expect(runBackup(['--out', join(stateDir, 'not-a-dir', 'out.tar.gz')])).rejects.toThrow();
+    // A failure that leaves the lock behind refuses every later backup,
+    // scheduled ones included, on behalf of a process that is long gone.
+    await expect(stat(join(stateDir, 'backups', '.lock'))).rejects.toThrow();
+  });
+});
+
+// `backup.dir` is one setting read by three surfaces — the scheduled job,
+// `ethos status` and this command. When they disagree, `status` reports on a
+// directory nothing writes to.
+describe('ethos backup — backup.dir', () => {
+  it('writes into a configured backup.dir', async () => {
+    await seedDataDir(stateDir);
+    await writeFile(
+      join(stateDir, 'config.yaml'),
+      'provider: anthropic\nmodel: m\npersonality: demo\nbackup.dir: snapshots\n',
+    );
+    await runBackup(['--json']);
+    const json = lastJson();
+    expect(json.ok).toBe(true);
+    // Relative resolves under the data dir, never the process cwd (plan D5).
+    expect(String(json.path).startsWith(join(stateDir, 'snapshots'))).toBe(true);
+  });
+
+  it('writes into <ethosDir>/backups when backup.dir is unset', async () => {
+    await seedDataDir(stateDir);
+    await runBackup(['--json']);
+    expect(String(lastJson().path).startsWith(join(stateDir, 'backups'))).toBe(true);
+  });
+});
+
+// A config that will not parse is exactly when someone reaches for a backup.
+// `backup.dir` is the only thing config is read for here, so an unusable
+// config costs the directory preference — not the command.
+describe('ethos backup — an unparseable config.yaml', () => {
+  /** `backup.keep` must be a positive integer; `0` makes `parseConfigYaml` throw. */
+  const BROKEN = 'provider: anthropic\nmodel: m\npersonality: demo\nbackup.keep: 0\n';
+
+  it('still writes the backup, into the default directory, and says why', async () => {
+    await seedDataDir(stateDir);
+    await writeFile(join(stateDir, 'config.yaml'), BROKEN);
+    await runBackup([]);
+    expect(process.exitCode).toBeUndefined();
+    expect(joined()).toContain(`✓ Backup written to: ${join(stateDir, 'backups')}`);
+    expect(joined()).toContain('could not be read');
+    expect(joined()).toContain('backup.dir was ignored');
+    expect(joined()).toContain(join(stateDir, 'backups'));
+  });
+
+  it('carries the fallback in the --json payload, not only on the human path', async () => {
+    await seedDataDir(stateDir);
+    await writeFile(join(stateDir, 'config.yaml'), BROKEN);
+    await runBackup(['--json']);
+    const json = lastJson();
+    expect(json.ok).toBe(true);
+    expect(String(json.path).startsWith(join(stateDir, 'backups'))).toBe(true);
+    expect(String(json.configFallback)).toContain('backup.keep');
+    expect(String(json.configFallback)).toContain(join(stateDir, 'backups'));
+  });
+
+  it('--out still wins, and no fallback is claimed on a config that parses', async () => {
+    await seedDataDir(stateDir);
+    await writeFile(join(stateDir, 'config.yaml'), BROKEN);
+    const archive = join(stateDir, 'elsewhere.tar.gz');
+    await runBackup(['--out', archive, '--json']);
+    expect(lastJson().path).toBe(archive);
+    await expect(stat(archive)).resolves.toBeTruthy();
+
+    // The good-config run must not report a fallback — that is the guard
+    // against catching more than the config read.
+    out = [];
+    await writeFile(join(stateDir, 'config.yaml'), 'provider: anthropic\nmodel: m\n');
+    await runBackup(['--out', join(stateDir, 'second.tar.gz'), '--json']);
+    expect(lastJson().configFallback).toBeUndefined();
   });
 });
 

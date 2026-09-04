@@ -200,6 +200,25 @@ export function buildSystemTaskHandlers(
       await runEvolve(['run', '--quiet'], config);
       return { output: 'Skill evolver run completed' };
     },
+    // Scheduled snapshot of ~/.ethos (plan agent-state-backup §3). Failures
+    // THROW: the cron tick logs them and stamps `lastError` on the job, which
+    // is what `ethos cron list` and the status pane read. A backup that fails
+    // quietly is worse than none, because it looks like one.
+    backup: async () => {
+      const { resolveBackupSettings, runScheduledBackup } = await import('@ethosagent/wiring');
+      const settings = resolveBackupSettings(config);
+      const result = await runScheduledBackup({
+        dataDir: ethosDir(),
+        settings,
+        storage: getStorage(),
+        secrets: await getSecretsResolver(),
+      });
+      const rotated =
+        result.rotated.length > 0 ? `, rotated ${result.rotated.length} older archive(s)` : '';
+      return {
+        output: `Backup written to ${result.path} (${result.fileCount} files, ${result.bytes} bytes, scopes: ${result.scopes.join('+')})${rotated}`,
+      };
+    },
   };
 }
 

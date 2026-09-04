@@ -497,10 +497,22 @@ export class CronScheduler {
   async createJob(
     params: Omit<CronJob, 'id' | 'createdAt' | 'nextRunAt' | 'status' | 'runCount' | 'repeat'> & {
       repeat?: RepeatPolicy;
+      /**
+       * Explicit, immutable job id. Defaults to a slug of `name`, which is what
+       * every user-facing caller wants. `reconcileSystemJob` passes it so that
+       * a system job's identity survives a rename of its display `name`.
+       */
+      id?: string;
     },
   ): Promise<CronJob> {
     if (!params.personalityId) {
       throw new Error('personalityId is required');
+    }
+
+    // An id becomes a directory name under `<cronDir>/output/`, so an explicit
+    // one is held to the same charset `slugify` produces and `listRuns` guards.
+    if (params.id !== undefined && !/^[a-zA-Z0-9][a-zA-Z0-9_-]*$/.test(params.id)) {
+      throw new Error(`Invalid job id: "${params.id}"`);
     }
 
     if (!isValidSchedule(params.schedule)) {
@@ -539,7 +551,7 @@ export class CronScheduler {
 
     const job: CronJob = {
       ...params,
-      id: slugify(params.name),
+      id: params.id ?? slugify(params.name),
       source: params.source ?? 'user',
       systemTask: params.systemTask,
       status: 'active',
@@ -738,6 +750,87 @@ export class CronScheduler {
       systemTask: params.systemTask,
       missedRunPolicy: 'skip',
     });
+  }
+
+  /**
+   * Reconcile ONE system-managed cron job against what the operator's config
+   * now says, and return what had to change.
+   *
+   * `seedSystemJob` only ever creates: a schedule edited in config.yaml, a
+   * handler renamed in code, or a feature switched off all left the old job
+   * running exactly as it was, so the scheduler and the config disagreed
+   * forever with nothing to say so. This is the reconciling half.
+   *
+   * Deliberately config-SHAPE-agnostic — it takes an `enabled` boolean, not an
+   * `EthosConfig` — so `extensions/cron` keeps knowing nothing about the
+   * operator config schema. The EthosConfig -> spec mapping lives one layer
+   * out, in `seedAllSystemJobs` (`@ethosagent/wiring`).
+   *
+   * Identity is the caller's explicit `id`, NOT a slug of `name`. `name` is
+   * display copy: renaming "Backup" to "Nightly backup" must PATCH the one job,
+   * and a name-derived id would instead create a second job while the first
+   * kept firing — an orphan generator, not a reconciler.
+   *
+   * Only ever touches jobs it owns: an id occupied by a `source:'user'` job is
+   * left alone rather than overwritten, because a user's job is their data. But
+   * that is reported as `'conflict'`, not `'unchanged'` — the desired state does
+   * NOT hold, the system job does not exist, and a caller that hears
+   * "unchanged" would never say so. A changed `systemTask` is a
+   * remove-and-recreate: `CronJobUpdate` has no `systemTask` field, and a job
+   * pointing at a handler name that no longer exists throws on every tick.
+   */
+  async reconcileSystemJob(params: {
+    /** Immutable identity. Never derived from `name`. */
+    id: string;
+    name: string;
+    schedule: string;
+    systemTask: string;
+    personalityId?: string;
+    /** `false` removes the job. Defaults to true. */
+    enabled?: boolean;
+  }): Promise<{
+    action: 'created' | 'patched' | 'removed' | 'unchanged' | 'conflict';
+    job: CronJob | null;
+  }> {
+    const id = params.id;
+    const existing = await this.getJob(id);
+
+    if (params.enabled === false) {
+      if (!existing) return { action: 'unchanged', job: null };
+      if (existing.source !== 'system') return { action: 'conflict', job: existing };
+      await this.removeSystemJob(id);
+      return { action: 'removed', job: null };
+    }
+
+    const create = async () => ({
+      action: 'created' as const,
+      job: await this.createJob({
+        id,
+        name: params.name,
+        schedule: params.schedule,
+        prompt: '',
+        personalityId: params.personalityId ?? 'system',
+        source: 'system' as const,
+        systemTask: params.systemTask,
+        missedRunPolicy: 'skip' as const,
+      }),
+    });
+
+    if (!existing) return create();
+    if (existing.source !== 'system') return { action: 'conflict', job: existing };
+    if (existing.systemTask !== params.systemTask) {
+      await this.removeSystemJob(id);
+      return create();
+    }
+    const patch: CronJobUpdate = {};
+    if (existing.schedule !== params.schedule) patch.schedule = params.schedule;
+    // `name` is mutable presentation data. Without this the display drifts from
+    // config the moment a spec is renamed, and never converges.
+    if (existing.name !== params.name) patch.name = params.name;
+    if (Object.keys(patch).length > 0) {
+      return { action: 'patched', job: await this.updateJob(id, patch) };
+    }
+    return { action: 'unchanged', job: existing };
   }
 
   /**

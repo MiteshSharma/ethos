@@ -1,6 +1,7 @@
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { type EthosConfig, ethosDir, readRawConfig } from '@ethosagent/config';
+import { backupDirectory } from '@ethosagent/wiring';
 import { errorLogExists, errorLogPath, readRecentErrors } from '../error-log';
 import { buildVersionInfo } from '../version-info';
 import { getStorage } from '../wiring';
@@ -80,7 +81,7 @@ export async function runStatus(cmdArgs: string[] = []): Promise<void> {
       adapters: buildAdapterJson(config),
       personalities: { count: personalityCount, dir: pdir },
       cron: countCronJobs(),
-      backups: buildBackupJson(),
+      backups: buildBackupJson(config),
       errorLog: { exists: errorLogExists(), recentCount: readRecentErrors(10).length },
       exit: hardErrors > 0 ? 1 : 0,
     };
@@ -142,10 +143,10 @@ export async function runStatus(cmdArgs: string[] = []): Promise<void> {
   }
 
   // ---- Backups ---------------------------------------------------------
-  const last = lastBackup();
+  const last = lastBackup(config);
   if (last === null) {
     console.log(
-      `${c.dim}- backups       none in ${backupDir()} (run ${c.reset}${c.bold}ethos backup${c.dim})${c.reset}`,
+      `${c.dim}- backups       none in ${backupDir(config)} (run ${c.reset}${c.bold}ethos backup${c.dim})${c.reset}`,
     );
   } else {
     console.log(
@@ -329,12 +330,13 @@ export function countCronJobs(): CronStoreState {
 }
 
 /**
- * Where backups are kept. `backup.dir` is not a config field yet (T4 of
- * plan/phases/agent-state-backup.md adds it); until then this is the plan's
- * documented default and the path `ethos backup` writes to.
+ * Where backups are kept — `backup.dir`, defaulting to `<ethosDir>/backups`.
+ * The default is computed in code, never written as a `${ETHOS_HOME}` token in
+ * config.yaml (plan D5). Config is optional so the helper still answers for a
+ * deployment that has none.
  */
-export function backupDir(): string {
-  return join(ethosDir(), 'backups');
+export function backupDir(config?: EthosConfig): string {
+  return backupDirectory(config);
 }
 
 export interface LastBackup {
@@ -346,8 +348,8 @@ export interface LastBackup {
 }
 
 /** The newest `.tar.gz` in the backup directory, or `null` when there is none. */
-export function lastBackup(): LastBackup | null {
-  const dir = backupDir();
+export function lastBackup(config?: EthosConfig): LastBackup | null {
+  const dir = backupDir(config);
   if (!existsSync(dir)) return null;
   let newest: LastBackup | null = null;
   let count = 0;
@@ -366,14 +368,14 @@ export function lastBackup(): LastBackup | null {
   return newest === null ? null : { ...newest, count };
 }
 
-function buildBackupJson(): {
+function buildBackupJson(config: EthosConfig): {
   dir: string;
   count: number;
   last: { name: string; bytes: number; at: string } | null;
 } {
-  const last = lastBackup();
+  const last = lastBackup(config);
   return {
-    dir: backupDir(),
+    dir: backupDir(config),
     count: last?.count ?? 0,
     last: last && { name: last.name, bytes: last.size, at: last.mtime.toISOString() },
   };

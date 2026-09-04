@@ -110,6 +110,8 @@ import {
   type MessagingSendFn,
   resolveKanbanDbPath,
   sanitize,
+  seedAllSystemJobs,
+  systemJobProblem,
   wrapUntrusted,
 } from '@ethosagent/wiring';
 import {
@@ -1248,38 +1250,21 @@ export async function runGatewayStart(opts: GatewayStartOptions = {}): Promise<v
     console.error('[watcher] failed to start watcher manager:', err);
   });
 
-  // Seed system cron jobs into the scheduler's persistent store. Each call
-  // is idempotent — existing jobs are returned as-is. The handlers were
-  // already registered via `systemTasks` in the scheduler config above.
-  const seedSystemJobs = async () => {
-    await scheduler.seedSystemJob({
-      name: 'Observability Prune',
-      schedule: '0 3 * * *',
-      systemTask: 'observability-prune',
+  // Reconcile the system cron jobs against config (plan D7). Not just a
+  // seeder: a schedule edited in config.yaml is patched onto the existing job,
+  // and a feature switched off has its job removed instead of firing forever.
+  // Only the jobs in that table are touched — watcher ticks are seeded per
+  // watcher by the watcher manager and are left alone.
+  void seedAllSystemJobs(scheduler, config)
+    .then((outcomes) => {
+      for (const o of outcomes) {
+        const problem = systemJobProblem(o);
+        if (problem) console.error(`[cron] ${problem}`);
+      }
+    })
+    .catch((err) => {
+      console.error('[cron] system job reconciliation failed:', err);
     });
-    if (config.nightlyPass?.enabled) {
-      await scheduler.seedSystemJob({
-        name: 'Nightly Pass',
-        schedule: config.nightlyPass.cron ?? '0 3 * * *',
-        systemTask: 'nightly-pass',
-      });
-    }
-    if (config.weeklyDigest?.enabled) {
-      await scheduler.seedSystemJob({
-        name: 'Weekly Digest',
-        schedule: config.weeklyDigest.cron ?? '0 9 * * 1',
-        systemTask: 'weekly-digest',
-      });
-    }
-    if (config.evolverCronEnabled) {
-      await scheduler.seedSystemJob({
-        name: 'Skill Evolver',
-        schedule: config.evolverSchedule ?? '0 3 * * *',
-        systemTask: 'skill-evolver',
-      });
-    }
-  };
-  void seedSystemJobs();
 
   // Start all adapters
   await Promise.all(adapters.map((a) => a.start()));

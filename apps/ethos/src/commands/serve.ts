@@ -78,6 +78,8 @@ import {
   IdentityMap,
   resolvePersonalityModelFit,
   sanitize,
+  seedAllSystemJobs,
+  systemJobProblem,
   wrapUntrusted,
 } from '@ethosagent/wiring';
 import { appendErrorLog } from '../error-log';
@@ -828,39 +830,23 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
     console.error('[watcher] failed to start watcher manager:', err);
   });
 
-  // Seed system cron jobs into the scheduler's persistent store. Each call
-  // is idempotent — existing jobs are returned as-is. The handlers were
-  // already registered via `systemTasks` in the scheduler config above.
-  const seedSystemJobs = async () => {
-    if (!cronScheduler) return;
-    await cronScheduler.seedSystemJob({
-      name: 'Observability Prune',
-      schedule: '0 3 * * *',
-      systemTask: 'observability-prune',
-    });
-    if (config.nightlyPass?.enabled) {
-      await cronScheduler.seedSystemJob({
-        name: 'Nightly Pass',
-        schedule: config.nightlyPass.cron ?? '0 3 * * *',
-        systemTask: 'nightly-pass',
+  // Reconcile the system cron jobs against config (plan D7). Not just a
+  // seeder: a schedule edited in config.yaml is patched onto the existing job,
+  // and a feature switched off has its job removed instead of firing forever.
+  // Only the jobs in that table are touched — watcher ticks are seeded per
+  // watcher by the watcher manager and are left alone.
+  if (cronScheduler) {
+    void seedAllSystemJobs(cronScheduler, config)
+      .then((outcomes) => {
+        for (const o of outcomes) {
+          const problem = systemJobProblem(o);
+          if (problem) console.error(`[cron] ${problem}`);
+        }
+      })
+      .catch((err) => {
+        console.error('[cron] system job reconciliation failed:', err);
       });
-    }
-    if (config.weeklyDigest?.enabled) {
-      await cronScheduler.seedSystemJob({
-        name: 'Weekly Digest',
-        schedule: config.weeklyDigest.cron ?? '0 9 * * 1',
-        systemTask: 'weekly-digest',
-      });
-    }
-    if (config.evolverCronEnabled) {
-      await cronScheduler.seedSystemJob({
-        name: 'Skill Evolver',
-        schedule: config.evolverSchedule ?? '0 3 * * *',
-        systemTask: 'skill-evolver',
-      });
-    }
-  };
-  void seedSystemJobs();
+  }
 
   // OpenAI-compat surface (F1+F2). Shares sessions.db so `ethos api-key`
   // and `ethos serve` see the same rows.
