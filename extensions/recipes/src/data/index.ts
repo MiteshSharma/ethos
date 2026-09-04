@@ -1,0 +1,10 @@
+// The shipped catalog. Bundles are typed consts, not JSON: the compiler catches
+// a field typo at `pnpm typecheck`, and the Zod schema still parses the whole
+// array in the table test. No filesystem discovery, no user-authored recipes.
+
+import type { RecipeBundle } from '../schema';
+import { morningBriefing } from './morning-briefing';
+
+export const RECIPES: readonly RecipeBundle[] = [morningBriefing];
+
+export { morningBriefing };

@@ -20,6 +20,8 @@ import {
   BotBindingSchema,
   ChannelPlatformFilterSchema,
   CredentialKeyInfoSchema,
+  CronDeliverToSchema,
+  CronDeliveryTargetSchema,
   CronJobSchema,
   CronRunSchema,
   DigestLatestSchema,
@@ -78,6 +80,7 @@ import {
   MeshRouteResultSchema,
   MissedRunPolicySchema,
   ModelTierConfigSchema,
+  NamedSecretProviderSchema,
   OnboardingStepSchema,
   PendingMemorySchema,
   PendingSkillSchema,
@@ -88,6 +91,13 @@ import {
   PluginInfoSchema,
   ProviderEntrySchema,
   ProviderIdSchema,
+  RecipeBundleWireSchema,
+  RecipeChannelSetupSchema,
+  RecipeDiscoverChatsOutputSchema,
+  RecipeInstallReportSchema,
+  RecipeListItemSchema,
+  RecipePreflightSchema,
+  RecipeSecretBindingsSchema,
   SessionSchema,
   SkillSchema,
   SlackAppEntrySchema,
@@ -420,6 +430,31 @@ const PersonalityCreateInput = z.object({
   evolution_approval_mode: z.enum(['auto', 'user']).optional(),
   nightly: PersonalityNightlyInput,
   voice: PersonalityVoiceInput,
+  /**
+   * Per-personality network reach (Ch.7). Not a frozen-schema addition —
+   * `safety.network` already exists on `PersonalityConfig`; this exposes it on
+   * the create path, which had no way to express a network policy at all.
+   *
+   * It has to be settable in the FIRST write: a personality with no
+   * `safety.network` resolves every `allowedHosts: ['*']` tool to an EMPTY host
+   * set (`packages/core/src/capability-resolver.ts`), so `web_extract` denies
+   * every host until someone edits config.yaml by hand.
+   *
+   * Narrowing only (ARCHITECTURE.md §V S6). Whatever is listed here sits UNDER
+   * the non-overridable floor: cloud-metadata and private/RFC1918 ranges stay
+   * blocked, and only http/https schemes are permitted.
+   */
+  safety: z
+    .object({
+      network: z
+        .object({
+          allow: z.array(z.string()).optional(),
+          deny: z.array(z.string()).optional(),
+          allow_private_urls: z.boolean().optional(),
+        })
+        .optional(),
+    })
+    .optional(),
 });
 const PersonalityCreateOutput = z.object({ personality: PersonalitySchema });
 
@@ -476,9 +511,25 @@ const PersonalityUpdateInput = z.object({
       scope: z.enum(['personality', 'shared']).optional(),
     })
     .optional(),
-  /** Per-personality safety dial. Only `approvalMode` is editable from the
-   *  web; sibling safety fields are preserved by the registry merge. */
-  safety: z.object({ approvalMode: z.enum(['manual', 'smart', 'off']).optional() }).optional(),
+  /** Per-personality safety dial. `approvalMode` and `network` are editable
+   *  from the web; sibling safety fields are preserved by the registry merge.
+   *
+   *  `network` is narrowing only (ARCHITECTURE.md §V S6) — whatever is listed
+   *  sits UNDER the non-overridable floor, and `allow` is intersected with each
+   *  tool's own declared hosts. A `network` object with no lists clears the
+   *  policy back to none. */
+  safety: z
+    .object({
+      approvalMode: z.enum(['manual', 'smart', 'off']).optional(),
+      network: z
+        .object({
+          allow: z.array(z.string()).optional(),
+          deny: z.array(z.string()).optional(),
+          allow_private_urls: z.boolean().optional(),
+        })
+        .optional(),
+    })
+    .optional(),
   /** Per-personality memory backend. Built-ins: 'markdown', 'vector'. */
   memory: z.object({ provider: z.string().optional() }).optional(),
   /** Avatar sub-key of the `display` identity block. `''` clears
@@ -782,11 +833,118 @@ const ToolsCatalogOutput = z.object({
   ),
 });
 
+/** Mirrors `ToolCapabilities` in `@ethosagent/types` — the declared reach a
+ *  tool asks for. Surfaced verbatim so the Personality Edit modal can show what
+ *  a tool is allowed to touch before it is added to a toolset. */
+const ToolCapabilitiesSchema = z.object({
+  network: z.object({ allowedHosts: z.array(z.string()) }).optional(),
+  secrets: z.array(z.string()).optional(),
+  storage: z
+    .object({
+      scope: z.enum(['tool-private', 'session', 'personality']),
+      kind: z.literal('kv'),
+      ttlSecondsDefault: z.number().optional(),
+    })
+    .optional(),
+  fs_reach: z
+    .object({
+      read: z.union([z.array(z.string()), z.literal('from-personality')]).optional(),
+      write: z.union([z.array(z.string()), z.literal('from-personality')]).optional(),
+    })
+    .optional(),
+  process: z.object({ allowedBinaries: z.array(z.string()) }).optional(),
+  attachments: z
+    .object({ kinds: z.union([z.array(z.enum(['image', 'file'])), z.literal('*')]) })
+    .optional(),
+});
+
+/** Whether this tool may be ACTUALLY EXECUTED by `tools.test`. Computed
+ *  server-side from the tool's declared capabilities; the client never gets to
+ *  assert it. `reason` is populated only when `canRun` is false. */
+const ToolTestEligibilitySchema = z.object({
+  canRun: z.boolean(),
+  reason: z.string().optional(),
+});
+
+const ToolsDetailInput = z.object({
+  name: z.string().min(1),
+  /** When supplied, `inPersonalityToolset` reports whether this personality's
+   *  toolset reaches the tool. Omitted → the field is absent. */
+  personalityId: z.string().optional(),
+});
+/** Full detail for ONE tool. An unregistered name is not an error: it comes
+ *  back well-formed with `registered: false`, which is how the modal tells a
+ *  user that their toolset names a tool this deployment does not have. */
+const ToolsDetailOutput = z.object({
+  name: z.string(),
+  description: z.string(),
+  toolset: z.string().optional(),
+  /** Capitalised `toolset`, or `'Other'` — the same grouping `catalog` uses. */
+  group: z.string(),
+  /** The tool's JSON schema, passed through untouched. */
+  schema: z.record(z.string(), z.unknown()),
+  capabilities: ToolCapabilitiesSchema,
+  maxResultChars: z.number().optional(),
+  requiresApproval: z.boolean().optional(),
+  outputIsUntrusted: z.boolean().optional(),
+  alwaysInclude: z.boolean().optional(),
+  returnDirect: z.boolean().optional(),
+  /** The schema itself is NOT dumped here — the tool-settings UI owns it. */
+  hasSettingsSchema: z.boolean(),
+  pluginId: z.string().optional(),
+  /** False when no tool of this name is registered in this deployment. */
+  registered: z.boolean(),
+  /** False when the tool is registered but its `isAvailable()` says no
+   *  (missing API key, absent binary). Always false when `registered` is. */
+  available: z.boolean(),
+  /** Present only when the request carried a `personalityId`. */
+  inPersonalityToolset: z.boolean().optional(),
+  testEligibility: ToolTestEligibilitySchema,
+});
+
+const ToolsTestInput = z.object({
+  name: z.string().min(1),
+  personalityId: z.string().min(1),
+  /** `'run'` is a REQUEST, not a grant: the server re-derives eligibility and
+   *  silently degrades to verify-only for anything it will not execute. */
+  mode: z.enum(['verify', 'run']),
+});
+const ToolsTestOutput = z.object({
+  /** Always populated, in both modes, in this order: `registered`,
+   *  `available`, `in-toolset`, `args-valid`. A check downstream of a failure
+   *  reports `skip`. */
+  checks: z.array(
+    z.object({
+      id: z.string(),
+      label: z.string(),
+      status: z.enum(['pass', 'fail', 'skip']),
+      detail: z.string().optional(),
+    }),
+  ),
+  /** True only when the tool was actually executed. */
+  ran: z.boolean(),
+  /** Present only when `ran` is true. */
+  result: z
+    .object({
+      ok: z.boolean(),
+      value: z.string().optional(),
+      error: z.string().optional(),
+      code: z.string().optional(),
+    })
+    .optional(),
+  /** Wall clock of the execution. Present only when `ran` is true. */
+  durationMs: z.number().optional(),
+  /** Why a `mode: 'run'` request did or did not execute. */
+  testEligibility: ToolTestEligibilitySchema,
+});
+
 /** @experimental */
 const tools = {
   approve: oc.input(ToolApproveInput).output(ToolApproveOutput),
   deny: oc.input(ToolDenyInput).output(ToolDenyOutput),
   catalog: oc.input(ToolsCatalogInput).output(ToolsCatalogOutput),
+  detail: oc.input(ToolsDetailInput).output(ToolsDetailOutput),
+  test: oc.input(ToolsTestInput).output(ToolsTestOutput),
 };
 
 // ---------------------------------------------------------------------------
@@ -2040,7 +2198,15 @@ const CronCreateInput = z.object({
   missedRunPolicy: MissedRunPolicySchema.optional(),
   // When true, the job is given a `web` origin so its output delivers into a
   // web chat session and surfaces in the Activity feed (in-app heartbeat).
+  //
+  // @deprecated Alias for `deliverTo: { kind: 'inApp' }` (true) / `{ kind:
+  // 'none' }` (false). Kept on the wire because the Cron page already sends
+  // it; breaking it to save a field is not a trade worth making. Sending BOTH
+  // this and a `deliverTo` that disagrees is a validation error, never a
+  // silent precedence rule.
   notifyInApp: z.boolean().optional(),
+  /** Where run output goes. See `CronDeliverToSchema`. */
+  deliverTo: CronDeliverToSchema.optional(),
 });
 const CronCreateOutput = z.object({ job: CronJobSchema });
 
@@ -2071,6 +2237,15 @@ const CronHistoryInput = z.object({
 });
 const CronHistoryOutput = z.object({ runs: z.array(CronRunSchema) });
 
+// Read-only. The set of chats this personality's own bots may be pointed at.
+// The picker on the Cron page renders exactly this — a `deliverTo` chatId is
+// NEVER free text, and the set is recomputed server-side at create time rather
+// than trusted from whatever the client previewed.
+const CronDeliveryTargetsInput = z.object({ personalityId: z.string().min(1) });
+const CronDeliveryTargetsOutput = z.object({
+  targets: z.array(CronDeliveryTargetSchema),
+});
+
 /** @experimental */
 const cron = {
   list: oc.output(CronListOutput),
@@ -2082,6 +2257,7 @@ const cron = {
   resume: oc.input(CronIdOnlyInput).output(CronOkOutput),
   runNow: oc.input(CronRunNowInput).output(CronRunNowOutput),
   history: oc.input(CronHistoryInput).output(CronHistoryOutput),
+  deliveryTargets: oc.input(CronDeliveryTargetsInput).output(CronDeliveryTargetsOutput),
 };
 
 // ---------------------------------------------------------------------------
@@ -3878,7 +4054,6 @@ const a2a = {
 // previews only. A personality stores just the secret NAME (a reference).
 // ---------------------------------------------------------------------------
 
-const NamedSecretProviderSchema = z.enum(['exa', 'tavily', 'brave']);
 const NamedSecretNameSchema = z
   .string()
   .min(1)
@@ -4120,6 +4295,100 @@ const documents = {
 };
 
 // ---------------------------------------------------------------------------
+// Recipes — one-click use-case bundles (plan/phases/recipes-gallery.md §4)
+//
+// `list` takes no input: the catalog is curated, static and small, the same
+// call shape as `mcp.catalog` and `dashboards.listWidgetTemplates`. Filtering
+// by tag is client-side; a query parameter on a three-row list is speculative.
+//
+// There is deliberately NO `installStream`. Install is three bounded writes;
+// SSE would buy latency theatre and cost a second protocol.
+// ---------------------------------------------------------------------------
+
+const RecipesListOutput = z.object({ recipes: z.array(RecipeListItemSchema) });
+
+const RecipesGetInput = z.object({ id: z.string().min(1) });
+const RecipesGetOutput = z.object({ recipe: RecipeBundleWireSchema });
+
+/**
+ * Read-only, repeatable, and stateless — there is no server-side wizard
+ * session, so a reload loses nothing and nothing can expire. `inputs` is
+ * whatever the user has typed SO FAR: the `needsInput` list shrinks live as it
+ * fills. `characterSheet` rides along so the preview needs no second call.
+ */
+const RecipesPreflightInput = z.object({
+  id: z.string().min(1),
+  inputs: z.record(z.string(), z.string()).optional(),
+  /** Install under a different personality id (the collision escape hatch). */
+  personalityIdOverride: z.string().min(1).optional(),
+  /**
+   * The named secret picked for each credential requirement. Preflight's
+   * satisfied-check runs against THIS binding — the one the install would
+   * write — so the row clears only when the chosen key actually exists.
+   */
+  secretBindings: RecipeSecretBindingsSchema.optional(),
+});
+
+/**
+ * `version` is optimistic concurrency on the preview: a client that previewed
+ * v1 and installs against a shipped v2 is refused with `RECIPE_STALE` and
+ * re-previews. Without it, an upgrade during a long confirm step silently
+ * installs something the user never saw.
+ *
+ * `deliverTo` is the authoritative delivery target for every cron job the
+ * bundle marks `deliverTo: 'channel'`. It is a `cron.deliveryTargets` row the
+ * user picked — never free text, and re-validated server-side by
+ * `CronService.create` whatever the client previewed.
+ */
+const RecipesInstallInput = z.object({
+  id: z.string().min(1),
+  version: z.number().int().positive(),
+  inputs: z.record(z.string(), z.string()),
+  personalityIdOverride: z.string().min(1).optional(),
+  deliverTo: CronDeliverToSchema.optional(),
+  /**
+   * Inline channel setup — the fix for the chicken-and-egg that made
+   * "Deliver to" permanently unsatisfiable. `platforms.botsAddTelegram`
+   * requires a `bind` naming an EXISTING personality, and the recipe's
+   * personality does not exist until the install creates it, so the bot cannot
+   * be made in Communications beforehand. The install therefore makes it, in
+   * order: create the personality, add and bind the bot, then the cron job.
+   *
+   * Mutually exclusive with `deliverTo`: this arm's `botKey` is not knowable
+   * until the bot exists, so the server derives the delivery target itself.
+   */
+  channelSetup: RecipeChannelSetupSchema.optional(),
+  /**
+   * The named secret each credential requirement was answered with. The install
+   * writes it onto the new personality's tool settings, because a key stored
+   * under any name but the tool's default is invisible to the tool without a
+   * binding — a silent no-results agent, which is what this whole step exists
+   * to prevent. A binding naming a secret that does not exist leaves the
+   * requirement unsatisfied, so the install refuses before the first write.
+   */
+  secretBindings: RecipeSecretBindingsSchema.optional(),
+});
+
+/**
+ * READ-ONLY. One `getUpdates` per press — never a long poll, and never with an
+ * `offset`, which would acknowledge the user's message and delete the very
+ * update the install re-reads to authorize their pick.
+ */
+const RecipesDiscoverChatsInput = z.object({
+  platform: z.literal('telegram'),
+  token: z.string().min(1),
+});
+
+/** @experimental */
+const recipes = {
+  list: oc.output(RecipesListOutput),
+  get: oc.input(RecipesGetInput).output(RecipesGetOutput),
+  preflight: oc.input(RecipesPreflightInput).output(RecipePreflightSchema),
+  discoverChats: oc.input(RecipesDiscoverChatsInput).output(RecipeDiscoverChatsOutputSchema),
+  install: oc.input(RecipesInstallInput).output(RecipeInstallReportSchema),
+};
+
+// ---------------------------------------------------------------------------
 // Root contract — every namespace mounted under one symbol
 // ---------------------------------------------------------------------------
 
@@ -4162,6 +4431,7 @@ export const contract = {
   keys,
   toolSettings,
   documents,
+  recipes,
 };
 
 export type Contract = typeof contract;

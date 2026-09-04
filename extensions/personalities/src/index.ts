@@ -646,6 +646,21 @@ export interface CreatePersonalityInput {
    *  voice id; `call_style` is the Call Stage treatment. Empty strings are
    *  dropped, so an editor can send blanks for "unset". */
   voice?: EditableVoiceConfig;
+  /**
+   * Per-personality safety policy at CREATE time — `network` only.
+   *
+   * `PersonalityConfig.safety` carries more (approvalMode, denyRules,
+   * injectionDefense, …); those are edited afterwards through `update`, which
+   * merges onto whatever is already on disk. Network reach is different: it has
+   * to be right in the FIRST write, because a personality with no
+   * `safety.network` resolves every `allowedHosts: ['*']` tool to an EMPTY host
+   * set (`packages/core/src/capability-resolver.ts`) and denies every fetch.
+   *
+   * Narrowing only, per ARCHITECTURE.md §V S6 — the non-overridable floor
+   * (cloud-metadata + private ranges blocked, http/https only) is applied
+   * beneath whatever is declared here.
+   */
+  safety?: Pick<NonNullable<PersonalityConfig['safety']>, 'network'>;
 }
 
 /**
@@ -1198,8 +1213,8 @@ export class FilePersonalityRegistry implements PersonalityRegistry {
       // duplicate (ARCHITECTURE.md §V S7). When `patch.safety` is undefined the
       // verbatim raw block is re-appended, lossless for sub-keys the read path
       // does not parse (network, injectionDefense, …). When `patch.safety` is
-      // defined the patched scalar fields are applied line-by-line onto the raw
-      // block so the patch wins while those unparseable sub-keys are preserved.
+      // defined the patched fields are applied key-by-key onto the raw block so
+      // the patch wins while those unparseable sub-keys are preserved.
       const rendered = renderConfigYaml({ ...merged, safety: undefined });
       const existingRaw = await this.storage.read(join(dir, 'config.yaml'));
       const rawSafetyBlock = existingRaw ? extractRawSafetyBlock(existingRaw) : '';
@@ -1209,9 +1224,20 @@ export class FilePersonalityRegistry implements PersonalityRegistry {
       } else if (rawSafetyBlock) {
         const blockLines = rawSafetyBlock.split('\n');
         for (const [key, value] of Object.entries(patch.safety)) {
-          if (value === null || typeof value === 'object') continue;
-          const line = `  ${key}: ${renderScalarValue(value)}`;
+          if (value === null) continue;
           const idx = blockLines.findIndex((l) => l.startsWith(`  ${key}:`));
+          if (typeof value === 'object') {
+            // A nested sub-key (`network`, `injectionDefense`, …) replaces its
+            // whole sub-block. This branch used to `continue`, so a patch
+            // carrying one was silently dropped whenever a `safety:` block
+            // already existed on disk — `safety.network` edited from the web
+            // saved without error and changed nothing.
+            const replacement = renderSafetySubBlock(key, value as Record<string, unknown>);
+            if (idx === -1) blockLines.splice(1, 0, ...replacement);
+            else blockLines.splice(idx, subBlockLength(blockLines, idx), ...replacement);
+            continue;
+          }
+          const line = `  ${key}: ${renderScalarValue(value)}`;
           if (idx === -1) blockLines.splice(1, 0, line);
           else blockLines[idx] = line;
         }
@@ -2345,7 +2371,7 @@ function yamlScalar(value: string): string {
  * (`id`, `soulFile`, `skillsDirs`) and `soulMd` are intentionally excluded —
  * they are not part of config.yaml.
  */
-type RenderConfigInput = Omit<CreatePersonalityInput, 'id' | 'soulMd'> &
+type RenderConfigInput = Omit<CreatePersonalityInput, 'id' | 'soulMd' | 'safety'> &
   Pick<
     PersonalityConfig,
     | 'platform'
@@ -2541,6 +2567,25 @@ function renderNestedBlock(obj: Record<string, unknown>, depth: number): string[
     }
   }
   return out;
+}
+
+/**
+ * Render one nested sub-key of a `safety:` block (`network:`, …) as the lines
+ * that replace it. An object with nothing left to emit becomes `key: {}` — the
+ * shape `parseNestedBlock` reads back as an empty block, which is how a cleared
+ * sub-key (an emptied allow list) survives the round trip.
+ */
+function renderSafetySubBlock(key: string, value: Record<string, unknown>): string[] {
+  const children = renderNestedBlock(value, 2);
+  return children.length > 0 ? [`  ${key}:`, ...children] : [`  ${key}: {}`];
+}
+
+/** How many lines the sub-block starting at `idx` spans: its own line plus
+ *  every deeper-indented line under it. */
+function subBlockLength(lines: string[], idx: number): number {
+  let end = idx + 1;
+  while (end < lines.length && /^\s{3,}\S/.test(lines[end] ?? '')) end++;
+  return end - idx;
 }
 
 function renderToolsetYaml(toolset: string[]): string {

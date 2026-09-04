@@ -87,7 +87,16 @@ export const SCOPE_MAP: Record<string, Record<string, string>> = {
     pendingApprove: 'memory:write',
     pendingReject: 'memory:write',
   },
-  tools: { approve: 'tools:approve', deny: 'tools:approve', catalog: 'tools:approve' },
+  tools: {
+    approve: 'tools:approve',
+    deny: 'tools:approve',
+    catalog: 'tools:approve',
+    detail: 'tools:approve',
+    // `test` can really EXECUTE a tool (read-only ones, per the capability
+    // gate in `services/tool-inspection`). An API key is not a licence to make
+    // this deployment run things — cookie-only.
+    test: COOKIE_ONLY,
+  },
 };
 
 export function resolveScope(rpcPath: string): string | null {

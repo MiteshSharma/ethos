@@ -140,8 +140,23 @@ export const PersonalitySchema = z.object({
     })
     .optional(),
   /** Per-personality safety dial. Optional (omitted when unset) so the editor
-   *  can read the current approval mode to populate its form. */
-  safety: z.object({ approvalMode: z.enum(['manual', 'smart', 'off']).optional() }).optional(),
+   *  can read the current approval mode and network reach to populate its
+   *  form. A sub-key the editor can WRITE but not READ is one a save wipes. */
+  safety: z
+    .object({
+      approvalMode: z.enum(['manual', 'smart', 'off']).optional(),
+      /** Declared network reach (Ch.7), read back for the allowed-hosts editor.
+       *  Sits UNDER the non-overridable floor: cloud-metadata and private
+       *  ranges stay blocked whatever is listed here. */
+      network: z
+        .object({
+          allow: z.array(z.string()).optional(),
+          deny: z.array(z.string()).optional(),
+          allow_private_urls: z.boolean().optional(),
+        })
+        .optional(),
+    })
+    .optional(),
   /** Per-personality memory backend. Optional (omitted when unset) so the
    *  editor can read the current provider to populate its form. */
   memory: z.object({ provider: z.string().optional() }).optional(),
@@ -235,6 +250,7 @@ export const ProviderIdSchema = z.enum([
   'ollama',
   'azure',
   'codex',
+  'xai',
 ]);
 export type ProviderId = z.infer<typeof ProviderIdSchema>;
 
@@ -293,6 +309,52 @@ export const CronRunSchema = z.object({
   output: z.string().nullable(),
 });
 export type CronRun = z.infer<typeof CronRunSchema>;
+
+// Where a cron job's output goes, chosen at create time
+// (plan/phases/recipes-gallery.md §1). `none` is today's default (output is
+// written to the run-history file and nobody is pinged), `inApp` is the
+// in-app heartbeat the deprecated `notifyInApp` boolean expresses, and
+// `channel` is the new arm: deliver into a real chat on a real bot.
+//
+// `botKey` is an AUTHORIZATION input, not a delivery address — the server uses
+// it to check that the bot speaks for the job's personality, then discards it.
+// `JobOrigin` stays `{ platform, chatId }` (D9).
+export const CronDeliverToSchema = z.discriminatedUnion('kind', [
+  z.object({ kind: z.literal('none') }),
+  z.object({ kind: z.literal('inApp') }),
+  z.object({
+    kind: z.literal('channel'),
+    platform: z.string().min(1),
+    botKey: z.string().min(1),
+    chatId: z.string().min(1),
+  }),
+]);
+export type CronDeliverTo = z.infer<typeof CronDeliverToSchema>;
+
+/** How a chat became an offerable delivery target. */
+export const CronDeliveryTargetSourceSchema = z.enum([
+  /** `channel_filter.<platform>.ownerUserId` — the operator's declared owner. */
+  'owner',
+  /** An entry in `channel_filter.<platform>.recipientAllowlist`. */
+  'allowlist',
+  /** A pairing-approved sender from the gateway's pairing DB. */
+  'paired',
+  /** A chat this bot has actually been talked to in (a gateway lane key). */
+  'observed',
+]);
+export type CronDeliveryTargetSource = z.infer<typeof CronDeliveryTargetSourceSchema>;
+
+export const CronDeliveryTargetSchema = z.object({
+  platform: z.string(),
+  botKey: z.string(),
+  /** `@briefer_bot` where the platform knows one; the botKey otherwise. */
+  botLabel: z.string(),
+  chatId: z.string(),
+  /** Human-readable, best-effort — never the only thing the picker shows. */
+  label: z.string(),
+  source: CronDeliveryTargetSourceSchema,
+});
+export type CronDeliveryTarget = z.infer<typeof CronDeliveryTargetSchema>;
 
 // ---------------------------------------------------------------------------
 // Skills — learning pillar of v0.5
@@ -545,6 +607,26 @@ export type ChannelPlatformFilter = z.infer<typeof ChannelPlatformFilterSchema>;
 export const PluginSourceSchema = z.enum(['user', 'project', 'npm']);
 export type PluginSource = z.infer<typeof PluginSourceSchema>;
 
+/**
+ * One safety-scan finding retained from the plugin load. Yellow findings do
+ * not block the load — they are surfaced here so the operator can see what
+ * the scanner found and why. Red findings block, and appear here alongside
+ * the plugin's `error`.
+ */
+export const PluginScanFindingSchema = z.object({
+  severity: z.enum(['red', 'yellow']),
+  /** Scanner rule slug, e.g. `network-access`. */
+  rule: z.string(),
+  message: z.string(),
+  /** 1-based line number inside `file`, when the rule matched a line. */
+  line: z.number().int().optional(),
+  /** The matched source line, trimmed by the scanner. */
+  excerpt: z.string().optional(),
+  /** Path of the scanned file, relative to the plugin directory. */
+  file: z.string().optional(),
+});
+export type PluginScanFinding = z.infer<typeof PluginScanFindingSchema>;
+
 export const PluginInfoSchema = z.object({
   id: z.string(),
   name: z.string(),
@@ -557,6 +639,15 @@ export const PluginInfoSchema = z.object({
   /** Declared plugin contract major version, or null when the manifest doesn't pin one. */
   pluginContractMajor: z.number().int().nullable(),
   hasHomePanel: z.boolean().optional(),
+  /**
+   * Live load status from the plugin loader. `null` when this process never
+   * tried to activate the plugin — it is on disk, nothing more is known.
+   */
+  status: z.enum(['loaded', 'failed']).nullable(),
+  /** Why the load failed. Null unless `status` is `failed`. */
+  error: z.string().nullable(),
+  /** Safety-scan findings retained from the load. Omitted when the scan was clean. */
+  scanFindings: z.array(PluginScanFindingSchema).optional(),
 });
 export type PluginInfo = z.infer<typeof PluginInfoSchema>;
 
@@ -1491,3 +1582,350 @@ export const KEY_CATEGORY_IDS = [
 export type KeyCategoryId = (typeof KEY_CATEGORY_IDS)[number];
 
 export const KeyCategorySchema = z.enum(KEY_CATEGORY_IDS);
+
+// ---------------------------------------------------------------------------
+// Recipes — one-click use-case bundles (plan/phases/recipes-gallery.md §2/§4)
+//
+// The bundle data and its authoring schema live in `@ethosagent/recipes`, an
+// extension. These shapes MIRROR `RecipeBundleSchema` there, the same way
+// `McpRemotePresetSchema` mirrors `McpRemotePreset` in `@ethosagent/tools-mcp`:
+// this package is imported by the browser and sits below the extensions layer,
+// so it describes the wire and imports nothing. The mirror is kept honest by a
+// test that parses every shipped bundle through these schemas
+// (`apps/web-api/src/__tests__/services/recipes.test.ts`).
+// ---------------------------------------------------------------------------
+
+/** What a recipe still needs from the user before it can be installed. */
+export const RecipeInputKindSchema = z.enum([
+  'text',
+  'secret',
+  'path',
+  'choice',
+  'cron',
+  'chatTarget',
+]);
+export type RecipeInputKind = z.infer<typeof RecipeInputKindSchema>;
+
+export const RecipeInputSchema = z.object({
+  key: z.string(),
+  label: z.string(),
+  kind: RecipeInputKindSchema,
+  required: z.boolean(),
+  default: z.string().optional(),
+  placeholder: z.string().optional(),
+  options: z.array(z.string()).optional(),
+  help: z.string(),
+});
+
+const RecipeModelTierSchema = z.object({
+  trivial: z.string().optional(),
+  default: z.string().optional(),
+  deep: z.string().optional(),
+  dreaming: z.string().optional(),
+});
+
+const RecipeFsReachSchema = z.object({
+  read: z.array(z.string()).optional(),
+  write: z.array(z.string()).optional(),
+  workdir: z.union([z.string(), z.array(z.string())]).optional(),
+});
+
+/**
+ * The providers a web-search credential may be written under. Defined here
+ * rather than in `router.ts` because two namespaces need it: `namedSecrets`,
+ * which owns the write, and `recipes.preflight`, whose credential rows name the
+ * provider that write would target.
+ */
+export const NamedSecretProviderSchema = z.enum(['exa', 'tavily', 'brave']);
+export type NamedSecretProvider = z.infer<typeof NamedSecretProviderSchema>;
+
+/** Mirrors the bundle's `safety.network` — declared reach, not a new capability. */
+const RecipeNetworkPolicySchema = z.object({
+  allow: z.array(z.string()).optional(),
+  deny: z.array(z.string()).optional(),
+  allow_private_urls: z.boolean().optional(),
+});
+
+export const RecipePersonalitySchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  description: z.string(),
+  /** May still contain `{{input.*}}` — this is the bundle, not the install. */
+  soulMd: z.string(),
+  model: z.union([z.string(), RecipeModelTierSchema]).optional(),
+  provider: z.string().optional(),
+  capabilities: z.array(z.string()).optional(),
+  toolset: z.array(z.string()),
+  mcpServers: z.array(z.string()).optional(),
+  plugins: z.array(z.string()).optional(),
+  fsReach: RecipeFsReachSchema.optional(),
+  /**
+   * Declared network reach. ABSENT means the installer applies `allow: ['*']`
+   * (recipes-gallery D15) — absent is not "no policy", it is an empty allowlist
+   * that denies every host.
+   */
+  safety: z.object({ network: RecipeNetworkPolicySchema }).optional(),
+});
+
+export const RecipeRequirementsSchema = z.object({
+  mcpServers: z.array(
+    z.object({
+      name: z.string(),
+      catalogId: z.string().optional(),
+      transport: z.enum(['stdio', 'streamable-http', 'sse']),
+      command: z.string().optional(),
+      args: z.array(z.string()).optional(),
+      url: z.string().optional(),
+      envKeys: z.array(z.string()).optional(),
+      auth: z.enum(['none', 'env', 'oauth']),
+      why: z.string(),
+    }),
+  ),
+  plugins: z.array(z.object({ id: z.string(), packageName: z.string(), why: z.string() })),
+  channels: z.array(
+    z.object({
+      platform: z.string(),
+      why: z.string(),
+      deliversCron: z.boolean(),
+      /**
+       * The recipe page collects this platform's bot credential itself and the
+       * install binds the bot to the personality it just created. Without it
+       * the "Deliver to" requirement is unsatisfiable: a bot binds to a
+       * PERSONALITY, and the personality does not exist until the recipe runs.
+       */
+      inlineSetup: z.boolean().optional(),
+    }),
+  ),
+  tools: z.array(z.string()),
+  /**
+   * Credentials the granted tools need before they do anything. `web_search`
+   * reports itself available with no key configured (the key may live in Named
+   * Secrets, unreachable at filter time), so nothing else in preflight can
+   * catch a missing one.
+   */
+  secrets: z
+    .array(z.object({ toolName: z.string(), label: z.string(), why: z.string() }))
+    .optional(),
+  hostBinaries: z
+    .array(z.object({ name: z.string(), why: z.string(), installHint: z.string() }))
+    .optional(),
+  inputs: z.array(RecipeInputSchema),
+});
+
+export const RecipeCronJobSchema = z.object({
+  name: z.string(),
+  schedule: z.string(),
+  prompt: z.string(),
+  missedRunPolicy: MissedRunPolicySchema.optional(),
+  /** Which `deliverTo` arm this job wants. `channel` needs a target at install. */
+  deliverTo: z.enum(['channel', 'inApp', 'none']),
+});
+
+export const RecipePostInstallSchema = z.object({
+  kind: z.enum(['oauth', 'token', 'restart', 'manual']),
+  label: z.string(),
+  detail: z.string(),
+  href: z.string().optional(),
+});
+
+export const RecipeBundleWireSchema = z.object({
+  id: z.string(),
+  /** Optimistic concurrency on the preview — `install` sends it back. */
+  version: z.number().int().positive(),
+  title: z.string(),
+  summary: z.string(),
+  sourceDoc: z.string().optional(),
+  tags: z.array(z.string()),
+  personality: RecipePersonalitySchema,
+  requires: RecipeRequirementsSchema,
+  cronJobs: z.array(RecipeCronJobSchema),
+  starterPrompt: z.string(),
+  examplePrompts: z.array(z.string()),
+  notes: z.array(z.string()),
+  postInstall: z.array(RecipePostInstallSchema),
+});
+export type RecipeBundleWire = z.infer<typeof RecipeBundleWireSchema>;
+
+/** One gallery row. Everything the list needs and nothing it does not. */
+export const RecipeListItemSchema = z.object({
+  id: z.string(),
+  version: z.number().int().positive(),
+  title: z.string(),
+  summary: z.string(),
+  tags: z.array(z.string()),
+  sourceDoc: z.string().nullable(),
+});
+export type RecipeListItem = z.infer<typeof RecipeListItemSchema>;
+
+export const RecipePreflightSchema = z.object({
+  /** Unmet prerequisites. Each carries an action a user can actually perform. */
+  blocking: z.array(
+    z.object({
+      code: z.string(),
+      message: z.string(),
+      action: z.string(),
+      href: z.string().optional(),
+    }),
+  ),
+  /** Required inputs still empty. Shrinks as the user fills the form in. */
+  needsInput: z.array(
+    z.object({
+      key: z.string(),
+      label: z.string(),
+      kind: z.string(),
+      help: z.string(),
+      suggested: z.string().optional(),
+      /**
+       * `kind: 'credential'` only — the providers that clear this row, ANY one
+       * of which is enough. The page renders the same `SecretPicker` the
+       * personality tool-settings form uses: existing keys of `secretKind` are
+       * offered for selection, and a new one is created through the vault's own
+       * write path. The VALUE never travels on this wire in either direction,
+       * exactly as the Telegram bot token is kept off `inputs` (D14).
+       */
+      credentialOptions: z
+        .array(
+          z.object({
+            /**
+             * What a binding names: the provider — narrowed by the caller
+             * against `NamedSecretProviderSchema`. Left as a string here so a
+             * tool whose provider roster grows past the web-search enum still
+             * produces a VALID response (the server simply offers no option for
+             * it) rather than one this contract rejects.
+             */
+            provider: z.string(),
+            label: z.string(),
+            /**
+             * The name the tool resolves under this provider when nothing binds
+             * it — `apiKey`. Read off the key store's own ref, so preflight can
+             * tell "no binding, but the default key is there" from "unset".
+             */
+            defaultSecretName: z.string(),
+            getKeyUrl: z.string().optional(),
+          }),
+        )
+        .optional(),
+      /** `kind: 'credential'` only — the `secretKind` the picker filters by. */
+      secretKind: z.string().optional(),
+    }),
+  ),
+  warnings: z.array(z.object({ code: z.string(), message: z.string() })),
+  willCreate: z.object({
+    personality: z.object({ id: z.string(), isNew: z.boolean() }),
+    cronJobs: z.array(
+      z.object({
+        name: z.string(),
+        schedule: z.string(),
+        nextRun: z.string().nullable(),
+        exists: z.boolean(),
+      }),
+    ),
+    mcpAttachments: z.array(z.string()),
+  }),
+  /** The preview (D5) — `renderCharacterSheet` over the proposed config. */
+  characterSheet: z.string(),
+  /** What the installer cannot do, echoed so the confirm step needs no second call. */
+  postInstall: z.array(RecipePostInstallSchema),
+});
+export type RecipePreflight = z.infer<typeof RecipePreflightSchema>;
+
+/**
+ * Stage 6. `ok: false` is an APPLY failure that was compensated — stages 1-4
+ * refuse by throwing (`RECIPE_NOT_FOUND` / `RECIPE_INVALID` / `RECIPE_STALE` /
+ * `RECIPE_BLOCKED`) because nothing was attempted and an all-empty report
+ * would say less than the error does.
+ */
+export const RecipeInstallReportSchema = z.object({
+  ok: z.boolean(),
+  created: z.object({
+    personality: z.string().nullable(),
+    /** `@briefer_bot` when the install set up the channel bot itself. */
+    channelBot: z.string().nullable(),
+    cronJobs: z.array(z.string()),
+    mcpAttachments: z.array(z.string()),
+  }),
+  skipped: z.array(z.object({ what: z.string(), because: z.string() })),
+  /** Compensating deletes this apply performed, and whether each one worked. */
+  rolledBack: z.array(z.object({ what: z.string(), ok: z.boolean() })),
+  /** Compensation that itself failed — named, with the page that cleans it up. */
+  orphaned: z.array(z.object({ what: z.string(), href: z.string() })),
+  /** Why the apply failed. Null on success. */
+  failure: z.object({ code: z.string(), message: z.string(), action: z.string() }).nullable(),
+  /** The honest-completion checklist (D6) — what is left for the human. */
+  remaining: z.array(RecipePostInstallSchema),
+  /** Pre-filled into the composer. Never auto-sent. */
+  starterPrompt: z.string(),
+});
+export type RecipeInstallReport = z.infer<typeof RecipeInstallReportSchema>;
+
+/**
+ * One chat that has messaged a bot, as a one-shot `getUpdates` found it.
+ *
+ * R0's invariant is intact: a chat id is resolved by the SERVER and chosen from
+ * a list. There is no free-text chat id field anywhere, here or in the UI.
+ */
+export const RecipeDiscoveredChatSchema = z.object({
+  chatId: z.string(),
+  /** The group's title, or the sender's name — never a bare id. */
+  label: z.string(),
+  /** `private` | `group` | `supergroup` | `channel`. */
+  kind: z.string(),
+});
+export type RecipeDiscoveredChat = z.infer<typeof RecipeDiscoveredChatSchema>;
+
+/**
+ * `status` is the whole contract here:
+ *
+ * - `ok` — Telegram answered; `chats` is what has messaged this bot.
+ * - `waiting` — the token is good, but nothing has messaged the bot yet. The
+ *   user opens Telegram, sends a message, and presses the button again.
+ * - `gateway_owns_token` — Telegram answered 409, which means the RUNNING
+ *   GATEWAY is long-polling this token. Not an error: the gateway's own pairing
+ *   store and lane keys already know the chat, so the page falls back to
+ *   `cron.deliveryTargets` and says so.
+ * - `rejected` / `unreachable` — the token was refused, or Telegram could not
+ *   be reached. `error` is one line for a human and NEVER contains the token.
+ */
+export const RecipeDiscoverChatsOutputSchema = z.object({
+  status: z.enum(['ok', 'waiting', 'gateway_owns_token', 'rejected', 'unreachable']),
+  /** `@botname`, echoed back so the user can confirm they pasted the right token. */
+  botLabel: z.string().nullable(),
+  chats: z.array(RecipeDiscoveredChatSchema),
+  error: z.string().nullable(),
+});
+export type RecipeDiscoverChatsOutput = z.infer<typeof RecipeDiscoverChatsOutputSchema>;
+
+/**
+ * Inline channel setup, sent with `recipes.install`.
+ *
+ * The token is a CREDENTIAL and is deliberately NOT a `requires.inputs` entry:
+ * inputs are echoed in `needsInput`, cached in the client's preflight query key
+ * and re-sent on every keystroke, and substituted into SOUL.md through
+ * `{{input.*}}`. A separate field keeps the token off all four paths — it
+ * travels once, on the one call that needs it.
+ *
+ * `chatId` is a `recipes.discoverChats` row the user picked. The install
+ * re-reads Telegram to authorize it rather than trusting this value.
+ */
+export const RecipeChannelSetupSchema = z.object({
+  platform: z.literal('telegram'),
+  token: z.string().min(1),
+  chatId: z.string().min(1),
+});
+export type RecipeChannelSetup = z.infer<typeof RecipeChannelSetupSchema>;
+
+/**
+ * Which named secret a credential requirement is answered with, keyed by the
+ * `requires.secrets[].toolName` it answers. Sent with `recipes.preflight` (so
+ * the row clears live) and with `recipes.install` (which writes it onto the
+ * personality's tool settings as `providers/<provider>/<secret>`).
+ *
+ * A REFERENCE, never a credential: `secret` is a vault NAME. The value is
+ * written by `namedSecrets.create` — the store that owns it — and never enters
+ * a recipe input, a preflight report, an install call or an error.
+ */
+export const RecipeSecretBindingsSchema = z.record(
+  z.string(),
+  z.object({ provider: z.string().min(1), secret: z.string().min(1) }),
+);
+export type RecipeSecretBindings = z.infer<typeof RecipeSecretBindingsSchema>;

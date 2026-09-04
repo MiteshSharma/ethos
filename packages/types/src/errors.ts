@@ -45,6 +45,13 @@ export type EthosErrorCode =
   | 'CRON_INVALID'
   | 'CRON_PERSONALITY_MISSING'
   | 'CRON_RUN_FAILED'
+  | 'CRON_TARGET_NOT_ALLOWED'
+  // Recipes (one-click use-case bundles)
+  | 'RECIPE_NOT_FOUND'
+  | 'RECIPE_INVALID'
+  | 'RECIPE_STALE'
+  | 'RECIPE_BLOCKED'
+  | 'RECIPE_CHANNEL_SETUP_FAILED'
   // MCP
   | 'MCP_TRANSPORT_INVALID'
   | 'MCP_SERVER_NOT_FOUND'

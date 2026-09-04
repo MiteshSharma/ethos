@@ -48,6 +48,7 @@ const WORKSPACE_PANE_LABELS: Record<string, string> = {
 // the plan's "three signals" — see "The shape" in the plan doc.
 const LIBRARY_PANE_LABELS: Record<string, string> = {
   personalities: 'Personalities',
+  recipes: 'Recipes',
   skills: 'All skills',
   plugins: 'All plugins',
   mcp: 'All servers',

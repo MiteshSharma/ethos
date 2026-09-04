@@ -263,8 +263,8 @@ export interface CapabilityBackends {
   kvStoreFactory?: (tool: string, scopeId: string) => KeyValueStore;
   secretsBackend?: (ref: SecretRef) => Promise<string>;
   storage?: Storage;
-  personalityFsReach?: { read: string[]; write: string[] };
-  personalityNetworkAllow?: string[];
+  personalityFsReach?: (personalityId?: string) => { read: string[]; write: string[] };
+  personalityNetworkPolicy?: (personalityId?: string) => NetworkPolicy;
 }
 ```
 
@@ -275,14 +275,14 @@ export interface CapabilityBackends {
 | `kvStoreFactory` | `(tool, scopeId) => KeyValueStore` | Factory for scoped key-value stores. Called once per tool per turn. |
 | `secretsBackend` | `(ref) => Promise<string>` | Resolves a secret ref to its value. Called by `ScopedSecretsImpl`. |
 | `storage` | `Storage` | Filesystem abstraction passed to `ScopedFsImpl`. |
-| `personalityFsReach` | `{ read: string[]; write: string[] }` | The active personality's fs_reach config. Used to resolve `'from-personality'` declarations and to intersect with tool-declared paths. |
-| `personalityNetworkAllow` | `string[]` | The active personality's network allow list. Used to intersect with tool-declared hosts. |
+| `personalityFsReach` | `(personalityId?) => { read: string[]; write: string[] }` | Resolves the fs_reach of the personality running the turn. Used to resolve `'from-personality'` declarations and to intersect with tool-declared paths. |
+| `personalityNetworkPolicy` | `(personalityId?) => NetworkPolicy` | Resolves the network policy of the personality running the turn. Its `allow` list is intersected with tool-declared hosts. |
 
 ### Notes {#capability-backends-notes}
 
 - Passed to `DefaultToolRegistry` at construction. Shared across all tool executions.
 - If absent, tools that declare real capabilities (`needsBackends` returns true) fail closed with `not_available`.
-- `personalityFsReach` and `personalityNetworkAllow` are set per personality, typically updated when the personality changes.
+- `personalityFsReach` and `personalityNetworkPolicy` are resolvers, called per tool execution with the id of the personality running that call. They are never stored values: a stored value freezes the boundary at process start, so an on-disk config edit -- or a personality that is not the default -- resolves against the wrong policy.
 
 ## Used by {#used-by}
 

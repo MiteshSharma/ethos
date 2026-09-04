@@ -809,8 +809,15 @@ function toWire(d: DescribedPersonality): Personality {
       ? { evolution_approval_mode: c.evolution_approval_mode }
       : {}),
     ...(c.skill_evolution !== undefined ? { skill_evolution: c.skill_evolution } : {}),
-    ...(c.safety?.approvalMode !== undefined
-      ? { safety: { approvalMode: c.safety.approvalMode } }
+    // Both editable safety sub-keys are echoed back: a sub-key the editor can
+    // WRITE but not READ is one a save wipes.
+    ...(c.safety?.approvalMode !== undefined || c.safety?.network !== undefined
+      ? {
+          safety: {
+            ...(c.safety.approvalMode !== undefined ? { approvalMode: c.safety.approvalMode } : {}),
+            ...(c.safety.network !== undefined ? { network: c.safety.network } : {}),
+          },
+        }
       : {}),
     ...(c.memory?.provider !== undefined ? { memory: { provider: c.memory.provider } } : {}),
     ...(c.display?.avatar_url !== undefined

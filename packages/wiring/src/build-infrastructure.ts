@@ -45,11 +45,16 @@ import {
   activate as activateOpenaiCompat,
   PROVIDER_CONTRACT_MAJOR as OPENAI_COMPAT_CONTRACT,
 } from '@ethosagent/llm-openai-compat';
+import {
+  activate as activateXai,
+  PROVIDER_CONTRACT_MAJOR as XAI_CONTRACT,
+} from '@ethosagent/llm-xai';
 import { HistoryStore } from '@ethosagent/memory-history';
 import { compose as composeMemory } from '@ethosagent/memory-markdown/compose';
 import { VectorMemoryProvider } from '@ethosagent/memory-vector';
 import type { PersonalityCompose } from '@ethosagent/personalities/compose';
 import { compose as composePersonalities } from '@ethosagent/personalities/compose';
+import type { NetworkPolicy } from '@ethosagent/safety-network';
 import { DockerSandbox } from '@ethosagent/sandbox-docker';
 import { compose as composeSession } from '@ethosagent/session-sqlite/compose';
 import { FsAttachmentCache, FsStorage, REF_TO_ENV } from '@ethosagent/storage-fs';
@@ -177,6 +182,38 @@ export function createPersonalityFsReachResolver(
 }
 
 /**
+ * The `personalityNetworkPolicy` resolver handed to `CapabilityBackends`.
+ *
+ * Same shape and same reasons as `createPersonalityFsReachResolver` above: it
+ * closes over the LIVE registry and takes the personality id per tool call.
+ * This used to be `activePerson.safety?.network ?? {}` — one snapshot of ONE
+ * personality, applied to every personality in the process. Two failures came
+ * out of that: a `safety.network.allow` set on any non-default personality was
+ * never read (so every tool declaring `allowedHosts: ['*']` resolved to an
+ * empty host set and denied every URL), and an edit to the policy on disk did
+ * nothing until the process was rebuilt.
+ *
+ * An id the registry does not know degrades to the empty policy — the same
+ * value an absent `safety.network` block yields, and the narrower of the two
+ * directions under the resolver's current semantics.
+ */
+export function createPersonalityNetworkPolicyResolver(
+  personalities: Pick<PersonalityRegistry, 'get' | 'getDefault'>,
+  log: Logger,
+): (personalityId?: string) => NetworkPolicy {
+  return (personalityId?: string) => {
+    const person = personalityId ? personalities.get(personalityId) : personalities.getDefault();
+    if (!person) {
+      log.warn('network policy: unknown personality; falling back to empty policy', {
+        personalityId,
+      });
+      return {};
+    }
+    return person.safety?.network ?? {};
+  };
+}
+
+/**
  * Build the core infrastructure for createAgentLoop:
  *  - LLM + memory provider registries (built-ins registered)
  *  - Personalities loaded + active personality resolved
@@ -234,6 +271,15 @@ export async function buildInfrastructure(
         id: '@ethosagent/llm-gemini-native',
         activate: activateGeminiNative,
         contractMajor: GEMINI_NATIVE_CONTRACT,
+      },
+      // This array is SEPARATE from registerBuiltinProviders' registrations —
+      // it serves the `ethos chat` path while that one serves createLLM /
+      // probeProvider. A provider registered in only one of the two exists in
+      // `ethos setup` and not in `ethos chat`, or the reverse.
+      {
+        id: '@ethosagent/llm-xai',
+        activate: activateXai,
+        contractMajor: XAI_CONTRACT,
       },
     ],
     llmProviders,
@@ -433,7 +479,7 @@ export async function buildInfrastructure(
       { ethosHome: dataDir, cwd: wiringCtx.workingDir },
       log,
     ),
-    personalityNetworkPolicy: effectiveActivePerson.safety?.network ?? {},
+    personalityNetworkPolicy: createPersonalityNetworkPolicyResolver(personalities, log),
     safeFetch,
     alwaysDenyPaths: defaultAlwaysDeny(),
     attachmentCache: new FsAttachmentCache(new FsStorage(), join(dataDir, 'cache', 'attachments')),

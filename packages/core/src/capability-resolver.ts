@@ -31,12 +31,23 @@ export interface CapabilityBackends {
    */
   personalityFsReach?: (personalityId?: string) => { read: string[]; write: string[] };
   /**
-   * Full personality network policy. The `allow` list is intersected
-   * with each tool's declared `allowedHosts`; `deny` and
-   * `allow_private_urls` plus the always-on safety floor (cloud-metadata,
-   * private-network, scheme, DNS-rebinding) flow through `safeFetch`.
+   * Resolves the full network policy of the personality running the turn. The
+   * `allow` list is intersected with each tool's declared `allowedHosts`;
+   * `deny` and `allow_private_urls` plus the always-on safety floor
+   * (cloud-metadata, private-network, scheme, DNS-rebinding) flow through
+   * `safeFetch`.
+   *
+   * A RESOLVER, not a stored `NetworkPolicy`, for the same two reasons
+   * `personalityFsReach` above is one. A stored value was captured once at
+   * wiring time from the ACTIVE personality, so (a) every other personality in
+   * the process ran on the default's policy — a `safety.network.allow` set on a
+   * non-default personality was never read at all, and every `['*']`-declaring
+   * tool resolved to an empty host set and answered `HOST_NOT_ALLOWED` — and
+   * (b) editing the policy on disk did nothing until the process was rebuilt.
+   * It is called per tool execution with the personality id of that call, so a
+   * mid-session `/personality` switch resolves the new personality's policy.
    */
-  personalityNetworkPolicy?: NetworkPolicy;
+  personalityNetworkPolicy?: (personalityId?: string) => NetworkPolicy;
   /** Injected safeFetch function for network policy enforcement. */
   safeFetch?: SafeFetchFn;
   /** Always-deny path list for filesystem scoping. */
@@ -77,7 +88,7 @@ export function resolveCapabilities(
 
   if (capabilities.network) {
     const declaredHosts = capabilities.network.allowedHosts;
-    const policy = backends.personalityNetworkPolicy ?? {};
+    const policy = backends.personalityNetworkPolicy?.(scopeIds.personalityId) ?? {};
     const personalityAllow = policy.allow;
     let resolvedHosts: Set<string>;
     if (declaredHosts.includes('*')) {

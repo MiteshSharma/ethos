@@ -68,8 +68,10 @@ import { type ApprovalObservability, ApprovalsService } from './services/approva
 import { CallsService } from './services/calls.service';
 import { ConfigService, readLegacyBrowserBargeInTuning } from './services/config.service';
 import { CronService } from './services/cron.service';
+import { createLiveDeliveryTargetWorld } from './services/cron-delivery-targets';
 import { DeliveriesService } from './services/deliveries.service';
 import { DigestService } from './services/digest.service';
+import { createDiscoveredChatStore } from './services/discovered-chats';
 import { DocumentsService } from './services/documents.service';
 import { EvolverService } from './services/evolver.service';
 import { GoalsService } from './services/goals.service';
@@ -84,6 +86,8 @@ import { OnboardingService } from './services/onboarding.service';
 import { PersonalitiesService } from './services/personalities.service';
 import { PlatformsService } from './services/platforms.service';
 import { PluginsService } from './services/plugins.service';
+import { createLiveChannelSetupWorld } from './services/recipe-channel-setup';
+import { RecipesService } from './services/recipes.service';
 import { SkillsService } from './services/skills.service';
 import { SystemEventBus } from './services/system-event-bus';
 import { TasksService } from './services/tasks.service';
@@ -614,6 +618,10 @@ export function createWebApi(opts: CreateWebApiOptions): CreateWebApiResult {
     storage,
   });
 
+  // Constructed here rather than alongside the other services below because
+  // `CronService`'s delivery-target resolver reads through it.
+  const platformsService = new PlatformsService({ repo: platformsRepo });
+
   const systemBus = new SystemEventBus();
 
   // --- Services (business logic) ---
@@ -687,11 +695,25 @@ export function createWebApi(opts: CreateWebApiOptions): CreateWebApiResult {
     ...(opts.approvalTimeoutMs !== undefined ? { timeoutMs: opts.approvalTimeoutMs } : {}),
     ...(opts.approvalObservability ? { observability: opts.approvalObservability } : {}),
   });
+  const discoveredChats = createDiscoveredChatStore(storage, opts.dataDir);
   // Cron service degrades gracefully when no scheduler is provided —
   // tests and ACP-only deployments don't need it. Mutations throw a
   // clear error in that mode; reads return empty.
   const cronService = new CronService({
     scheduler: opts.cronScheduler ?? createPassiveScheduler(),
+    // The set of chats this deployment's own bots may be pointed at. Backs the
+    // Cron page's delivery picker AND the create-time refusal rules — the same
+    // resolver, so the picker cannot offer something create would refuse.
+    deliveryWorld: createLiveDeliveryTargetWorld({
+      platforms: platformsService,
+      sessions: opts.sessionStore,
+      storage,
+      dataDir: opts.dataDir,
+      // Chats this server itself watched message a bot during a recipe's
+      // inline channel setup. Without this, a bot created seconds ago has no
+      // targets at all — no channel filter, no pairing row, no lane key.
+      discovered: discoveredChats,
+    }),
   });
   const skillsService = new SkillsService({ library: skillsLibrary });
   const evolverService = new EvolverService({ evolver: evolverRepo, library: skillsLibrary });
@@ -1009,7 +1031,33 @@ export function createWebApi(opts: CreateWebApiOptions): CreateWebApiResult {
       ? `${opts.webBaseUrl}/oauth/callback`
       : 'http://localhost:3000/oauth/callback',
   });
-  const platformsService = new PlatformsService({ repo: platformsRepo });
+  // Recipes — the install pipeline's orchestration half. Every write it makes
+  // goes through the services above, so a recipe cannot reach past a refusal
+  // any of them already enforces (`CronService`'s delivery rules above all).
+  const recipesService = new RecipesService({
+    personalities: personalitiesService,
+    cron: cronService,
+    mcp: mcpService,
+    plugins: pluginsService,
+    ...(opts.toolRegistry ? { toolRegistry: opts.toolRegistry } : {}),
+    // Read-only: preflight asks whether a recipe's tools already have the
+    // credential they need (a search key), so the question is answered before
+    // the install rather than at the first scheduled run.
+    keys: keysService,
+    // Where a chosen key is RECORDED. `web_search` reads its personality
+    // binding to resolve `providers/<provider>/<name>`; without this the
+    // install could only ever leave the tool on its default-named key.
+    toolSettings: toolSettingsService,
+    // Lets a recipe create and bind the bot it delivers through, instead of
+    // pointing at a Communications page that cannot help until the personality
+    // the recipe is about to write already exists.
+    channelSetup: createLiveChannelSetupWorld({
+      platforms: platformsService,
+      discovered: discoveredChats,
+    }),
+    storage,
+    dataDir: opts.dataDir,
+  });
   const labService = new LabService({ dataDir: opts.dataDir, loop: agentLoop, storage });
   // F3+F4 — drives `POST /v1/chat/completions`. Shares the AgentLoop with
   // the web chat surface so personality reloads + tool wiring reach both.
@@ -1315,6 +1363,7 @@ export function createWebApi(opts: CreateWebApiOptions): CreateWebApiResult {
       sessions: sessionsService,
       chat: chatService,
       personalities: personalitiesService,
+      recipes: recipesService,
       config: configService,
       onboarding: onboardingService,
       approvals: approvalsService,

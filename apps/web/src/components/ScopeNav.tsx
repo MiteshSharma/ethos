@@ -202,6 +202,9 @@ export function ScopeNav({ needsYouCount = 0 }: { needsYouCount?: number }) {
         <>
           <div className="sidebar-nav">
             <NavRow path="/personalities" icon="🎭" label="Personalities" pathname={pathname} />
+            {/* No fraction hint: unlike Skills/MCP/Plugins, "3 of 3" means
+                nothing for a catalog you install FROM. */}
+            <NavRow path="/recipes" icon="📖" label="Recipes" pathname={pathname} />
             <NavRow path="/skills" icon="⚡" label="All skills" pathname={pathname} exact />
             <NavRow path="/plugins" icon="🧩" label="All plugins" pathname={pathname} />
             <NavRow path="/mcp" icon="🔌" label="All servers" pathname={pathname} exact />

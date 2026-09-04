@@ -52,6 +52,8 @@ import {
   voiceLanguageRows,
   voiceUpdateInput,
 } from '../components/personality/PersonalityVoiceFields';
+import { TabSaveBar } from '../components/personality/TabSaveBar';
+import { ToolDetailModal } from '../components/personality/ToolDetailModal';
 import { PersonalityMark } from '../components/ui/PersonalityMark';
 import { PersonalityRingAvatar } from '../components/ui/PersonalityRingAvatar';
 import { useCreateFlag } from '../hooks/useCreateFlag';
@@ -1484,9 +1486,49 @@ export function EditModal({
     queryKey: ['personalities', 'get', id],
     queryFn: () => rpc.personalities.get({ id }),
   });
+  const { modal } = AntApp.useApp();
+
+  // Which panes hold unsaved drafts. A ref, not state: nothing renders off it —
+  // it is read once, when the modal is asked to close.
+  const dirtyTabs = useRef<Partial<Record<EditModalTabKey, boolean>>>({});
+  // Stable per-tab reporters — `TabSaveBar` reports through an effect, so a new
+  // function identity each render would re-fire it on every render.
+  const reportDirty = useMemo(() => {
+    const forTab = (tab: EditModalTabKey) => (dirty: boolean) => {
+      dirtyTabs.current[tab] = dirty;
+    };
+    return {
+      identity: forTab('identity'),
+      toolset: forTab('toolset'),
+      config: forTab('config'),
+      plugins: forTab('plugins'),
+    };
+  }, []);
+
+  function handleCancel() {
+    if (!Object.values(dirtyTabs.current).some(Boolean)) {
+      onClose();
+      return;
+    }
+    modal.confirm({
+      title: 'Discard unsaved changes?',
+      content: 'Some tabs hold edits that have not been saved. Closing loses them.',
+      okText: 'Discard',
+      okButtonProps: { danger: true },
+      cancelText: 'Keep editing',
+      onOk: onClose,
+    });
+  }
 
   return (
-    <Modal open title={`Edit ${id}`} onCancel={onClose} footer={null} width={780} destroyOnClose>
+    <Modal
+      open
+      title={`Edit ${id}`}
+      onCancel={handleCancel}
+      footer={null}
+      width={780}
+      destroyOnClose
+    >
       {isLoading || !data ? (
         <div style={{ display: 'grid', placeItems: 'center', height: 240 }}>
           <Spin />
@@ -1508,13 +1550,20 @@ export function EditModal({
                   id={id}
                   initialSoulMd={data.soulMd}
                   initialAvatarUrl={data.personality.display?.avatar_url}
+                  onDirtyChange={reportDirty.identity}
                 />
               ),
             },
             {
               key: 'toolset',
               label: 'Toolset',
-              children: <ToolsetEditor id={id} initialToolset={data.personality.toolset ?? []} />,
+              children: (
+                <ToolsetEditor
+                  id={id}
+                  initialToolset={data.personality.toolset ?? []}
+                  onDirtyChange={reportDirty.toolset}
+                />
+              ),
             },
             {
               key: 'execution',
@@ -1524,7 +1573,13 @@ export function EditModal({
             {
               key: 'config',
               label: 'Config',
-              children: <ConfigEditor id={id} personality={data.personality} />,
+              children: (
+                <ConfigEditor
+                  id={id}
+                  personality={data.personality}
+                  onDirtyChange={reportDirty.config}
+                />
+              ),
             },
             {
               key: 'soul',
@@ -1540,7 +1595,11 @@ export function EditModal({
               key: 'plugins',
               label: 'Plugins',
               children: (
-                <PluginsAttachPanel id={id} initialPlugins={data.personality.plugins ?? []} />
+                <PluginsAttachPanel
+                  id={id}
+                  initialPlugins={data.personality.plugins ?? []}
+                  onDirtyChange={reportDirty.plugins}
+                />
               ),
             },
           ]}
@@ -1596,19 +1655,26 @@ export function IdentityEditor({
   id,
   initialSoulMd,
   initialAvatarUrl,
+  onDirtyChange,
 }: {
   id: string;
   initialSoulMd: string;
   initialAvatarUrl?: string;
+  onDirtyChange?: (dirty: boolean) => void;
 }) {
   const qc = useQueryClient();
   const { notification } = AntApp.useApp();
   const [draft, setDraft] = useState(initialSoulMd);
+  // What is on disk, as far as this editor knows. Tracked separately from the
+  // prop so the dirty flag clears the instant the write lands, rather than
+  // waiting on the invalidated query to come back.
+  const [savedSoulMd, setSavedSoulMd] = useState(initialSoulMd);
   const [avatarUrl, setAvatarUrl] = useState(initialAvatarUrl);
 
   const mut = useMutation({
-    mutationFn: () => rpc.personalities.update({ id, soulMd: draft }),
-    onSuccess: () => {
+    mutationFn: (soulMd: string) => rpc.personalities.update({ id, soulMd }),
+    onSuccess: (_result, soulMd) => {
+      setSavedSoulMd(soulMd);
       qc.invalidateQueries({ queryKey: ['personalities', 'get', id] });
       qc.invalidateQueries({ queryKey: ['personalities', 'characterSheet', id] });
       qc.invalidateQueries({ queryKey: ['personalities', 'list'] });
@@ -1691,33 +1757,45 @@ export function IdentityEditor({
           onChange={(e) => setDraft(e.target.value)}
         />
       </Form.Item>
-      <Button
-        type="primary"
-        disabled={draft === initialSoulMd}
-        loading={mut.isPending}
-        onClick={() => mut.mutate()}
-      >
-        Save
-      </Button>
+      {/* Dirty tracks the SOUL.md draft only. The avatar applies on select
+          (an upload cannot sensibly be deferred), so folding it in here would
+          claim unsaved changes for bytes already written. */}
+      <TabSaveBar
+        dirty={draft !== savedSoulMd}
+        saving={mut.isPending}
+        saveSucceeded={mut.isSuccess}
+        onSave={() => mut.mutate(draft)}
+        {...(onDirtyChange ? { onDirtyChange } : {})}
+      />
     </Form>
   );
 }
 
-function ToolsetEditor({ id, initialToolset }: { id: string; initialToolset: string[] }) {
+function ToolsetEditor({
+  id,
+  initialToolset,
+  onDirtyChange,
+}: {
+  id: string;
+  initialToolset: string[];
+  onDirtyChange?: (dirty: boolean) => void;
+}) {
   const qc = useQueryClient();
   const { notification } = AntApp.useApp();
   const [draft, setDraft] = useState(initialToolset.join('\n'));
+  const [savedDraft, setSavedDraft] = useState(initialToolset.join('\n'));
 
   const mut = useMutation({
-    mutationFn: () =>
+    mutationFn: (text: string) =>
       rpc.personalities.update({
         id,
-        toolset: draft
+        toolset: text
           .split('\n')
           .map((l) => l.trim())
           .filter(Boolean),
       }),
-    onSuccess: () => {
+    onSuccess: (_result, text) => {
+      setSavedDraft(text);
       qc.invalidateQueries({ queryKey: ['personalities', 'get', id] });
       qc.invalidateQueries({ queryKey: ['personalities', 'characterSheet', id] });
       qc.invalidateQueries({ queryKey: ['personalities', 'list'] });
@@ -1741,15 +1819,14 @@ function ToolsetEditor({ id, initialToolset }: { id: string; initialToolset: str
           onChange={(e) => setDraft(e.target.value)}
         />
       </Form.Item>
-      <Button
-        type="primary"
-        disabled={draft === initialToolset.join('\n')}
-        loading={mut.isPending}
-        onClick={() => mut.mutate()}
-      >
-        Save
-      </Button>
-      <ToolsetAffordances draft={draft} />
+      <ToolsetAffordances draft={draft} personalityId={id} />
+      <TabSaveBar
+        dirty={draft !== savedDraft}
+        saving={mut.isPending}
+        saveSucceeded={mut.isSuccess}
+        onSave={() => mut.mutate(draft)}
+        {...(onDirtyChange ? { onDirtyChange } : {})}
+      />
     </Form>
   );
 }
@@ -1758,7 +1835,11 @@ function ToolsetEditor({ id, initialToolset }: { id: string; initialToolset: str
 // execution backend ("runs sandboxed", linking to the Execution tab); host-side
 // tools stay app-confined. No per-tool docker variants — posture is a property
 // of the persona, set on the Execution tab.
-function ToolsetAffordances({ draft }: { draft: string }) {
+//
+// Each row is also the click target for `ToolDetailModal` — the one place the
+// UI can tell you a listed tool is not registered here.
+function ToolsetAffordances({ draft, personalityId }: { draft: string; personalityId: string }) {
+  const [inspecting, setInspecting] = useState<string | null>(null);
   const tools = draft
     .split('\n')
     .map((l) => l.trim())
@@ -1773,7 +1854,13 @@ function ToolsetAffordances({ draft }: { draft: string }) {
         {tools.map((tool) => {
           const a = toolAffordance(tool);
           return (
-            <div key={tool} style={{ display: 'flex', gap: 10, fontSize: 12.5 }}>
+            <button
+              key={tool}
+              type="button"
+              className="toolset-affordance-row"
+              aria-label={`Inspect ${tool}`}
+              onClick={() => setInspecting(tool)}
+            >
               <span style={{ fontFamily: 'Geist Mono, monospace', minWidth: 140 }}>{tool}</span>
               {a.kind === 'exec' ? (
                 <Typography.Text type="secondary" style={{ fontSize: 12.5 }}>
@@ -1784,10 +1871,17 @@ function ToolsetAffordances({ draft }: { draft: string }) {
                   host-side (app-confined)
                 </Typography.Text>
               )}
-            </div>
+            </button>
           );
         })}
       </div>
+      {inspecting === null ? null : (
+        <ToolDetailModal
+          toolName={inspecting}
+          personalityId={personalityId}
+          onClose={() => setInspecting(null)}
+        />
+      )}
     </div>
   );
 }
@@ -1802,12 +1896,33 @@ const FS_REACH_READ_HELP = 'Directories this personality may read from.';
 
 const FS_REACH_WRITE_HELP = 'Directories this personality may write to.';
 
+// The asymmetry users get wrong: a tool that declares NO hosts of its own
+// delegates the whole decision to this list, while a tool that declares its own
+// hosts is intersected with it — narrowed, never widened.
+const NET_ALLOW_HELP =
+  '‘*’ allows any public host. Otherwise list exact hosts (api.open-meteo.com) or one leading wildcard (*.example.com). The non-overridable floor still blocks cloud-metadata endpoints and private (RFC1918) addresses, whatever is listed here.';
+
+const NET_DENY_HELP = 'Hosts refused even when the allow list would permit them.';
+
 const FS_REACH_WORKDIR_HELP =
   'Where bare filenames land — the output home for this personality, and what the Documents tab lists for download and deletion. Declare several to give Documents several roots; the first is also the agent’s own working directory. Recommended: without one, the Documents tab has nothing to show.';
 
-export function ConfigEditor({ id, personality }: { id: string; personality: Personality }) {
+export function ConfigEditor({
+  id,
+  personality,
+  onDirtyChange,
+}: {
+  id: string;
+  personality: Personality;
+  onDirtyChange?: (dirty: boolean) => void;
+}) {
   const qc = useQueryClient();
   const { notification } = AntApp.useApp();
+  // This form has ~30 fields across an Antd form, a separate voice block and a
+  // tiered-model switch, so dirty is a latch set by any of the three rather
+  // than a value comparison. It clears on a successful save and on the reset
+  // the refetched personality drives.
+  const [dirty, setDirty] = useState(false);
   const [form] = Form.useForm<{
     name: string;
     description: string;
@@ -1820,6 +1935,8 @@ export function ConfigEditor({ id, personality }: { id: string; personality: Per
     fsReachRead: string[];
     fsReachWrite: string[];
     fsReachWorkdir: string[];
+    netAllow: string[];
+    netDeny: string[];
     dreaming: boolean;
     dreamingIdleMinutes: number;
     dreamingMaxPerDay: number;
@@ -1869,6 +1986,8 @@ export function ConfigEditor({ id, personality }: { id: string; personality: Per
       fsReachRead: personality.fs_reach?.read ?? [],
       fsReachWrite: personality.fs_reach?.write ?? [],
       fsReachWorkdir: personality.fs_reach?.workdir ?? [],
+      netAllow: personality.safety?.network?.allow ?? [],
+      netDeny: personality.safety?.network?.deny ?? [],
       dreaming: personality.dreaming?.enable ?? false,
       dreamingIdleMinutes: personality.dreaming?.idleMinutes ?? 60,
       dreamingMaxPerDay: personality.dreaming?.maxPerDay ?? 1,
@@ -1900,6 +2019,7 @@ export function ConfigEditor({ id, personality }: { id: string; personality: Per
       model: personality.voice?.model ?? '',
       languages: voiceLanguageRows(personality.voice?.languages),
     });
+    setDirty(false);
   }, [personality, form]);
 
   const mut = useMutation({
@@ -1915,6 +2035,8 @@ export function ConfigEditor({ id, personality }: { id: string; personality: Per
       fsReachRead: string[];
       fsReachWrite: string[];
       fsReachWorkdir: string[];
+      netAllow: string[];
+      netDeny: string[];
       dreaming: boolean;
       dreamingIdleMinutes: number;
       dreamingMaxPerDay: number;
@@ -1977,7 +2099,24 @@ export function ConfigEditor({ id, personality }: { id: string; personality: Per
           cooldown_minutes: values.skillEvolutionCooldownMinutes,
           ...(values.skillEvolutionModel ? { model: values.skillEvolutionModel } : {}),
         },
-        safety: { approvalMode: values.safetyApprovalMode },
+        safety: {
+          approvalMode: values.safetyApprovalMode,
+          // An empty list is omitted rather than sent as `[]`: empty and absent
+          // mean the same thing to the resolver, and a `network` object with no
+          // lists is what clears the block back to none.
+          //
+          // `allow_private_urls` is echoed back untouched. It is not editable
+          // here (localhost reach is a separate decision), and this patch
+          // REPLACES the whole network block — dropping it would silently undo
+          // a hand-written config.yaml.
+          network: {
+            ...(values.netAllow.length > 0 ? { allow: values.netAllow } : {}),
+            ...(values.netDeny.length > 0 ? { deny: values.netDeny } : {}),
+            ...(personality.safety?.network?.allow_private_urls !== undefined
+              ? { allow_private_urls: personality.safety.network.allow_private_urls }
+              : {}),
+          },
+        },
         memory: { provider: values.memoryProvider },
         // Every sub-key always sent, empty string included: the registry
         // shallow-merges the voice block, so omitting one would preserve the
@@ -1994,6 +2133,7 @@ export function ConfigEditor({ id, personality }: { id: string; personality: Per
       });
     },
     onSuccess: () => {
+      setDirty(false);
       qc.invalidateQueries({ queryKey: ['personalities', 'get', id] });
       qc.invalidateQueries({ queryKey: ['personalities', 'characterSheet', id] });
       qc.invalidateQueries({ queryKey: ['personalities', 'list'] });
@@ -2007,6 +2147,7 @@ export function ConfigEditor({ id, personality }: { id: string; personality: Per
     <Form
       form={form}
       layout="vertical"
+      onValuesChange={() => setDirty(true)}
       onFinish={(values) =>
         mut.mutate({
           name: values.name,
@@ -2020,6 +2161,8 @@ export function ConfigEditor({ id, personality }: { id: string; personality: Per
           fsReachRead: values.fsReachRead ?? [],
           fsReachWrite: values.fsReachWrite ?? [],
           fsReachWorkdir: values.fsReachWorkdir ?? [],
+          netAllow: values.netAllow ?? [],
+          netDeny: values.netDeny ?? [],
           dreaming: values.dreaming ?? false,
           dreamingIdleMinutes: values.dreamingIdleMinutes ?? 60,
           dreamingMaxPerDay: values.dreamingMaxPerDay ?? 1,
@@ -2046,7 +2189,13 @@ export function ConfigEditor({ id, personality }: { id: string; personality: Per
       <Form.Item label="Description" name="description">
         <Input />
       </Form.Item>
-      <PersonalityVoiceFields value={voice} onChange={setVoice} />
+      <PersonalityVoiceFields
+        value={voice}
+        onChange={(next) => {
+          setVoice(next);
+          setDirty(true);
+        }}
+      />
       <Form.Item
         label="Provider"
         name="provider"
@@ -2074,6 +2223,7 @@ export function ConfigEditor({ id, personality }: { id: string; personality: Per
             checked={tieredMode}
             onChange={(checked) => {
               setTieredMode(checked);
+              setDirty(true);
               if (!checked) {
                 form.setFieldsValue({ modelTrivial: '', modelDefault: '', modelDeep: '' });
               } else {
@@ -2355,11 +2505,39 @@ export function ConfigEditor({ id, personality }: { id: string; personality: Per
           tokenSeparators={[',']}
         />
       </Form.Item>
-      <Form.Item>
-        <Button type="primary" htmlType="submit" loading={mut.isPending}>
-          Save
-        </Button>
+      <Alert
+        type="warning"
+        showIcon
+        style={{ marginBottom: 16 }}
+        message="Network reach"
+        description="Web tools that declare no hosts of their own — web_extract, the browser tools, the delegation tools — can reach exactly what is listed here, and nothing at all while it is empty. A tool that names its own hosts (web_search) is intersected with this list: it can be narrowed by it, never widened."
+      />
+      <Form.Item label="Allowed hosts" name="netAllow" extra={NET_ALLOW_HELP}>
+        <Select
+          mode="tags"
+          allowClear
+          placeholder="e.g. *, *.example.com"
+          tokenSeparators={[',']}
+        />
       </Form.Item>
+      <Form.Item label="Blocked hosts" name="netDeny" extra={NET_DENY_HELP}>
+        <Select
+          mode="tags"
+          allowClear
+          placeholder="e.g. tracker.example.com"
+          tokenSeparators={[',']}
+        />
+      </Form.Item>
+      {/* `form.submit()` rather than a submit button: the shared bar carries no
+          form semantics, and routing through submit keeps `onFinish`'s
+          validation in the path. */}
+      <TabSaveBar
+        dirty={dirty}
+        saving={mut.isPending}
+        saveSucceeded={mut.isSuccess}
+        onSave={() => form.submit()}
+        {...(onDirtyChange ? { onDirtyChange } : {})}
+      />
     </Form>
   );
 }
@@ -2939,10 +3117,22 @@ export function ServerToolChecklist({
 // Saves via personalities.update({ plugins: [...] }).
 // ---------------------------------------------------------------------------
 
-function PluginsAttachPanel({ id, initialPlugins }: { id: string; initialPlugins: string[] }) {
+function PluginsAttachPanel({
+  id,
+  initialPlugins,
+  onDirtyChange,
+}: {
+  id: string;
+  initialPlugins: string[];
+  onDirtyChange?: (dirty: boolean) => void;
+}) {
   const qc = useQueryClient();
   const { notification } = AntApp.useApp();
+  // Toggles used to write immediately. They are a draft now: a switch that
+  // saves itself gives the user no way to know whether it landed, which is the
+  // one thing this modal has to be trustworthy about.
   const [attached, setAttached] = useState<Set<string>>(new Set(initialPlugins));
+  const [saved, setSaved] = useState<Set<string>>(new Set(initialPlugins));
 
   const pluginsQuery = useQuery({
     queryKey: ['plugins', 'list'],
@@ -2951,19 +3141,22 @@ function PluginsAttachPanel({ id, initialPlugins }: { id: string; initialPlugins
 
   const mut = useMutation({
     mutationFn: (next: string[]) => rpc.personalities.update({ id, plugins: next }),
-    onMutate: () => ({ prev: new Set(attached) }),
-    onSuccess: () => {
+    onSuccess: (_result, next) => {
+      // No rollback of the draft on failure: the edits are the user's now, and
+      // discarding them on a network error would be the silent loss this
+      // change exists to remove.
+      setSaved(new Set(next));
       qc.invalidateQueries({ queryKey: ['personalities', 'get', id] });
       qc.invalidateQueries({ queryKey: ['personalities', 'characterSheet', id] });
       qc.invalidateQueries({ queryKey: ['personalities', 'list'] });
+      notification.success({ message: 'Plugins saved', placement: 'topRight' });
     },
-    onError: (err, _vars, ctx) => {
-      if (ctx) setAttached(ctx.prev);
-      notification.error({ message: 'Save failed', description: (err as Error).message });
-    },
+    onError: (err) =>
+      notification.error({ message: 'Save failed', description: (err as Error).message }),
   });
 
   const plugins = pluginsQuery.data?.plugins ?? [];
+  const dirty = attached.size !== saved.size || [...attached].some((p) => !saved.has(p));
 
   if (pluginsQuery.isLoading) {
     return (
@@ -2992,7 +3185,6 @@ function PluginsAttachPanel({ id, initialPlugins }: { id: string; initialPlugins
     if (on) next.add(pluginId);
     else next.delete(pluginId);
     setAttached(next);
-    mut.mutate([...next]);
   }
 
   return (
@@ -3011,7 +3203,7 @@ function PluginsAttachPanel({ id, initialPlugins }: { id: string; initialPlugins
           <Switch
             size="small"
             checked={attached.has(p.id)}
-            loading={mut.isPending}
+            disabled={mut.isPending}
             onChange={(on) => toggle(p.id, on)}
             aria-label={`Attach ${p.name} to ${id}`}
             style={{ marginTop: 2, flexShrink: 0 }}
@@ -3042,6 +3234,13 @@ function PluginsAttachPanel({ id, initialPlugins }: { id: string; initialPlugins
           </div>
         </div>
       ))}
+      <TabSaveBar
+        dirty={dirty}
+        saving={mut.isPending}
+        saveSucceeded={mut.isSuccess}
+        onSave={() => mut.mutate([...attached])}
+        {...(onDirtyChange ? { onDirtyChange } : {})}
+      />
     </div>
   );
 }

@@ -21,6 +21,7 @@
       "@ethosagent/llm-openai-compat": ["./extensions/llm-openai-compat/src"],
       "@ethosagent/llm-codex": ["./extensions/llm-codex/src"],
       "@ethosagent/llm-gemini-native": ["./extensions/llm-gemini/src"],
+      "@ethosagent/llm-xai": ["./extensions/llm-xai/src"],
       "@ethosagent/memory-markdown": ["./extensions/memory-markdown/src"],
       "@ethosagent/memory-vault": ["./extensions/memory-vault/src"],
       "@ethosagent/memory-history": ["./extensions/memory-history/src"],
@@ -72,6 +73,7 @@
       "@ethosagent/platform-slack/format": ["./extensions/platform-slack/src/format"],
       "@ethosagent/platform-telegram": ["./extensions/platform-telegram/src"],
       "@ethosagent/platform-telegram/validate": ["./extensions/platform-telegram/src/validate"],
+      "@ethosagent/platform-telegram/discover": ["./extensions/platform-telegram/src/discover"],
       "@ethosagent/platform-telegram/clarify-surface": [
         "./extensions/platform-telegram/src/clarify-surface"
       ],
@@ -185,6 +187,7 @@
       "@ethosagent/observability-sqlite": ["./extensions/observability-sqlite/src"],
       "@ethosagent/export-langfuse": ["./extensions/export-langfuse/src"],
       "@ethosagent/request-dump": ["./extensions/request-dump/src"],
+      "@ethosagent/recipes": ["./extensions/recipes/src"],
       "@ethosagent/safety-channel": ["./packages/safety/channel/src"],
       "@ethosagent/safety-injection": ["./packages/safety/injection/src"],
       "@ethosagent/safety-network": ["./packages/safety/network/src"],

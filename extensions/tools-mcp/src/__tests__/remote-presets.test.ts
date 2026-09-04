@@ -55,13 +55,14 @@ describe('MCP_REMOTE_PRESETS', () => {
 });
 
 describe('MCP_REMOTE_PRESETS v1 slate', () => {
-  it('contains exactly the ten v1 entries', () => {
+  it('contains exactly the eleven catalog entries', () => {
     expect(Object.keys(MCP_REMOTE_PRESETS).sort()).toEqual(
       [
         'asana',
         'aws-knowledge',
         'context7',
         'deepwiki',
+        'granola',
         'linear',
         'microsoft-learn',
         'notion',
@@ -109,7 +110,7 @@ describe('MCP_REMOTE_PRESETS v1 slate', () => {
       'wolfram',
     ]);
     expect(byCategory['Developer tools']?.sort()).toEqual(['sentry', 'vercel']);
-    expect(byCategory.Productivity?.sort()).toEqual(['asana', 'linear', 'notion']);
+    expect(byCategory.Productivity?.sort()).toEqual(['asana', 'granola', 'linear', 'notion']);
   });
 
   it('pins the no-auth entries to their verified urls', () => {
@@ -141,10 +142,19 @@ describe('MCP_REMOTE_PRESETS v1 slate', () => {
     // `/mcp`, not the `/sse` path most Asana docs show — `/mcp` is a real route
     // and speaks streamable-http, which is what this preset type models.
     expect(MCP_REMOTE_PRESETS.asana?.url).toBe('https://mcp.asana.com/mcp');
+    // Host is `mcp.granola.ai` — the OAuth challenge points at the SEPARATE
+    // authorization server mcp-auth.granola.ai, which is not the MCP endpoint.
+    expect(MCP_REMOTE_PRESETS.granola?.url).toBe('https://mcp.granola.ai/mcp');
+  });
+
+  it('ships granola without a docsUrl', () => {
+    // https://www.granola.ai/docs/mcp 308s to docs.granola.ai/help-center/mcp,
+    // which 404s. `docsUrl` is optional; no link beats a dead one.
+    expect(MCP_REMOTE_PRESETS.granola?.docsUrl).toBeUndefined();
   });
 
   it('marks every OAuth entry authType oauth', () => {
-    for (const name of ['linear', 'sentry', 'notion', 'vercel', 'asana']) {
+    for (const name of ['linear', 'sentry', 'notion', 'vercel', 'asana', 'granola']) {
       expect(MCP_REMOTE_PRESETS[name]?.authType).toBe('oauth');
     }
   });

@@ -1,5 +1,5 @@
 import { homedir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { join, relative, resolve } from 'node:path';
 import { assertWithinBase } from '@ethosagent/core';
 import { noopLogger } from '@ethosagent/logger';
 import {
@@ -82,6 +82,16 @@ export {
 } from './lockfile';
 export { loadWidgetTemplates } from './widgets-loader';
 
+/**
+ * One safety-scan finding retained from load, plus the file it came from.
+ * `ScanFinding` has no file field — the scanner reads a source string, not a
+ * tree — so the loader attaches the path while it aggregates.
+ */
+export interface PluginScanFindingRecord extends ScanFinding {
+  /** Path of the scanned file, relative to the plugin directory. */
+  file?: string;
+}
+
 export interface InstalledPluginManifest {
   /** The plugin's id — `ethos.id` if declared, else `name`. */
   id: string;
@@ -108,6 +118,12 @@ export interface InstalledPluginManifest {
   status?: 'loaded' | 'failed';
   /** Error message when status is 'failed'. */
   error?: string;
+  /**
+   * Safety-scan findings retained from load. Yellow findings do not block —
+   * they surface in the Plugins UI so the operator can see what was found.
+   * Red findings block the load and appear here too, alongside `error`.
+   */
+  scanFindings?: PluginScanFindingRecord[];
 }
 
 /**
@@ -177,6 +193,7 @@ export class PluginLoader {
   private readonly loadedManifests = new Map<string, InstalledPluginManifest>();
   private readonly pluginPaths = new Map<string, string>();
   private readonly pluginHasWidgets = new Map<string, boolean>();
+  private readonly pluginScanFindings = new Map<string, PluginScanFindingRecord[]>();
 
   constructor(registries: PluginRegistries, opts: PluginLoaderOptions) {
     this.registries = registries;
@@ -291,15 +308,22 @@ export class PluginLoader {
     const permissions = readPluginPermissions(pkgJson);
     const tier = tierOverride ?? deriveTier(dir);
     const scanResult = await scanPluginTree(this.storage, dir, permissions);
+    this.pluginScanFindings.set(id, scanResult.findings);
     const decision = canInstall(scanResult, tier);
-    if (!decision.allowed) {
+    // Red blocks, exactly as before. Yellow no longer does: the operator
+    // installed this deliberately, so the findings are surfaced (retained
+    // above, rendered in the Plugins UI) instead of silently refusing.
+    if (!decision.allowed && scanResult.hasRed) {
+      const reason = `Blocked by safety scan: ${decision.blockedBy}`;
       this.logger.warn(`[plugin-loader] "${id}" blocked by safety scan: ${decision.blockedBy}`, {
         component: 'plugin-loader',
         pluginId: id,
         blockedBy: decision.blockedBy,
       });
+      this.trackManifestStatus(id, 'failed', reason);
       return;
     }
+    this.logYellowNotes(id, scanResult);
 
     // Check for widgets.yaml before activation (while we have the dir)
     this.pluginHasWidgets.set(id, await this.storage.exists(join(dir, 'widgets.yaml')));
@@ -454,14 +478,22 @@ export class PluginLoader {
         const permissions = readPluginPermissions(raw as Record<string, unknown>);
         const tier: TrustTier = opts.allowAll ? 'trusted-repo' : deriveTier(name);
         const scanResult = await scanPluginTree(this.storage, join(nmDir, name), permissions);
+        this.pluginScanFindings.set(nmPluginId, scanResult.findings);
         const decision = canInstall(scanResult, tier);
-        if (!decision.allowed) {
+        // Red blocks, exactly as before. Yellow no longer does — see the same
+        // rule in `loadFromPluginDir`.
+        if (!decision.allowed && scanResult.hasRed) {
+          const reason = `Blocked by safety scan: ${decision.blockedBy}`;
           this.logger.warn(
             `[plugin-loader] "${name}" blocked by safety scan: ${decision.blockedBy}`,
-            { component: 'plugin-loader', pluginId: name, blockedBy: decision.blockedBy },
+            { component: 'plugin-loader', pluginId: nmPluginId, blockedBy: decision.blockedBy },
           );
+          this.manifests.set(nmPluginId, raw as EthosPluginPackageJson);
+          this.pluginPaths.set(nmPluginId, join(nmDir, name));
+          this.trackManifestStatus(nmPluginId, 'failed', reason);
           continue;
         }
+        this.logYellowNotes(nmPluginId, scanResult);
 
         const mod = await import(entry);
         // Use ethos.id if declared, otherwise strip @scope/ so the plugin ID
@@ -1017,6 +1049,21 @@ export class PluginLoader {
     return null;
   }
 
+  /**
+   * Note yellow findings on a plugin that is being loaded anyway. This is not
+   * a block and must not read like one — the findings are retained on the
+   * manifest and shown in the Plugins UI, and this line is the log-side echo.
+   */
+  private logYellowNotes(id: string, scan: { hasYellow: boolean; findings: ScanFinding[] }): void {
+    if (!scan.hasYellow) return;
+    const yellow = scan.findings.filter((f) => f.severity === 'yellow');
+    const rules = [...new Set(yellow.map((f) => f.rule))].join(', ');
+    this.logger.info(
+      `[plugin-loader] "${id}" loaded with ${yellow.length} safety note(s) (${rules}) — review them in the Plugins tab.`,
+      { component: 'plugin-loader', pluginId: id, findingCount: yellow.length },
+    );
+  }
+
   /** Record activation status for a plugin in the loadedManifests map. */
   private trackManifestStatus(
     id: string,
@@ -1030,6 +1077,7 @@ export class PluginLoader {
     const dsMap = this.registries.dataSources?.get(id);
     const dataSources = dsMap ? [...dsMap.keys()] : [];
     const hasWidgets = this.pluginHasWidgets.get(id) ?? false;
+    const scanFindings = this.pluginScanFindings.get(id) ?? [];
     const entry: InstalledPluginManifest = {
       id,
       name: pkgJson?.name ?? id,
@@ -1044,6 +1092,7 @@ export class PluginLoader {
       hasWidgets,
       status,
       error,
+      ...(scanFindings.length > 0 ? { scanFindings } : {}),
     };
     this.loadedManifests.set(id, entry);
   }
@@ -1259,9 +1308,9 @@ async function scanPluginTree(
   storage: Storage,
   dir: string,
   permissions: PluginScanPermissions,
-): Promise<{ hasRed: boolean; hasYellow: boolean; findings: ScanFinding[] }> {
-  const findings: ScanFinding[] = [];
-  await collectFindings(storage, dir, permissions, findings);
+): Promise<{ hasRed: boolean; hasYellow: boolean; findings: PluginScanFindingRecord[] }> {
+  const findings: PluginScanFindingRecord[] = [];
+  await collectFindings(storage, dir, permissions, findings, dir);
   return {
     findings,
     hasRed: findings.some((f) => f.severity === 'red'),
@@ -1273,14 +1322,15 @@ async function collectFindings(
   storage: Storage,
   dir: string,
   permissions: PluginScanPermissions,
-  out: ScanFinding[],
+  out: PluginScanFindingRecord[],
+  rootDir: string,
 ): Promise<void> {
   const entries = await storage.listEntries(dir).catch(() => []);
   for (const entry of entries) {
     const fullPath = join(dir, entry.name);
     if (entry.isDir) {
       if (entry.name === 'node_modules') continue; // skip dep trees
-      await collectFindings(storage, fullPath, permissions, out);
+      await collectFindings(storage, fullPath, permissions, out, rootDir);
     } else if (
       /\.[jt]sx?$|\.(?:cjs|mjs)$/.test(entry.name) &&
       !entry.name.endsWith('.d.ts') &&
@@ -1288,7 +1338,11 @@ async function collectFindings(
       !entry.name.endsWith('.d.mts')
     ) {
       const src = await storage.read(fullPath);
-      if (src) out.push(...scanPluginCode(src, permissions).findings);
+      if (!src) continue;
+      const file = relative(rootDir, fullPath);
+      for (const finding of scanPluginCode(src, permissions).findings) {
+        out.push({ ...finding, file });
+      }
     }
   }
 }

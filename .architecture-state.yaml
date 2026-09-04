@@ -222,7 +222,7 @@ register_anchors:
 
   G-CAP:
     - { path: packages/core/src/capability-validator.ts, line: 19, contains: "export function validateRegistration" }
-    - { path: packages/core/src/capability-resolver.ts, line: 60, contains: "export function resolveCapabilities" }
+    - { path: packages/core/src/capability-resolver.ts, line: 71, contains: "export function resolveCapabilities" }
     - { path: packages/core/src/scoped/scoped-process.ts, line: 8, contains: "this.allowedBinaries.has(binary)" }
     - { path: packages/core/src/scoped/scoped-secrets.ts, line: 12, contains: "!this.isDeclared(ref)" }
     - { path: packages/core/src/scoped/scoped-attachments.ts, line: 22, contains: "a.ref === att.ref" }
@@ -259,9 +259,9 @@ register_anchors:
     - { path: packages/wiring/src/skill-passthrough.ts, line: 9, contains: "export function deriveSkillPassthrough" }
 
   G-RED:
-    - { path: packages/safety/redact/src/index.ts, line: 39, contains: "export function detectSecrets" }
-    - { path: packages/safety/redact/src/index.ts, line: 51, contains: "export function redactString" }
-    - { path: packages/safety/redact/src/index.ts, line: 68, contains: "export function redactJson" }
+    - { path: packages/safety/redact/src/index.ts, line: 45, contains: "export function detectSecrets" }
+    - { path: packages/safety/redact/src/index.ts, line: 57, contains: "export function redactString" }
+    - { path: packages/safety/redact/src/index.ts, line: 74, contains: "export function redactJson" }
     - { path: extensions/observability-sqlite/src/store.ts, line: 157, contains: "redactJson(trace.attrs)" }
     - { path: extensions/observability-sqlite/src/store.ts, line: 295, contains: "redactJson(span.attrs, extraRedactPatterns)" }
     - { path: extensions/observability-sqlite/src/store.ts, line: 348, contains: "redactJson(attrs, extraRedactPatterns)" }
@@ -778,6 +778,11 @@ tiers:
     tier: 2
     assigned: 2026-08-12
 
+  extensions/llm-xai:
+    package: "@ethosagent/llm-xai"
+    tier: 2
+    assigned: 2026-09-04
+
   extensions/memory-approval:
     package: "@ethosagent/memory-approval"
     tier: 2
@@ -861,6 +866,15 @@ tiers:
     package: "@ethosagent/platform-callcapture"
     tier: 2
     assigned: 2026-08-17
+
+  # Declarative recipe bundles plus a pure templater and preflight: no I/O, no
+  # untrusted input, no trust boundary. The curated catalog is first-party and
+  # in-repo (D11), and every write the install pipeline performs lives at the
+  # app layer, so this package sits on nothing an attacker can reach.
+  extensions/recipes:
+    package: "@ethosagent/recipes"
+    tier: 2
+    assigned: 2026-09-04
 
   extensions/request-dump:
     package: "@ethosagent/request-dump"

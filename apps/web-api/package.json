@@ -39,6 +39,7 @@
     "@ethosagent/platform-telegram": "workspace:*",
     "@ethosagent/plugin-contract": "workspace:*",
     "@ethosagent/plugin-loader": "workspace:*",
+    "@ethosagent/recipes": "workspace:*",
     "@ethosagent/session-cards": "workspace:*",
     "@ethosagent/session-sqlite": "workspace:*",
     "@ethosagent/skill-evolver": "workspace:*",

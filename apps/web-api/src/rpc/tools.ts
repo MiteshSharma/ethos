@@ -1,12 +1,18 @@
+import { describeTool, groupFor, runToolTest } from '../services/tool-inspection';
 import { os } from './context';
 
-// Thin RPC shells for the tools namespace. Both procedures resolve a
+// Thin RPC shells for the tools namespace. `approve` / `deny` resolve a
 // pending approval registered by the web `before_tool_call` hook; the
 // actual state machine + allowlist work lives in `ApprovalsService`.
 //
 // `clientId` flows in as `decidedBy` on the resulting `approval.resolved`
 // SSE event so other tabs viewing the same session can auto-dismiss the
 // modal with "approved by another window."
+//
+// `catalog` / `detail` / `test` back the Personality Edit modal's toolset
+// picker: what tools exist, what one of them actually is, and whether it works
+// in this deployment. The detail mapping and the execution safety gate live in
+// `services/tool-inspection`.
 
 export const toolsRouter = {
   approve: os.tools.approve.handler(async ({ input, context }) => {
@@ -27,7 +33,7 @@ export const toolsRouter = {
       // not by `toolset`. They have a dedicated UI (the MCP tab); excluding them
       // here keeps the built-in toolset picker to built-in tools only.
       if (t.toolset === 'mcp') continue;
-      const group = t.toolset ? t.toolset.charAt(0).toUpperCase() + t.toolset.slice(1) : 'Other';
+      const group = groupFor(t.toolset);
       let arr = groupMap.get(group);
       if (!arr) {
         arr = [];
@@ -37,5 +43,18 @@ export const toolsRouter = {
     }
     const groups = [...groupMap.entries()].map(([group, tools]) => ({ group, tools }));
     return { groups };
+  }),
+
+  detail: os.tools.detail.handler(async ({ input, context }) => {
+    const personality =
+      input.personalityId === undefined
+        ? undefined
+        : (await context.personalities.get(input.personalityId)).personality;
+    return describeTool(context.toolRegistry, input.name, personality);
+  }),
+
+  test: os.tools.test.handler(async ({ input, context }) => {
+    const { personality } = await context.personalities.get(input.personalityId);
+    return runToolTest(context.toolRegistry, input.name, personality, input.mode);
   }),
 };

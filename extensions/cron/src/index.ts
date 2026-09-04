@@ -1136,11 +1136,17 @@ export class CronScheduler {
       await this.deliver(job, text);
       return true;
     } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
       this.logger.error(`[cron] Delivery failed for job "${job.id}"`, {
         component: 'cron',
         jobId: job.id,
-        error: String(err),
+        error: message,
       });
+      // A run that produced output nobody received is a failed run from the
+      // operator's side. Record it on the job so `ethos cron list` and the Cron
+      // page say so — the run itself succeeded, so the tick's own lastError
+      // path never fires and this would otherwise be visible only in the log.
+      await this.patchJob(job.id, { lastError: `delivery failed: ${message}` }).catch(() => {});
       return false;
     }
   }

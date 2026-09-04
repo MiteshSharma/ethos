@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { FsStorage } from '@ethosagent/storage-fs';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { renderCharacterSheet } from '../character-sheet';
 import { FilePersonalityRegistry } from '../index';
 
 let testDir: string;
@@ -606,6 +607,166 @@ describe('safety + memory settings round-trip', () => {
     const after = fresh.get('sm-merge');
     expect(after?.safety?.approvalMode).toBe('off');
     expect(after?.safety?.observability?.storeToolArgs).toBe('redacted');
+  });
+});
+
+describe('safety.network on create', () => {
+  it('writes a declared network policy into config.yaml and reads it back', async () => {
+    // The create path had no way to express a network policy at all, so every
+    // personality it wrote resolved `web_extract`'s `allowedHosts: ['*']` to an
+    // EMPTY host set and denied every fetch. `safety.network` already existed on
+    // `PersonalityConfig`; this is the create path finally reaching it.
+    const registry = makeRegistry();
+    await registry.loadFromDirectory(join(testDir, 'personalities'));
+    await registry.create({
+      id: 'net-create',
+      name: 'NetCreate',
+      toolset: ['web_extract'],
+      soulMd: '# NetCreate\n',
+      safety: { network: { allow: ['*'], deny: ['blocked.example'] } },
+    });
+
+    const written = await readFile(join(testDir, 'personalities', 'net-create', 'config.yaml'), {
+      encoding: 'utf-8',
+    });
+    expect(written).toContain('safety:');
+    expect(written).toContain('  network:');
+    expect(written).toContain('    allow:');
+
+    const fresh = makeRegistry();
+    await fresh.loadFromDirectory(join(testDir, 'personalities'));
+    expect(fresh.get('net-create')?.safety?.network).toEqual({
+      allow: ['*'],
+      deny: ['blocked.example'],
+    });
+  });
+
+  it('writes no safety block when none is declared', async () => {
+    const registry = makeRegistry();
+    await registry.loadFromDirectory(join(testDir, 'personalities'));
+    await registry.create({
+      id: 'net-absent',
+      name: 'NetAbsent',
+      toolset: ['web_extract'],
+      soulMd: '# NetAbsent\n',
+    });
+    const written = await readFile(join(testDir, 'personalities', 'net-absent', 'config.yaml'), {
+      encoding: 'utf-8',
+    });
+    expect(written).not.toContain('safety:');
+  });
+
+  it('survives a later update that patches an unrelated field', async () => {
+    const registry = makeRegistry();
+    await registry.loadFromDirectory(join(testDir, 'personalities'));
+    await registry.create({
+      id: 'net-keep',
+      name: 'NetKeep',
+      toolset: ['web_extract'],
+      soulMd: '# NetKeep\n',
+      safety: { network: { allow: ['*'] } },
+    });
+    await registry.update('net-keep', { description: 'changed' });
+
+    const fresh = makeRegistry();
+    await fresh.loadFromDirectory(join(testDir, 'personalities'));
+    expect(fresh.get('net-keep')?.safety?.network).toEqual({ allow: ['*'] });
+  });
+});
+
+// The web config editor writes the allow list through `update`. The raw-block
+// patch loop skipped every OBJECT-valued safety sub-key, so with a `safety:`
+// block already on disk the write returned success and changed nothing.
+describe('safety.network on update', () => {
+  it('writes a network policy onto a config that already has a safety block', async () => {
+    await seedPersonality(
+      'net-update',
+      ['name: NetUpdate', 'safety:', '  approvalMode: smart', ''].join('\n'),
+    );
+    const registry = makeRegistry();
+    await registry.loadFromDirectory(join(testDir, 'personalities'));
+
+    await registry.update('net-update', { safety: { network: { allow: ['*'] } } });
+
+    const fresh = makeRegistry();
+    await fresh.loadFromDirectory(join(testDir, 'personalities'));
+    const after = fresh.get('net-update');
+    expect(
+      after?.safety?.network,
+      'a safety.network patch must reach config.yaml, not be dropped as an unsupported sub-key',
+    ).toEqual({ allow: ['*'] });
+    // The sibling scalar the raw block already carried is untouched.
+    expect(after?.safety?.approvalMode).toBe('smart');
+  });
+
+  it('replaces an existing network block rather than appending a second one', async () => {
+    await seedPersonality(
+      'net-replace',
+      [
+        'name: NetReplace',
+        'safety:',
+        '  approvalMode: manual',
+        '  network:',
+        '    allow:',
+        '      - a.example',
+        '      - b.example',
+        '  observability:',
+        '    storeToolArgs: redacted',
+        '',
+      ].join('\n'),
+    );
+    const registry = makeRegistry();
+    await registry.loadFromDirectory(join(testDir, 'personalities'));
+
+    await registry.update('net-replace', {
+      safety: { network: { allow: ['c.example'], deny: ['bad.example'] } },
+    });
+
+    const written = await readFile(join(testDir, 'personalities', 'net-replace', 'config.yaml'), {
+      encoding: 'utf-8',
+    });
+    expect(written.match(/^ {2}network:/gm)).toHaveLength(1);
+
+    const fresh = makeRegistry();
+    await fresh.loadFromDirectory(join(testDir, 'personalities'));
+    const after = fresh.get('net-replace');
+    expect(after?.safety?.network).toEqual({ allow: ['c.example'], deny: ['bad.example'] });
+    // Sub-blocks either side of the replaced one survive.
+    expect(after?.safety?.approvalMode).toBe('manual');
+    expect(after?.safety?.observability?.storeToolArgs).toBe('redacted');
+  });
+
+  it('shows the edited allowlist in the character sheet', async () => {
+    await seedPersonality('net-sheet', ['name: NetSheet', ''].join('\n'));
+    const registry = makeRegistry();
+    await registry.loadFromDirectory(join(testDir, 'personalities'));
+
+    await registry.update('net-sheet', {
+      safety: { network: { allow: ['api.open-meteo.com', 'docs.ethosagent.ai'] } },
+    });
+
+    const fresh = makeRegistry();
+    await fresh.loadFromDirectory(join(testDir, 'personalities'));
+    const config = fresh.get('net-sheet');
+    if (!config) throw new Error('personality missing after update');
+    const sheet = renderCharacterSheet(config, '# NetSheet\n');
+    expect(sheet).toContain('host allowlist: 2 hosts');
+    expect(sheet).toContain('network allowlist');
+  });
+
+  it('clears a network policy back to none', async () => {
+    await seedPersonality(
+      'net-clear',
+      ['name: NetClear', 'safety:', '  network:', '    allow:', '      - a.example', ''].join('\n'),
+    );
+    const registry = makeRegistry();
+    await registry.loadFromDirectory(join(testDir, 'personalities'));
+
+    await registry.update('net-clear', { safety: { network: {} } });
+
+    const fresh = makeRegistry();
+    await fresh.loadFromDirectory(join(testDir, 'personalities'));
+    expect(fresh.get('net-clear')?.safety?.network).toBeUndefined();
   });
 });
 

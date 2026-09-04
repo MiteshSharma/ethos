@@ -5,6 +5,8 @@ import { StorageA2aAllowlist } from '@ethosagent/a2a';
 import { type CallLog, SQLiteCallLog } from '@ethosagent/call-log';
 import {
   applyPlatformShim,
+  type BotBinding,
+  bindResolvesToPersonality,
   deriveBotKey,
   type EthosConfig,
   ethosDir,
@@ -141,6 +143,7 @@ import {
   getObservabilityStore,
   getSecretsResolver,
   getStorage,
+  loadTeamManifest,
 } from '../wiring';
 import {
   ensureTeamSupervisors,
@@ -431,6 +434,41 @@ export async function resolveTelephonyMedia(
     );
   }
   return { lines };
+}
+
+/**
+ * "Does any configured bot on `platform` still speak for `personalityId`?"
+ *
+ * Cron delivery to a channel origin is gated on this: `Gateway.sendTo` resolves
+ * an adapter by platform alone, so without the check a job whose bot was
+ * removed from config would silently deliver through some other agent's bot.
+ * The binding predicate itself lives in `@ethosagent/config` so this and the
+ * web API's delivery-target resolver cannot drift apart.
+ */
+function buildChannelSpeakers(config: EthosConfig): (platform: string, id: string) => boolean {
+  const bots: Array<{ platform: string; bind: BotBinding }> = [
+    ...(config.telegram?.bots ?? []).map((b) => ({ platform: 'telegram', bind: b.bind })),
+    ...(config.slack?.apps ?? []).map((a) => ({ platform: 'slack', bind: a.bind })),
+    ...(config.whatsapp ?? []).flatMap((w) =>
+      w.bind ? [{ platform: 'whatsapp', bind: w.bind }] : [],
+    ),
+  ];
+  const memberCache = new Map<string, readonly string[]>();
+  const members = (team: string): readonly string[] => {
+    const hit = memberCache.get(team);
+    if (hit) return hit;
+    let loaded: readonly string[] = [];
+    try {
+      loaded = loadTeamManifest(team).members.map((m) => m.personality);
+    } catch {
+      // No manifest (or an unparseable one) resolves to no members rather
+      // than to everyone.
+    }
+    memberCache.set(team, loaded);
+    return loaded;
+  };
+  return (platform, id) =>
+    bots.some((b) => b.platform === platform && bindResolvesToPersonality(b.bind, id, members));
 }
 
 export async function runGatewayStart(opts: GatewayStartOptions = {}): Promise<void> {
@@ -1062,9 +1100,32 @@ export async function runGatewayStart(opts: GatewayStartOptions = {}): Promise<v
 
   // Wire cron delivery through the gateway's sendTo path so origin-bearing
   // jobs route output back to the channel they were created from.
+  //
+  // `sendTo` resolves an adapter by PLATFORM, so on a platform with several
+  // bots it would happily deliver a job through whichever adapter happens to be
+  // registered. A job whose bot has since been removed from config must deliver
+  // NOTHING rather than fall back to a different agent's bot
+  // (plan/phases/recipes-gallery.md §1) — so re-check the binding first, and
+  // throw so `deliverTo` records `lastError` instead of failing silently.
+  const speaksFor = buildChannelSpeakers(config);
   cronDeliverFn = async (job, output) => {
     if (!job.origin) return;
-    await gateway.sendTo(job.origin.platform, job.origin.chatId, output);
+    const { platform, chatId } = job.origin;
+    if (platform !== 'web' && !speaksFor(platform, job.personalityId)) {
+      throw new EthosError({
+        code: 'CRON_TARGET_NOT_ALLOWED',
+        cause: `no ${platform} bot is bound to personality "${job.personalityId}" — output was not delivered`,
+        action: `Re-add a ${platform} bot bound to "${job.personalityId}", or point the job somewhere else.`,
+      });
+    }
+    const result = await gateway.sendTo(platform, chatId, output);
+    if (!result.ok) {
+      throw new EthosError({
+        code: 'NETWORK_ERROR',
+        cause: result.error ?? `${platform} delivery failed`,
+        action: 'Check the bot credentials and that the chat is still reachable.',
+      });
+    }
   };
 
   // Watcher deliver → the gateway's sendTo path. sendTo already routes

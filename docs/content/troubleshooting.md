@@ -322,6 +322,12 @@ The full list of registered codes. Every code shipped in `@ethosagent/types` `Et
 | `CRON_INVALID` | Cron expression failed validation. | Use a valid 5-field expression (see `crontab.guru`). |
 | `CRON_PERSONALITY_MISSING` | The personality named on a cron job no longer exists. | Update the job to a current personality id. |
 | `CRON_RUN_FAILED` | A cron job's turn ended in an error event. | `ethos cron list`, then check the job's personality and prompt. |
+| `CRON_TARGET_NOT_ALLOWED` | A cron job asked to deliver into a chat that is not an approved target for that bot and personality. | Pick a target from the picker; add the chat to `channel_filter.<platform>` or message the bot once so the chat is known. |
+| `RECIPE_NOT_FOUND` | No recipe with that id is shipped in the curated catalog. | Call `recipes.list` (Library → Recipes) and use an id from it. |
+| `RECIPE_INVALID` | A shipped recipe bundle failed its own schema. | Report it — the catalog is first-party, so this is a packaging bug. |
+| `RECIPE_STALE` | You previewed one version of a recipe and installed against a newer one. | Re-open the recipe, read what changed, and install again. |
+| `RECIPE_BLOCKED` | A recipe install was refused because a prerequisite is unmet or a required field is empty. | Work through the preflight list — each row names the exact action — then install again. |
+| `RECIPE_CHANNEL_SETUP_FAILED` | A recipe's inline channel setup could not complete: the bot token was refused, the platform was unreachable, or the chat you picked has not actually messaged that bot. | Re-check the token with @BotFather, then send your bot a message and press "Check for your message" again. Nothing was created. |
 | `MCP_TRANSPORT_INVALID` | An MCP server entry is missing `command` (stdio) or `url` (sse). | Edit the MCP server entry in `~/.ethos/config.yaml`. |
 | `MCP_SERVER_NOT_FOUND` | The named MCP server is not attached to that personality. | Attach the server first, then set its token. |
 | `SECRETS_UNAVAILABLE` | The server has no secrets resolver wired. | Start the server with secrets configured. |

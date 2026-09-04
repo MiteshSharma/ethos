@@ -48,7 +48,7 @@ describe('resolveCapabilities', () => {
 
   it('network * sentinel resolves to personality policy allow list', () => {
     const backends: CapabilityBackends = {
-      personalityNetworkPolicy: { allow: ['api.github.com', 'api.openai.com'] },
+      personalityNetworkPolicy: () => ({ allow: ['api.github.com', 'api.openai.com'] }),
       safeFetch,
     };
     const result = resolveCapabilities(
@@ -244,7 +244,7 @@ describe('resolveCapabilities', () => {
       secretsBackend: vi.fn().mockResolvedValue('val'),
       storage,
       personalityFsReach: () => ({ read: ['/data'], write: ['/out'] }),
-      personalityNetworkPolicy: { allow: ['api.example.com'] },
+      personalityNetworkPolicy: () => ({ allow: ['api.example.com'] }),
       safeFetch,
     };
     const result = resolveCapabilities(

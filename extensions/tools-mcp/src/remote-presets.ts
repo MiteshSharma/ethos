@@ -154,6 +154,28 @@ export const MCP_REMOTE_PRESETS: Record<string, McpRemotePreset> = {
     category: PRODUCTIVITY,
     docsUrl: 'https://developers.notion.com/docs/mcp',
   },
+  granola: {
+    name: 'granola',
+    label: 'Granola',
+    url: 'https://mcp.granola.ai/mcp',
+    transport: 'streamable-http',
+    authType: 'oauth',
+    // Verified 2026-09-04: `initialize` 401s with
+    // `WWW-Authenticate: Bearer error="invalid_token",
+    // resource_metadata="https://mcp.granola.ai/.well-known/oauth-protected-resource"`,
+    // whose metadata names authorization server https://mcp-auth.granola.ai.
+    // That server publishes `registration_endpoint`
+    // https://mcp-auth.granola.ai/oauth2/register, lists `"none"` in
+    // `token_endpoint_auth_methods_supported`, and supports S256 — and a live
+    // RFC 7591 DCR POST returned a public client (no `client_secret`,
+    // `token_endpoint_auth_method: "none"`). So it is installable by
+    // `registerOAuthClient` in ./oauth.ts, unlike github/supabase above.
+    description: 'Search your Granola meeting notes and pull transcripts, summaries, and decisions',
+    category: PRODUCTIVITY,
+    // No `docsUrl` on purpose: https://www.granola.ai/docs/mcp 308s to
+    // https://docs.granola.ai/help-center/mcp, which 404s (probed 2026-09-04).
+    // A dead link is worse than no link — don't add one back from memory.
+  },
   asana: {
     name: 'asana',
     label: 'Asana',

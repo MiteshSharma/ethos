@@ -107,7 +107,20 @@ export class PluginsService {
       .filter(isValidMcpServer)
       .map(toWireMcpServer)
       .sort((a, b) => a.name.localeCompare(b.name));
-    return { plugins: manifests.map(toWirePlugin), mcpServers };
+    // `scanInstalledPlugins` is a static disk read — it knows nothing about
+    // what this process actually loaded. Merge the loader's live manifests on
+    // top so each row reports its real status, error and safety findings. The
+    // disk scan derives an id the same way the loader does, but a plugin whose
+    // manifest omits `ethos.id` keys on the full package name in one and the
+    // unscoped name in the other, so package name is the second key.
+    const live = this.opts.pluginLoader?.listManifests() ?? [];
+    const liveByKey = new Map<string, InstalledPluginManifest>();
+    for (const m of live) liveByKey.set(m.id, m);
+    for (const m of live) if (!liveByKey.has(m.name)) liveByKey.set(m.name, m);
+    const plugins = manifests.map((m) =>
+      toWirePlugin(m, liveByKey.get(m.id) ?? liveByKey.get(m.name)),
+    );
+    return { plugins, mcpServers };
   }
 
   async getCredential(pluginId: string, ref: string): Promise<string | null> {
@@ -272,16 +285,26 @@ export class PluginsService {
   }
 }
 
-function toWirePlugin(m: InstalledPluginManifest): PluginInfo {
+/**
+ * `disk` is the manifest as it sits in the filesystem; `live` is the same
+ * plugin as this process actually loaded it, when the loader knows about it.
+ * A plugin with no `live` entry was never activated here — status stays null
+ * rather than claiming a failure we did not observe.
+ */
+function toWirePlugin(disk: InstalledPluginManifest, live?: InstalledPluginManifest): PluginInfo {
+  const findings = live?.scanFindings ?? [];
   return {
-    id: m.id,
-    name: m.name,
-    version: m.version,
-    description: m.description,
-    source: m.source,
-    path: m.path,
-    pluginContractMajor: m.pluginContractMajor,
-    hasHomePanel: m.hasHomePanel ?? false,
+    id: disk.id,
+    name: disk.name,
+    version: disk.version,
+    description: disk.description,
+    source: disk.source,
+    path: disk.path,
+    pluginContractMajor: disk.pluginContractMajor,
+    hasHomePanel: disk.hasHomePanel ?? false,
+    status: live?.status ?? null,
+    error: live?.error ?? null,
+    ...(findings.length > 0 ? { scanFindings: findings } : {}),
   };
 }
 

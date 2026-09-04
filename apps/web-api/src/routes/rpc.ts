@@ -125,11 +125,17 @@ export function rpcRoutes(opts: RpcRoutesOptions) {
     //
     // B1 — `_requestId` is always present (the middleware runs for every
     // request), which is why this is no longer conditional on the MCP fields.
+    //
+    // `_authMethod` is how a handler learns whether the caller presented a
+    // cookie or a bearer API key. It is absent when no api-key store is wired
+    // (the cookie-only `authMiddleware` path), which handlers read as "cookie".
     const requestId: string | undefined = c.get('requestId');
+    const authMethod: string | undefined = c.get('authMethod');
     const context: ServiceContainer = Object.assign(
       Object.create(null) as ServiceContainer,
       opts.services,
       requestId ? { _requestId: requestId } : {},
+      authMethod ? { _authMethod: authMethod } : {},
       mcpPendingState ? { _mcpPendingState: mcpPendingState } : {},
       mcpPendingPersonalityId ? { _mcpPendingPersonalityId: mcpPendingPersonalityId } : {},
       mcpRequestOrigin ? { _mcpRequestOrigin: mcpRequestOrigin } : {},

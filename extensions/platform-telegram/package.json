@@ -12,6 +12,10 @@
       "import": "./src/validate.ts",
       "types": "./src/validate.ts"
     },
+    "./discover": {
+      "import": "./src/discover.ts",
+      "types": "./src/discover.ts"
+    },
     "./clarify-surface": {
       "import": "./src/clarify-surface.ts",
       "types": "./src/clarify-surface.ts"

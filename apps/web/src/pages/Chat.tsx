@@ -231,6 +231,24 @@ export function Chat() {
     setSuggestion((prev) => ({ text, seq: (prev?.seq ?? 0) + 1 }));
   }, []);
 
+  // `?draft=` — a prompt handed over from another surface (today: the recipe
+  // post-install panel's "Open chat with …"). It fills the composer through the
+  // same suggestion path a pill uses, so it is never sent on the user's behalf.
+  // Stripped once consumed so Back doesn't re-fill it.
+  const draftParam = searchParams.get('draft');
+  useEffect(() => {
+    if (!draftParam) return;
+    handleSuggestPrompt(draftParam);
+    setSearchParams(
+      (prev) => {
+        const next = new URLSearchParams(prev);
+        next.delete('draft');
+        return next;
+      },
+      { replace: true },
+    );
+  }, [draftParam, handleSuggestPrompt, setSearchParams]);
+
   const { intakeOpen, setIntakeOpen, detectedMessage, restatedGoal, openIntake } =
     useGoalDetection();
 

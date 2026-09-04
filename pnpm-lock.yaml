@@ -652,6 +652,9 @@ importers:
       '@ethosagent/plugin-loader':
         specifier: workspace:*
         version: link:../../extensions/plugin-loader
+      '@ethosagent/recipes':
+        specifier: workspace:*
+        version: link:../../extensions/recipes
       '@ethosagent/session-cards':
         specifier: workspace:*
         version: link:../../extensions/session-cards
@@ -1342,6 +1345,22 @@ importers:
         specifier: ^7.5.0
         version: 7.8.0(@aws-sdk/credential-provider-node@3.972.82)(@smithy/signature-v4@5.7.3)(undici@8.10.0)(ws@8.21.3)(zod@4.4.3)
 
+  extensions/llm-xai:
+    dependencies:
+      '@ethosagent/llm-codex':
+        specifier: workspace:*
+        version: link:../llm-codex
+      '@ethosagent/plugin-sdk':
+        specifier: workspace:*
+        version: link:../../packages/plugin-sdk
+      '@ethosagent/types':
+        specifier: workspace:*
+        version: link:../../packages/types
+    devDependencies:
+      '@ethosagent/llm-openai-compat':
+        specifier: workspace:*
+        version: link:../llm-openai-compat
+
   extensions/memory-approval:
     dependencies:
       '@ethosagent/memory-history':
@@ -1694,6 +1713,15 @@ importers:
       '@ethosagent/types':
         specifier: workspace:*
         version: link:../../packages/types
+
+  extensions/recipes:
+    dependencies:
+      '@ethosagent/types':
+        specifier: workspace:*
+        version: link:../../packages/types
+      zod:
+        specifier: ^4.3.6
+        version: 4.4.3
 
   extensions/request-dump:
     dependencies:
@@ -2559,6 +2587,9 @@ importers:
       '@ethosagent/llm-openai-compat':
         specifier: workspace:*
         version: link:../../extensions/llm-openai-compat
+      '@ethosagent/llm-xai':
+        specifier: workspace:*
+        version: link:../../extensions/llm-xai
       '@ethosagent/logger':
         specifier: workspace:*
         version: link:../logger

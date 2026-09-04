@@ -64,6 +64,8 @@ import { PersonalityCreate } from './pages/PersonalityCreate';
 import { PersonalityDetail } from './pages/PersonalityDetail';
 import { PluginPage } from './pages/PluginPage';
 import { Plugins } from './pages/Plugins';
+import { RecipeDetail } from './pages/RecipeDetail';
+import { Recipes } from './pages/Recipes';
 import { Sessions } from './pages/Sessions';
 import { SetupWhatsApp } from './pages/SetupWhatsApp';
 import { SigningIn } from './pages/SigningIn';
@@ -256,6 +258,12 @@ export function App() {
           <Route path="/mcp" element={<Mcp />} />
           <Route path="/plugins/:pluginId" element={<PluginPage />} />
           <Route path="/communications" element={<Communications />} />
+          {/* Recipes — a Library-altitude catalog (plan/phases/recipes-gallery.md
+              §5/D1). The detail route carries the whole install walk (detail →
+              needs-you → confirm → post-install) because preflight is stateless:
+              a reload loses nothing, so the steps need no addresses of their own. */}
+          <Route path="/recipes" element={<Recipes />} />
+          <Route path="/recipes/:id" element={<RecipeDetail />} />
           <Route path="/personalities" element={<Personalities />} />
           <Route path="/personalities/:id" element={<IdentityRedirect />} />
           <Route path="/personality/create" element={<PersonalityCreate />} />

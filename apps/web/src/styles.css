@@ -7566,3 +7566,578 @@ textarea {
   font-size: 10px;
   font-weight: 600;
 }
+
+/* Toolset tab — one row per tool name, and the click target that opens the
+   per-tool inspector. A real <button> so it is keyboard reachable; the row
+   layout is unchanged from the read-only legend it replaces. */
+.toolset-affordance-row {
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+  width: 100%;
+  padding: 3px 6px;
+  margin: 0 -6px;
+  font-size: 12.5px;
+  text-align: left;
+  color: inherit;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: background-color 80ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.toolset-affordance-row:hover {
+  background: var(--ethos-hover);
+}
+
+.toolset-affordance-row:focus-visible {
+  outline: 2px solid var(--accent, var(--ethos-info));
+  outline-offset: 1px;
+}
+
+/* ---------------------------------------------------------------------------
+   Recipes — one-click use-case bundles (plan/phases/recipes-gallery.md §5).
+
+   Two type families do the work: Geist for prose, Geist Mono for every literal
+   the user also sees elsewhere (ids, schedules, chat addresses, verdict words).
+   Uppercase mono micro labels head every group; groups themselves are bordered
+   row lists on a fixed 22px glyph gutter, so a status glyph always lands in
+   the same column no matter which group you are reading.
+
+   The gallery is a CARD GRID. That is a recorded exception to DESIGN.md's
+   "cards earn existence" rule, approved by the user on 2026-09-04 after seeing
+   both treatments — see the DESIGN.md decisions log. It is scoped to this
+   gallery and is not a licence to card-grid other surfaces. The cards are raw
+   primitives; the Antd `Card` primitive is still unused here.
+   --------------------------------------------------------------------------- */
+
+.recipe-eyebrow {
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ethos-text-tertiary);
+}
+
+/* --- stepper ------------------------------------------------------------- */
+
+.recipe-stepper {
+  display: flex;
+  gap: 2px;
+  margin: 0 0 20px;
+  padding: 3px;
+  background: var(--ethos-bg-elevated);
+  border: 1px solid var(--ethos-border);
+  border-radius: var(--radius-md, 8px);
+  overflow-x: auto;
+}
+
+.recipe-step {
+  flex: 1 1 0;
+  min-width: 112px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  align-items: flex-start;
+  padding: 8px 11px;
+  border: 0;
+  border-radius: var(--radius-sm, 4px);
+  background: transparent;
+  color: var(--ethos-text-tertiary);
+  text-align: left;
+  text-decoration: none;
+  font-family: inherit;
+  transition:
+    background-color 80ms cubic-bezier(0.16, 1, 0.3, 1),
+    color 80ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+a.recipe-step,
+button.recipe-step {
+  cursor: pointer;
+}
+
+a.recipe-step:hover,
+button.recipe-step:hover {
+  background: var(--ethos-hover);
+  color: var(--ethos-text-dim);
+}
+
+a.recipe-step:focus-visible,
+button.recipe-step:focus-visible {
+  outline: 2px solid var(--accent, var(--ethos-info));
+  outline-offset: 1px;
+}
+
+.recipe-step--current {
+  background: var(--ethos-bg-overlay);
+  color: var(--ethos-text);
+}
+
+.recipe-step--done {
+  color: var(--ethos-text-dim);
+}
+
+/* Not yet reached. Dimmed rather than hidden — the walk's length is part of
+   what the stepper is for. */
+.recipe-step--ahead {
+  opacity: 0.55;
+}
+
+.recipe-step-n {
+  font-size: 11px;
+  letter-spacing: 0.04em;
+}
+
+.recipe-step--current .recipe-step-n {
+  color: var(--accent, var(--ethos-info));
+}
+
+.recipe-step-label {
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+/* --- gallery ------------------------------------------------------------- */
+
+.recipes-grid-label {
+  margin-top: 4px;
+}
+
+.recipes-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(232px, 1fr));
+  gap: 10px;
+}
+
+.recipe-card {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 14px;
+  background: var(--ethos-bg-elevated);
+  border: 1px solid var(--ethos-border);
+  border-radius: var(--radius-md, 8px);
+  color: inherit;
+  text-decoration: none;
+  transition: border-color 80ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.recipe-card:hover {
+  border-color: var(--ethos-border-strong);
+  color: inherit;
+}
+
+.recipe-card:focus-visible {
+  outline: 2px solid var(--accent, var(--ethos-info));
+  outline-offset: 1px;
+}
+
+.recipe-card-top {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.recipe-card-dot {
+  width: 7px;
+  height: 7px;
+  flex: none;
+  border-radius: var(--radius-full, 9999px);
+  background: var(--ethos-text-tertiary);
+}
+
+.recipe-card-name {
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.recipe-card-status {
+  margin-left: auto;
+  flex: none;
+  font-size: 11px;
+  color: var(--ethos-text-tertiary);
+}
+
+.recipe-card-status--on {
+  color: var(--ethos-success);
+}
+
+.recipe-card-summary {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--ethos-text-dim);
+}
+
+.recipe-card-meta {
+  margin-top: auto;
+  padding-top: 4px;
+  font-size: 11px;
+  color: var(--ethos-text-tertiary);
+}
+
+/* --- detail header ------------------------------------------------------- */
+
+.recipe-detail-header {
+  margin-bottom: 16px;
+}
+
+.recipe-detail-title {
+  font-size: 24px;
+  font-weight: 600;
+  line-height: 1.25;
+  margin: 6px 0 0;
+}
+
+.recipe-detail-summary {
+  font-size: 14px;
+  color: var(--ethos-text-dim);
+  margin: 4px 0 0;
+  max-width: 68ch;
+}
+
+.recipe-detail-source {
+  font-size: 11px;
+  color: var(--ethos-text-tertiary);
+  margin-top: 6px;
+}
+
+.recipe-prose {
+  color: var(--ethos-text-dim);
+  max-width: 68ch;
+  margin: 0 0 12px;
+}
+
+/* Unequal on purpose: reading matter leads, the verdict column follows. */
+.recipe-columns {
+  display: grid;
+  grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr);
+  gap: 32px;
+  align-items: start;
+}
+
+@media (max-width: 900px) {
+  .recipe-columns {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 16px;
+  }
+}
+
+/* Post-install's two equal columns — example on the left, what is left on you
+   on the right. Collapses to one column before the text gets narrow. */
+.recipe-cols {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 16px;
+  align-items: start;
+}
+
+.recipe-section {
+  margin-bottom: 22px;
+}
+
+.recipe-section-label {
+  font-family: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ethos-text-tertiary);
+  margin-bottom: 9px;
+}
+
+/* --- the row list everything is drawn from ------------------------------- */
+
+.recipe-rowlist {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--ethos-border);
+  border-radius: var(--radius-md, 8px);
+  overflow: hidden;
+}
+
+.recipe-rowlist-row {
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr) auto;
+  gap: 11px;
+  align-items: center;
+  padding: 11px 13px;
+  background: var(--ethos-bg-elevated);
+  border-bottom: 1px solid var(--ethos-border);
+}
+
+.recipe-rowlist-row:last-child {
+  border-bottom: 0;
+}
+
+.recipe-rowlist-key {
+  min-width: 0;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.recipe-rowlist-label {
+  display: block;
+}
+
+.recipe-rowlist-sub {
+  display: block;
+  margin-top: 2px;
+  font-size: 12px;
+  color: var(--ethos-text-dim);
+  line-height: 1.45;
+}
+
+.recipe-rowlist-value {
+  font-size: 12px;
+  color: var(--ethos-text-dim);
+  text-align: right;
+  white-space: nowrap;
+}
+
+.recipe-glyph {
+  font-family: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 13px;
+  text-align: center;
+  color: var(--ethos-text-tertiary);
+}
+
+.recipe-glyph--ok {
+  color: var(--ethos-success);
+}
+
+.recipe-glyph--no {
+  color: var(--ethos-error);
+}
+
+.recipe-glyph--warn {
+  color: var(--ethos-warning);
+}
+
+.recipe-glyph--muted {
+  color: var(--ethos-text-tertiary);
+}
+
+.recipe-row-action {
+  display: block;
+  color: var(--ethos-text-dim);
+  font-size: 12px;
+}
+
+.recipe-mono {
+  font-family: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-variant-numeric: tabular-nums;
+}
+
+/* --- callout ------------------------------------------------------------- */
+
+.recipe-callout {
+  border: 1px solid var(--ethos-border);
+  border-left: 2px solid var(--ethos-warning);
+  background: var(--ethos-bg-elevated);
+  border-radius: var(--radius-sm, 4px);
+  padding: 12px 14px;
+  margin-bottom: 22px;
+}
+
+.recipe-callout--info {
+  border-left-color: var(--accent, var(--ethos-info));
+}
+
+.recipe-callout-title {
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.recipe-callout-body {
+  margin: 5px 0 0;
+  font-size: 12.5px;
+  color: var(--ethos-text-dim);
+}
+
+/* --- character sheet ----------------------------------------------------- */
+
+.recipe-sheet {
+  margin: 0;
+  padding: 14px;
+  max-height: 520px;
+  overflow: auto;
+  background: var(--ethos-bg-elevated);
+  border: 1px solid var(--ethos-border);
+  border-radius: var(--radius-md, 8px);
+  font-family: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--ethos-text-dim);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* --- needs-you form ------------------------------------------------------ */
+
+.recipe-form .recipe-rowlist-row {
+  align-items: start;
+}
+
+.recipe-field-label {
+  display: block;
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.recipe-field-control {
+  display: block;
+  margin-top: 8px;
+}
+
+.recipe-field-select {
+  width: 100%;
+}
+
+.recipe-field-help {
+  font-size: 12px;
+  color: var(--ethos-text-dim);
+}
+
+.recipe-target-group {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.recipe-target-group .ant-radio-wrapper {
+  align-items: baseline;
+}
+
+/* --- actions + post-install --------------------------------------------- */
+
+.recipe-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 20px;
+  flex-wrap: wrap;
+}
+
+.recipe-install-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+/* The post-install example panel. Its chrome borrows the shape of a message
+   thread because that is the shape of what this agent does — but everything
+   inside it is real (the resolved schedule, the stamped destination, the
+   bundle's own starter prompt), and the badge says so. No sample output is
+   drawn here: the agent has not run yet, and a mocked-up briefing would be the
+   one thing on this screen that never happened. */
+.recipe-sample {
+  border: 1px solid var(--ethos-border);
+  border-radius: var(--radius-md, 8px);
+  background: var(--ethos-bg-elevated);
+  overflow: hidden;
+}
+
+.recipe-sample-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--ethos-border);
+  font-size: 12px;
+  color: var(--ethos-text-dim);
+}
+
+.recipe-sample-avatar {
+  width: 18px;
+  height: 18px;
+  flex: none;
+  border-radius: var(--radius-full, 9999px);
+  background: var(--accent, var(--ethos-info));
+}
+
+.recipe-sample-name {
+  font-weight: 500;
+  color: var(--ethos-text);
+}
+
+.recipe-sample-badge {
+  margin-left: auto;
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ethos-warning);
+  border: 1px solid var(--ethos-warning);
+  border-radius: var(--radius-sm, 4px);
+  padding: 0 4px;
+}
+
+.recipe-sample .recipe-rowlist {
+  border: 0;
+  border-radius: 0;
+}
+
+.recipe-sample-stamp {
+  padding: 9px 12px;
+  border-top: 1px solid var(--ethos-border);
+  font-size: 11px;
+  color: var(--ethos-text-tertiary);
+}
+
+/* The only motion on this surface is the stepper's and the card's hover tint.
+   Neither is load-bearing, so under a reduced-motion preference the color just
+   changes, instantly. */
+@media (prefers-reduced-motion: reduce) {
+  .recipe-step,
+  .recipe-card {
+    transition: none;
+  }
+}
+
+/* --- recipes: inline channel setup --------------------------------------- */
+/* The two-step "paste a token, message your bot" panel that replaced a link to
+   a page which could not help. Sits under the delivery picker, inside the same
+   row list, so it reads as one answer to one question — not a second surface. */
+
+.recipe-setup {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  margin-top: 10px;
+  padding: 13px;
+  border: 1px solid var(--ethos-border);
+  border-radius: var(--radius-md, 8px);
+  background: var(--ethos-bg);
+}
+
+.recipe-setup-step {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.recipe-setup-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.recipe-setup-bot {
+  font-size: 13px;
+  color: var(--ethos-success);
+}
+
+.recipe-setup-note {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--ethos-text-dim);
+}
+
+.recipe-setup-note--bad {
+  color: var(--ethos-error);
+}

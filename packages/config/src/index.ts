@@ -6411,6 +6411,31 @@ function rejectUnsafeIdent(label: string, value: string, errors: string[]): void
 }
 
 /**
+ * Does a bot binding speak for `personalityId` — directly, or because the bot
+ * is bound to a team that contains it?
+ *
+ * This is the authorization predicate behind channel-addressable cron delivery
+ * (plan/phases/recipes-gallery.md §1, refusal rule 1): it is what stops
+ * personality A's scheduled output being delivered through personality B's
+ * bot. It lives here, next to `validateBotBindings`, because both the web API's
+ * delivery-target resolver and the gateway's delivery guard must agree on it —
+ * two copies of a security rule is two rules.
+ *
+ * `teamMembers` resolves a team name to its member personality ids. Callers
+ * that cannot read team manifests (or deployments with no teams) pass one that
+ * returns an empty list; a `team` bind then resolves to nothing rather than to
+ * everything.
+ */
+export function bindResolvesToPersonality(
+  bind: BotBinding,
+  personalityId: string,
+  teamMembers: (teamName: string) => readonly string[],
+): boolean {
+  if (bind.type === 'personality') return bind.name === personalityId;
+  return teamMembers(bind.name).includes(personalityId);
+}
+
+/**
  * Validate that every bot binding points at a personality or team that
  * actually exists. Returns the list of human-readable error messages;
  * an empty list means the config is consistent. Boot code prints these

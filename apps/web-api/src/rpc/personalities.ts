@@ -2,9 +2,8 @@ import { os } from './context';
 import { personalitiesLearningRouter } from './personalities-learning';
 import { personalitiesSkillCandidatesRouter } from './personalities-skill-candidates';
 
-// Personalities namespace — CRUD, per-personality skills CRUD + import, and the
-// read-only derivations (character sheet, renderers). Handlers stay thin; all logic
-// lives in PersonalitiesService. Learning + skill-candidate procedures: siblings above.
+// Personalities namespace — CRUD, per-personality skills CRUD + import, and the read-only
+// derivations (character sheet, renderers). Thin handlers; all logic lives in PersonalitiesService.
 
 export const personalitiesRouter = {
   list: os.personalities.list.handler(({ context }) => context.personalities.list()),
@@ -34,6 +33,7 @@ export const personalitiesRouter = {
         : {}),
       ...(input.nightly !== undefined ? { nightly: input.nightly } : {}),
       ...(input.voice !== undefined ? { voice: input.voice } : {}),
+      ...(input.safety !== undefined ? { safety: input.safety } : {}),
     }),
   ),
 

@@ -180,6 +180,23 @@ because the unit did not fit the row. A one-off container inline in a stream has
 no dense-row alternative to be measured against, so there is nothing for an
 exemption to buy — build it from primitives.
 
+#### The one approved card grid: the Recipes gallery
+
+`apps/web/src/pages/Recipes.tsx` renders its catalog as a **card grid**, which
+"No card grids anywhere" above otherwise forbids. It was first built as stacked
+rows for exactly that reason; the user reviewed both that page and a clickable
+card-grid prototype and asked for the grid on **2026-09-04**. This paragraph is
+the record of that approval, per this file's own "do not deviate without
+explicit user approval".
+
+Scope, so this does not spread: it covers **the Recipes gallery and nothing
+else**. It is not a precedent for other catalogs (Skills, MCP, Plugins,
+Personalities and Dashboards are unaffected), and it is not a fourth `Card`
+**primitive** exemption — the cards are assembled from raw primitives and each
+one is a real `<Link>`, so the Antd `Card` primitive is still unused on that
+page. Any other surface wanting a card grid needs its own approval, recorded
+here the same way.
+
 ## Chat surface
 
 ### User message bubbles
@@ -574,3 +591,4 @@ The web UI specifically must avoid these patterns. Code review checks for them.
 | 2026-08-19 | New `display` identity block on `PersonalityConfig`, first field `display.avatar_url` | Personality avatars plan P0 (schema & governance). Follows the Phase 30.8 personality-presentation amendment: a personality's visual presence is identity, so a custom avatar image lands as a sub-key of an identity block (`display.avatar_url`, an optional string URL to a served or uploaded avatar image) parallel to `voice`, never as a new top-level `PersonalityConfig` field. Falls back to the existing generated mark (`PersonalityRingAvatar` / `PersonalityMark`) whenever unset or the image fails to load — no other rendering change in this phase. |
 | 2026-08-20 | Runner accent `#2DD4BF` dark / `#0D9488` light — a sixth hue that is deliberately NOT a personality accent, consumed only through the `RUNNERS` identity map | Pi-delegation D19/D26. Ethos can now hand a job to an external coding harness, and the run has to be attributable on sight — but a runner is a foreign process, not an agent that lives here, and giving it a sixth row in the per-personality table would say it is one. So it gets its own subsection and a teal that sits outside both the five personality hues and the semantic four, where it can be mistaken for neither an identity nor a status. The consumption rule is the half that has to hold: accent, label, and badge text all come from one `RUNNERS` map (`{id, label, accent, badgeText}`, `apps/web/src/lib/runners.ts`), copy is templated `{runner}`, and no component hardcodes a hex or the literal `pi` — a second harness must be a map entry, not a diff across the render tree. The per-personality accent swap is untouched: a run's own surface carries the runner's hue, the scope around it keeps the personality's. Blocking amendment, landed before the run card (constitutional decision, not implementation detail). |
 | 2026-08-20 | The delegated-run card is NOT a fourth "Cards earn existence" exemption | Ruled on while landing the runner accent, and recorded so it is not relitigated when the card gets built. The run card is heavy — header, task line, live `now` line, meta row, an 18-row collapsible detail grid, a nested question card, a button row — and "does it fit a dense row" answers *no*. But that is the wrong test for it, because the rule governs the `Card` **primitive**, not the word "card": `ClarifyCard`, the composer and `CallStrip` are all bordered containers of comparable weight built from raw primitives, and none of them needed an exemption. The three granted exemptions share a property the run card lacks — each is a **repeated list unit** measured against the dense row it replaced. The run card is a singleton inline in a transcript with no row alternative to lose to, and Antd's `Card` (title slot, `extra`, fixed body padding) buys it nothing it would not immediately override, while its state-varying border and warm blocked tint want explicit CSS anyway. So: built from primitives, and the surfaces that ARE lists stay lists — the drawer Runs pane and the Tasks page rows remain dense rows, which is where the rule was doing real work all along. |
+| 2026-09-04 | The Recipes gallery is an approved exception to "no card grids anywhere" | User-directed. The gallery shipped as stacked rows, correctly, because this file names card grids as slop. The user then reviewed a clickable prototype alongside the shipped rows and asked for the grid, and this file's rule is "do not deviate without explicit user approval" — so the deviation is recorded rather than re-litigated the next time someone reads the anti-slop table. Scoped to that one page: not a precedent for Skills / MCP / Plugins / Personalities / Dashboards, and not a fourth `Card`-primitive exemption, since the cards are raw primitives and each is a real `<Link>` (focusable, middle-clickable). The rest of the Recipes flow stays rows — preflight groups, the install summary and the post-install checklist are all the same bordered row list. |

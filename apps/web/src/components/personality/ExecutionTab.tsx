@@ -270,6 +270,12 @@ export function ExecutionTab({ id }: { id: string }) {
           Auto = Docker (recommended)
         </Typography.Text>
       </div>
+      {/* No save bar here, and that is deliberate: nothing on this tab
+          persists. Saying so beats a Save button that would write nothing. */}
+      <Typography.Paragraph type="secondary" style={{ fontSize: 12, marginTop: 8 }}>
+        Not saved. This selection changes what you see here only — the server resolves the effective
+        posture, and a stored per-personality override is not implemented yet.
+      </Typography.Paragraph>
 
       <BoundaryBlock posture={posture} />
     </div>

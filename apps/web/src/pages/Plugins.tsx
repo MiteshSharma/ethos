@@ -20,6 +20,7 @@ import {
   type PluginCredentialSchema,
   PluginSettingsDrawer,
 } from '../components/PluginSettingsDrawer';
+import { PluginStatusNote } from '../components/PluginStatusNote';
 import { PersonalityMark } from '../components/ui/PersonalityMark';
 import { personalityKeys } from '../features/personalities/api/keys';
 import { usePersonalityGet } from '../features/personalities/api/queries';
@@ -357,6 +358,7 @@ function PluginsToggleTable({
               >
                 {p.id}
               </Typography.Text>
+              <PluginStatusNote plugin={p} />
             </div>
           ),
         },
@@ -509,6 +511,7 @@ function PluginsTable({
               >
                 {p.id}
               </Typography.Text>
+              <PluginStatusNote plugin={p} />
             </div>
           ),
         },
@@ -618,10 +621,19 @@ function PluginsAccordion({
             >
               {plugin.id}
             </Typography.Text>
+            {/* The reason lives in the panel; the header only has to say the
+                panel is worth opening — a control here would fight the toggle. */}
+            {plugin.status === 'failed' ? (
+              <Typography.Text type="danger" style={{ fontSize: 11 }}>
+                {' '}
+                ✗ Not loaded
+              </Typography.Text>
+            ) : null}
           </span>
         ),
         children: (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+            <PluginStatusNote plugin={plugin} />
             {personalities.map((pers) => (
               <div key={pers.id} style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
                 <AttachCell plugin={plugin} personality={pers} />

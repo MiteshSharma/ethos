@@ -1,9 +1,10 @@
 // MCP server presets — well-known community servers with sensible defaults.
 //
-// Every invocation below was verified on 2026-09-01 against the npm and PyPI
-// registries and the upstream `modelcontextprotocol/servers` README, and the
-// two npx-launched servers were actually run. These are checked values, not
-// guesses — if you change one, re-check it the same way.
+// Every invocation below was verified against the npm and PyPI registries and
+// the upstream `modelcontextprotocol/servers` README: the four upstream
+// presets on 2026-09-01 (the two npx-launched servers were actually run), and
+// `google-calendar` on 2026-09-04. These are checked values, not guesses — if
+// you change one, re-check it the same way.
 //
 // A `sqlite` preset used to live here. It is gone on purpose: upstream moved
 // the server to `modelcontextprotocol/servers-archived` (last release April
@@ -60,6 +61,27 @@ export const MCP_PRESETS: Record<string, McpPreset> = {
     envVars: [],
     argVars: [],
     category: 'Web',
+  },
+  'google-calendar': {
+    name: 'google-calendar',
+    // Not one-click, and the description has to say so: the user creates an
+    // OAuth client in their own Google Cloud project and points
+    // GOOGLE_OAUTH_CREDENTIALS at the downloaded client JSON. The server then
+    // runs a one-time browser consent on first use.
+    description:
+      'Read and manage Google Calendar events (set GOOGLE_OAUTH_CREDENTIALS to your Google Cloud OAuth client JSON)',
+    command: 'npx',
+    // Community server, not Google-official. Verified 2026-09-04 against the
+    // npm registry: `@cocal/google-calendar-mcp` 2.6.3, bin
+    // `google-calendar-mcp` -> build/index.js, so `npx -y` resolves.
+    args: ['-y', '@cocal/google-calendar-mcp'],
+    envVars: ['GOOGLE_OAUTH_CREDENTIALS'],
+    argVars: [],
+    // 'Utilities', not the remote catalog's 'Productivity': the local presets
+    // render in their own dropdown (AddMcpModal's stdio mode) with their own
+    // three-label scheme, so borrowing a remote label would add a fourth stdio
+    // category without ever putting the two lists side by side.
+    category: 'Utilities',
   },
   memory: {
     name: 'memory',

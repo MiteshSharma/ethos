@@ -17,8 +17,14 @@ describe('MCP_PRESETS', () => {
     }
   });
 
-  it('contains the four standard presets', () => {
-    expect(Object.keys(MCP_PRESETS).sort()).toEqual(['fetch', 'filesystem', 'git', 'memory']);
+  it('contains the five standard presets', () => {
+    expect(Object.keys(MCP_PRESETS).sort()).toEqual([
+      'fetch',
+      'filesystem',
+      'git',
+      'google-calendar',
+      'memory',
+    ]);
   });
 
   it('does not contain sqlite', () => {
@@ -66,6 +72,21 @@ describe('MCP_PRESETS', () => {
     expect(preset?.args).toEqual(['-y', '@modelcontextprotocol/server-memory']);
     expect(preset?.envVars).toEqual(['MEMORY_FILE_PATH']);
     expect(preset?.argVars).toEqual([]);
+  });
+
+  it('google-calendar runs the community npm server and needs an OAuth client JSON', () => {
+    const preset = MCP_PRESETS['google-calendar'];
+    expect(preset?.command).toBe('npx');
+    // `@cocal/...`, not a `@google/` or `@modelcontextprotocol/` package —
+    // this is the community server, verified on npm at 2.6.3 on 2026-09-04.
+    expect(preset?.args).toEqual(['-y', '@cocal/google-calendar-mcp']);
+    // The credential is a PATH to a Google Cloud OAuth client JSON in the
+    // environment, not a positional arg and not a client id/secret pair.
+    expect(preset?.envVars).toEqual(['GOOGLE_OAUTH_CREDENTIALS']);
+    expect(preset?.argVars).toEqual([]);
+    // Local presets have their own three-label scheme; 'Productivity' belongs
+    // to the remote catalog, which renders in a different dropdown.
+    expect(preset?.category).toBe('Utilities');
   });
 
   it('names no npm package that does not exist', () => {

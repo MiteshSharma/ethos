@@ -40,6 +40,7 @@ import { onboardingRouter } from './onboarding';
 import { personalitiesRouter } from './personalities';
 import { platformsRouter } from './platforms';
 import { pluginsRouter } from './plugins';
+import { recipesRouter } from './recipes';
 import { skillsRouter } from './skills';
 import { slashCommandsRouter } from './slash-commands';
 import { tasksRouter } from './tasks';
@@ -108,6 +109,7 @@ export const apiRouter = {
   keys: keysRouter,
   toolSettings: toolSettingsRouter,
   documents: documentsRouter,
+  recipes: recipesRouter,
 };
 
 export type ApiRouter = typeof apiRouter;

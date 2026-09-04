@@ -46,6 +46,15 @@ const STATUS_BY_CODE: Partial<Record<EthosErrorCode, number>> = {
   LLM_ERROR: 502,
   STREAM_TIMEOUT: 504,
   TOOL_REJECTED: 403,
+  CRON_TARGET_NOT_ALLOWED: 403,
+  RECIPE_NOT_FOUND: 404,
+  // The catalog is first-party and in-repo: a bundle that fails its own schema
+  // in production is our bug, not the caller's.
+  RECIPE_INVALID: 500,
+  RECIPE_STALE: 409,
+  RECIPE_BLOCKED: 400,
+  // The caller supplied a credential or a chat the platform did not accept.
+  RECIPE_CHANNEL_SETUP_FAILED: 400,
   NETWORK_ERROR: 502,
 };
 

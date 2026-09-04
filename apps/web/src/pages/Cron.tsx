@@ -1,4 +1,4 @@
-import type { CronJob } from '@ethosagent/web-contracts';
+import type { CronDeliverTo, CronJob } from '@ethosagent/web-contracts';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   App as AntApp,
@@ -9,7 +9,6 @@ import {
   Popconfirm,
   Select,
   Spin,
-  Switch,
   Typography,
 } from 'antd';
 import { useEffect, useState } from 'react';
@@ -296,8 +295,12 @@ interface CreateForm {
   schedule: string;
   prompt: string;
   personalityId: string;
-  notifyInApp: boolean;
+  /** Option key from the delivery picker — `'none'`, `'inApp'`, or `channel:<n>`. */
+  deliverTo: string;
 }
+
+/** Prefix for the channel options; the suffix indexes the resolved target list. */
+const CHANNEL_OPTION = 'channel:';
 
 function CreateJobModal({
   open,
@@ -319,6 +322,32 @@ function CreateJobModal({
     queryFn: () => rpc.personalities.list({}),
   });
 
+  // Which chats this agent's own bots may be pointed at. Resolved by the
+  // server from the operator's channel filter, the pairing DB and the chats
+  // the bot has actually been talked to in — the picker offers exactly this
+  // set, and `cron.create` recomputes it and refuses anything outside it.
+  // There is deliberately no free-text chat-id field.
+  const personalityId = Form.useWatch('personalityId', form);
+  const deliveryTargets = useQuery({
+    queryKey: ['cron', 'deliveryTargets', personalityId],
+    queryFn: () => rpc.cron.deliveryTargets({ personalityId: personalityId ?? '' }),
+    enabled: Boolean(personalityId),
+  });
+  const targets = deliveryTargets.data?.targets ?? [];
+
+  const deliverToFor = (option: string): CronDeliverTo => {
+    if (option === 'inApp') return { kind: 'inApp' };
+    if (!option.startsWith(CHANNEL_OPTION)) return { kind: 'none' };
+    const target = targets[Number(option.slice(CHANNEL_OPTION.length))];
+    if (!target) return { kind: 'none' };
+    return {
+      kind: 'channel',
+      platform: target.platform,
+      botKey: target.botKey,
+      chatId: target.chatId,
+    };
+  };
+
   const create = useMutation({
     mutationFn: (input: CreateForm) =>
       rpc.cron.create({
@@ -326,7 +355,7 @@ function CreateJobModal({
         schedule: input.schedule,
         prompt: input.prompt,
         personalityId: input.personalityId,
-        notifyInApp: input.notifyInApp,
+        deliverTo: deliverToFor(input.deliverTo),
       }),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ['cron', 'list'] });
@@ -411,17 +440,32 @@ function CreateJobModal({
               value: p.id,
               label: p.name,
             }))}
+            // A channel option belongs to the personality it was resolved for;
+            // switching agents must not carry a stale target across.
+            onChange={() => form.setFieldsValue({ deliverTo: 'inApp' })}
           />
         </Form.Item>
 
         <Form.Item
-          label="Notify me in the app"
-          name="notifyInApp"
-          valuePropName="checked"
-          initialValue={true}
-          extra="When on, each run's result appears in the app (Activity feed + a per-personality heartbeat session) unless the run replies [SILENT]. When off, output is saved to the run-history log only."
+          label="Deliver to"
+          name="deliverTo"
+          initialValue="inApp"
+          extra="Chats are offered only for bots already bound to this personality. Nothing is delivered while the gateway is stopped, and schedules run in the server's local timezone."
         >
-          <Switch />
+          <Select
+            loading={deliveryTargets.isFetching}
+            options={[
+              {
+                value: 'inApp',
+                label: 'In the app — Activity feed + heartbeat session',
+              },
+              { value: 'none', label: 'Nowhere — save to the run-history log only' },
+              ...targets.map((target, index) => ({
+                value: `${CHANNEL_OPTION}${index}`,
+                label: `${target.platform} · ${target.botLabel} · ${target.chatId} — ${target.label}`,
+              })),
+            ]}
+          />
         </Form.Item>
       </Form>
     </Modal>

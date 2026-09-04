@@ -27,6 +27,7 @@ import type { OnboardingService } from '../services/onboarding.service';
 import type { PersonalitiesService } from '../services/personalities.service';
 import type { PlatformsService } from '../services/platforms.service';
 import type { PluginLoader, PluginsService } from '../services/plugins.service';
+import type { RecipesService } from '../services/recipes.service';
 import type { SkillsService } from '../services/skills.service';
 import type { TasksService } from '../services/tasks.service';
 import type { ToolSettingsService } from '../services/tool-settings.service';
@@ -61,6 +62,9 @@ export interface RpcContext {
   memory: MemoryService;
   plugins: PluginsService;
   mcp: McpService;
+  /** One-click use-case bundles. Not optional: the catalog is in-repo, so the
+   *  gallery renders in every deployment. */
+  recipes: RecipesService;
   platforms: PlatformsService;
   lab: LabService;
   kanban: KanbanService;
