@@ -6,7 +6,7 @@ import type {
 } from '@ethosagent/web-contracts';
 import { Alert, Button } from 'antd';
 import { Link } from 'react-router-dom';
-import { chatTargetValue, describeDailyTime } from '../../lib/recipes';
+import { chatTargetValue, describeDailyTime, recipeAgentName } from '../../lib/recipes';
 import { PostInstallList } from './RecipePrereqs';
 import { RecipeRowItem, RecipeRowList } from './RecipeRowList';
 
@@ -31,6 +31,7 @@ export function RecipeInstallPanel({
   onOpenChat,
   schedules = [],
   target = null,
+  agentName,
 }: {
   bundle: RecipeBundleWire;
   report: RecipeInstallReport;
@@ -39,8 +40,12 @@ export function RecipeInstallPanel({
   schedules?: RecipePreflight['willCreate']['cronJobs'];
   /** The chat the user picked, when this recipe delivers into one. */
   target?: CronDeliveryTarget | null;
+  /** Attach mode: the chosen personality's name. Create mode reads the bundle's. */
+  agentName?: string;
 }) {
   const personalityId = report.created.personality;
+  const name = recipeAgentName(bundle, agentName);
+  const attach = bundle.personality.mode === 'attach';
 
   return (
     <div className="recipe-install-panel">
@@ -55,7 +60,7 @@ export function RecipeInstallPanel({
         <Alert
           type="success"
           showIcon
-          message={`${bundle.personality.name} is installed.`}
+          message={attach ? `Attached to ${name}.` : `${name} is installed.`}
           description={
             report.remaining.length > 0
               ? 'Everything installable is installed. The list below is what is left for you.'
@@ -71,8 +76,12 @@ export function RecipeInstallPanel({
             <RecipeRowItem
               glyph="✓"
               tone="ok"
-              label="Wrote the agent"
-              detail="SOUL.md · config.yaml · toolset.yaml"
+              label={attach ? 'Attached to the agent' : 'Wrote the agent'}
+              detail={
+                attach
+                  ? 'SOUL.md section · toolset · filesystem reach'
+                  : 'SOUL.md · config.yaml · toolset.yaml'
+              }
               value={
                 <Link className="recipe-mono" to={`/p/${personalityId}/identity`}>
                   {personalityId}
@@ -186,7 +195,13 @@ export function RecipeInstallPanel({
 
       {report.ok ? (
         <div className="recipe-cols">
-          <WhatHappensNext bundle={bundle} report={report} schedules={schedules} target={target} />
+          <WhatHappensNext
+            bundle={bundle}
+            report={report}
+            schedules={schedules}
+            target={target}
+            agentName={agentName}
+          />
           <div>
             <PostInstallList items={report.remaining} title="Still on you" />
             {personalityId && report.starterPrompt ? (
@@ -194,7 +209,7 @@ export function RecipeInstallPanel({
                 <div className="recipe-section-label">Try it now</div>
                 <div className="recipe-actions">
                   <Button type="primary" onClick={onOpenChat}>
-                    Open chat with {bundle.personality.name}
+                    Open chat with {name}
                   </Button>
                 </div>
                 <div className="recipe-field-help">
@@ -226,11 +241,13 @@ function WhatHappensNext({
   report,
   schedules,
   target,
+  agentName,
 }: {
   bundle: RecipeBundleWire;
   report: RecipeInstallReport;
   schedules: RecipePreflight['willCreate']['cronJobs'];
   target: CronDeliveryTarget | null;
+  agentName?: string;
 }) {
   const scheduled = schedules.filter((job) => report.created.cronJobs.includes(job.name));
 
@@ -240,7 +257,7 @@ function WhatHappensNext({
       <div className="recipe-sample">
         <div className="recipe-sample-bar">
           <span className="recipe-sample-avatar" />
-          <span className="recipe-sample-name">{bundle.personality.name}</span>
+          <span className="recipe-sample-name">{recipeAgentName(bundle, agentName)}</span>
           <span className="recipe-sample-badge recipe-mono">example</span>
         </div>
         <RecipeRowList>

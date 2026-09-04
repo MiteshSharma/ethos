@@ -13,7 +13,7 @@
 //    Telegram") is retired by §1's `deliverTo` union: the job is created by the
 //    installer with an explicit, server-validated channel target.
 
-import type { RecipeBundle } from '../schema';
+import type { RecipeCreateBundle } from '../schema';
 
 const SOUL = `I am Briefer. I prepare one tight morning digest — never a wall of text.
 My sections, in this order: Weather (2 lines), Calendar (today's events, times first),
@@ -35,7 +35,7 @@ units: {{input.units}}; news topics: {{input.topics}}. Anything the user tells m
 wins over these: I store it with memory_write and read it back with memory_read.
 `;
 
-export const morningBriefing: RecipeBundle = {
+export const morningBriefing: RecipeCreateBundle = {
   id: 'morning-briefing',
   version: 4,
   title: 'Morning briefing',
@@ -45,6 +45,7 @@ export const morningBriefing: RecipeBundle = {
   tags: ['daily', 'needs-channel', 'optional-oauth'],
 
   personality: {
+    mode: 'create',
     id: 'briefer',
     name: 'Briefer',
     description:

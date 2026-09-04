@@ -1646,7 +1646,8 @@ const RecipeNetworkPolicySchema = z.object({
   allow_private_urls: z.boolean().optional(),
 });
 
-export const RecipePersonalitySchema = z.object({
+/** The create-side fields — the recipe writes a new personality. */
+const RecipeCreateFields = z.object({
   id: z.string(),
   name: z.string(),
   description: z.string(),
@@ -1666,6 +1667,38 @@ export const RecipePersonalitySchema = z.object({
    */
   safety: z.object({ network: RecipeNetworkPolicySchema }).optional(),
 });
+
+/**
+ * The attach-side fields — the recipe installs ONTO an existing personality,
+ * chosen at install time as `personalityIdOverride`. Additive only: a marked
+ * SOUL section, tools unioned into the toolset, reach entries appended. No id,
+ * name, model or network policy — those stay the target's.
+ */
+const RecipeAttachFields = z.object({
+  /** May still contain `{{input.*}}`. */
+  soulSection: z.string(),
+  toolset: z.array(z.string()),
+  mcpServers: z.array(z.string()).optional(),
+  plugins: z.array(z.string()).optional(),
+  fsReach: z
+    .object({ read: z.array(z.string()).optional(), write: z.array(z.string()).optional() })
+    .optional(),
+});
+
+/**
+ * Three modes. `create` and `attach` are one view each; `both` carries the
+ * create view at the top level and the attach view under `attach`, and the
+ * install picks one with `installMode` (default `create`).
+ */
+export const RecipePersonalitySchema = z.discriminatedUnion('mode', [
+  RecipeCreateFields.extend({ mode: z.literal('create') }),
+  RecipeAttachFields.extend({ mode: z.literal('attach') }),
+  RecipeCreateFields.extend({ mode: z.literal('both'), attach: RecipeAttachFields }),
+]);
+
+/** Which view of a `both` recipe an install runs. Ignored for single-mode recipes. */
+export const RecipeInstallModeSchema = z.enum(['create', 'attach']);
+export type RecipeInstallMode = z.infer<typeof RecipeInstallModeSchema>;
 
 export const RecipeRequirementsSchema = z.object({
   mcpServers: z.array(
@@ -1754,6 +1787,13 @@ export const RecipeListItemSchema = z.object({
   summary: z.string(),
   tags: z.array(z.string()),
   sourceDoc: z.string().nullable(),
+  /**
+   * Attach-mode recipes only: the ids of the personalities whose SOUL.md
+   * carries this recipe's marker section — DERIVED on every call, never
+   * stored (D8). `null` for a create-mode recipe, whose installed state the
+   * gallery derives from whether its bundle's personality id exists.
+   */
+  attachedTo: z.array(z.string()).nullable(),
 });
 export type RecipeListItem = z.infer<typeof RecipeListItemSchema>;
 
@@ -1838,6 +1878,11 @@ export type RecipePreflight = z.infer<typeof RecipePreflightSchema>;
 export const RecipeInstallReportSchema = z.object({
   ok: z.boolean(),
   created: z.object({
+    /**
+     * The personality this install WROTE: the one it created (create mode) or
+     * the one it attached its section to (attach mode). Null when nothing was
+     * written — a re-install that skipped it, or a rolled-back failure.
+     */
     personality: z.string().nullable(),
     /** `@briefer_bot` when the install set up the channel bot itself. */
     channelBot: z.string().nullable(),

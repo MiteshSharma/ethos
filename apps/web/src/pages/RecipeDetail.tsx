@@ -1,5 +1,6 @@
 import type {
   CronDeliveryTarget,
+  RecipeInstallMode,
   RecipeInstallReport,
   RecipeSecretBindings,
 } from '@ethosagent/web-contracts';
@@ -19,9 +20,10 @@ import {
 } from '../components/recipes/RecipePrereqs';
 import { RecipeCallout, RecipeRowItem, RecipeRowList } from '../components/recipes/RecipeRowList';
 import { type RecipeStepId, RecipeStepper } from '../components/recipes/RecipeStepper';
+import { usePersonalityList } from '../features/personalities/api/queries';
 import { recipeKeys } from '../features/recipes/api/keys';
 import { useRecipeInstall } from '../features/recipes/api/mutations';
-import { useRecipe, useRecipePreflight } from '../features/recipes/api/queries';
+import { useRecipe, useRecipeList, useRecipePreflight } from '../features/recipes/api/queries';
 import {
   type ChannelSetupDraft,
   chatTargetInputKey,
@@ -33,6 +35,10 @@ import {
   installBlockedReason,
   isStaleRecipeError,
   needsDeliveryTarget,
+  prefillPathInputs,
+  projectBundle,
+  recipeAgentName,
+  resolveInstallMode,
 } from '../lib/recipes';
 import { rpc } from '../rpc';
 
@@ -71,6 +77,13 @@ export function RecipeDetail() {
   // there by the picker's own add form, never by this page or this install.
   const [secretBindings, setSecretBindings] = useState<RecipeSecretBindings>({});
   const [report, setReport] = useState<RecipeInstallReport | null>(null);
+  // Attach mode: the personality the recipe lands on. It is `personalityIdOverride`
+  // on both preflight and install — the same field create mode uses as its
+  // collision escape hatch, read as the TARGET there.
+  const [attachTarget, setAttachTarget] = useState<string | null>(null);
+  // A `both` recipe's chosen view. Defaults to create, like the server does;
+  // a single-mode recipe ignores it.
+  const [installMode, setInstallMode] = useState<RecipeInstallMode>('create');
 
   // Seed the form from the bundle's declared defaults, once. Re-seeding on
   // every bundle reference would wipe what the user has typed.
@@ -81,13 +94,30 @@ export function RecipeDetail() {
     setValues(defaultInputValues(bundle));
   }, [bundle]);
 
+  const mode = bundle ? resolveInstallMode(bundle, installMode) : 'create';
+  const isAttach = mode === 'attach';
+  const canChooseMode = bundle?.personality.mode === 'both';
+  const personalitiesQuery = usePersonalityList({ enabled: isAttach });
+  // Built-ins are read-only, so an attach cannot land on one.
+  const attachTargets = (personalitiesQuery.data?.items ?? []).filter((p) => !p.builtin);
+  const attachedPersonality = attachTargets.find((p) => p.id === attachTarget) ?? null;
+  // The gallery row carries which personalities already hold this recipe.
+  const listQuery = useRecipeList();
+  const attachedTo = listQuery.data?.recipes.find((r) => r.id === id)?.attachedTo ?? null;
+
   const preflightQuery = useRecipePreflight(id, values, secretBindings, {
     enabled: bundle !== undefined,
+    ...(isAttach && attachTarget ? { personalityIdOverride: attachTarget } : {}),
+    ...(canChooseMode ? { installMode: mode } : {}),
   });
   const preflight = preflightQuery.data;
 
   const needsTarget = bundle ? needsDeliveryTarget(bundle) : false;
-  const personalityId = bundle?.personality.id ?? '';
+  const personalityId = isAttach
+    ? (attachTarget ?? '')
+    : bundle && bundle.personality.mode !== 'attach'
+      ? bundle.personality.id
+      : '';
   const targetsQuery = useQuery({
     queryKey: ['cron', 'deliveryTargets', personalityId],
     queryFn: () => rpc.cron.deliveryTargets({ personalityId }),
@@ -112,6 +142,11 @@ export function RecipeDetail() {
       />
     );
   }
+
+  // The bundle as the ONE view this install runs as. Every surface from here
+  // down reads `view`, so a `both` recipe is a create or an attach — never a
+  // third layout.
+  const view = projectBundle(bundle, mode);
 
   const pickTarget = (picked: CronDeliveryTarget) => {
     setTarget(picked);
@@ -145,11 +180,34 @@ export function RecipeDetail() {
     });
   };
 
+  /**
+   * Attach mode: choosing the target also answers every still-empty `path`
+   * input with its working directory. Only the EMPTY ones — a path the user
+   * typed before switching personalities is theirs.
+   */
+  const pickAttachTarget = (nextId: string) => {
+    setAttachTarget(nextId);
+    const workdir = attachTargets.find((p) => p.id === nextId)?.fs_reach?.workdir ?? null;
+    setValues((prev) => prefillPathInputs(bundle, prev, workdir));
+  };
+
+  /**
+   * The picker is reachable only in attach mode, so the workdir prefill above
+   * runs only there; in create mode the path input becomes the NEW
+   * personality's workdir and there is nothing to prefill from. Switching
+   * modes never touches what was typed.
+   */
+  const pickMode = (next: RecipeInstallMode) => {
+    setInstallMode(next);
+    if (next === 'create') setAttachTarget(null);
+  };
+
   const blockedReason = installBlockedReason({
     preflight,
     needsTarget,
     hasTarget: target !== null || channelSetup !== null,
   });
+  const agentName = recipeAgentName(view, attachedPersonality?.name);
 
   const rePreview = () => {
     install.reset();
@@ -163,6 +221,8 @@ export function RecipeDetail() {
         id: bundle.id,
         version: bundle.version,
         inputs: values,
+        ...(isAttach && attachTarget ? { personalityIdOverride: attachTarget } : {}),
+        ...(canChooseMode ? { installMode: mode } : {}),
         ...(target ? { deliverTo: deliverToFromTarget(target) } : {}),
         // The token travels HERE and only here — never through `inputs`, which
         // is re-sent to `preflight` on every keystroke and cached in the query
@@ -191,11 +251,12 @@ export function RecipeDetail() {
   };
 
   const openChat = () => {
-    const created = report?.created.personality;
-    if (!created) return;
+    // The personality the install wrote — created, or attached to.
+    const written = report?.created.personality;
+    if (!written) return;
     // No `?new=1`: a freshly created agent has no session to restore, and
     // stacking two param-consuming effects in Chat is a race for no gain.
-    navigate(`/p/${created}/chat?draft=${encodeURIComponent(report?.starterPrompt ?? '')}`);
+    navigate(`/p/${written}/chat?draft=${encodeURIComponent(report?.starterPrompt ?? '')}`);
   };
 
   const currentStep: RecipeStepId =
@@ -271,7 +332,26 @@ export function RecipeDetail() {
           <div className="recipe-column-main">
             <section className="recipe-section">
               <div className="recipe-section-label">What it does</div>
-              <p className="recipe-prose">{bundle.personality.description}</p>
+              <p className="recipe-prose">
+                {bundle.personality.mode === 'create'
+                  ? bundle.personality.description
+                  : bundle.personality.mode === 'both'
+                    ? `Creates ${bundle.personality.name}, or attaches to a personality you choose. ${bundle.personality.description}`
+                    : 'Attaches to a personality you choose. It keeps its name, model and network policy, and gains this recipe’s tools, filesystem reach and instructions.'}
+              </p>
+              {attachedTo && attachedTo.length > 0 ? (
+                <p className="recipe-prose">
+                  Attached to:{' '}
+                  {attachedTo.map((pid, i) => (
+                    <span key={pid}>
+                      {i > 0 ? ', ' : ''}
+                      <Link className="recipe-mono" to={`/p/${pid}/identity`}>
+                        {pid}
+                      </Link>
+                    </span>
+                  ))}
+                </p>
+              ) : null}
             </section>
 
             <CreatesList bundle={bundle} />
@@ -319,7 +399,7 @@ export function RecipeDetail() {
                 below is cleared — a half-installed recipe is worse than none.
               </p>
               <RecipeInputsForm
-                bundle={bundle}
+                bundle={view}
                 preflight={preflight}
                 values={values}
                 onChange={(key, value) => setValues((prev) => ({ ...prev, [key]: value }))}
@@ -332,6 +412,18 @@ export function RecipeDetail() {
                 onGatewayOwnsToken={() => void targetsQuery.refetch()}
                 secretBindings={secretBindings}
                 onSecretBinding={pickSecretBinding}
+                attachTargets={attachTargets}
+                attachTarget={attachTarget}
+                onPickAttachTarget={pickAttachTarget}
+                {...(canChooseMode && bundle.personality.mode === 'both'
+                  ? {
+                      modeChoice: {
+                        createName: bundle.personality.name,
+                        value: mode,
+                        onChange: pickMode,
+                      },
+                    }
+                  : {})}
               />
             </section>
           </div>
@@ -358,15 +450,15 @@ export function RecipeDetail() {
               <RecipeCallout title="One thing to know">
                 This install also creates the Telegram bot{' '}
                 <span className="recipe-mono">{channelSetup.botLabel ?? 'you set up'}</span> and
-                binds it to {bundle.personality.name} — which cannot happen in Communications
-                beforehand, because {bundle.personality.name} does not exist yet. The briefing goes
-                to <span className="recipe-mono">{channelSetup.chatLabel}</span>. If anything later
-                in the install fails, the bot is removed again.
+                binds it to {agentName} — which cannot happen in Communications beforehand, because{' '}
+                {agentName} does not exist yet. The briefing goes to{' '}
+                <span className="recipe-mono">{channelSetup.chatLabel}</span>. If anything later in
+                the install fails, the bot is removed again.
               </RecipeCallout>
             ) : null}
           </div>
           <aside className="recipe-column-side">
-            <WillCreateList preflight={preflight} />
+            <WillCreateList bundle={view} preflight={preflight} />
             <PostInstallList items={preflight.postInstall} title="You'll still need to" />
             <NeedsYouGroup bundle={bundle} preflight={preflight} />
             <OptionalGroup bundle={bundle} preflight={preflight} />
@@ -376,11 +468,12 @@ export function RecipeDetail() {
 
       {stage === 'done' && report && (
         <RecipeInstallPanel
-          bundle={bundle}
+          bundle={view}
           report={report}
           onOpenChat={openChat}
           schedules={preflight?.willCreate.cronJobs ?? []}
           target={target}
+          agentName={attachedPersonality?.name}
         />
       )}
 
@@ -388,7 +481,9 @@ export function RecipeDetail() {
         <div className="recipe-actions">
           {stage === 'detail' && (
             <Button type="primary" onClick={() => setStage('inputs')}>
-              Set up {bundle.personality.name}
+              {bundle.personality.mode === 'attach'
+                ? 'Choose a personality'
+                : `Set up ${agentName}`}
             </Button>
           )}
           {stage === 'inputs' && (
@@ -412,7 +507,11 @@ export function RecipeDetail() {
                 loading={install.isPending}
                 onClick={runInstall}
               >
-                {installActionLabel(bundle, preflight?.willCreate.cronJobs ?? [])}
+                {installActionLabel(
+                  view,
+                  preflight?.willCreate.cronJobs ?? [],
+                  attachedPersonality?.name,
+                )}
               </Button>
             </>
           )}

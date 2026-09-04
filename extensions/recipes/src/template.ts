@@ -8,7 +8,9 @@
 import {
   defaultRecipeSafety,
   INPUT_PLACEHOLDER_PATTERN,
+  type RecipeAttachPersonality,
   type RecipeBundle,
+  type RecipeCreatePersonality,
   type RecipeInput,
 } from './schema';
 
@@ -97,58 +99,123 @@ export interface ResolvedRecipe {
   cronJobs: RecipeBundle['cronJobs'];
 }
 
+/** The `read` / `write` halves of a reach block, each entry substituted. */
+function renderReachLists(
+  fsReach: { read?: string[]; write?: string[] },
+  values: Record<string, string>,
+): { read?: string[]; write?: string[] } {
+  return {
+    ...(fsReach.read
+      ? {
+          read: fsReach.read.map((p, i) =>
+            renderTemplate(p, values, `personality.fsReach.read[${i}]`),
+          ),
+        }
+      : {}),
+    ...(fsReach.write
+      ? {
+          write: fsReach.write.map((p, i) =>
+            renderTemplate(p, values, `personality.fsReach.write[${i}]`),
+          ),
+        }
+      : {}),
+  };
+}
+
+type AttachFields = Omit<RecipeAttachPersonality, 'mode'>;
+type CreateFields = Omit<RecipeCreatePersonality, 'mode'>;
+
+function renderAttachFields<T extends AttachFields>(p: T, values: Record<string, string>): T {
+  const fsReach = p.fsReach;
+  return {
+    ...p,
+    soulSection: renderTemplate(p.soulSection, values, 'personality.soulSection'),
+    ...(fsReach ? { fsReach: renderReachLists(fsReach, values) } : {}),
+  };
+}
+
+function renderCreateFields<T extends CreateFields>(p: T, values: Record<string, string>): T {
+  const fsReach = p.fsReach;
+  const workdir = fsReach?.workdir;
+  return {
+    ...p,
+    // D15 — a bundle that declares no network policy installs with
+    // `allow: ['*']` rather than with nothing. Nothing is not neutral: it
+    // resolves every `allowedHosts: ['*']` tool to an empty host set and
+    // denies every fetch. A bundle that declares its own wins.
+    safety: p.safety ?? defaultRecipeSafety(),
+    soulMd: renderTemplate(p.soulMd, values, 'personality.soulMd'),
+    ...(fsReach
+      ? {
+          fsReach: {
+            ...renderReachLists(fsReach, values),
+            ...(workdir === undefined
+              ? {}
+              : {
+                  workdir:
+                    typeof workdir === 'string'
+                      ? renderTemplate(workdir, values, 'personality.fsReach.workdir')
+                      : workdir.map((p, i) =>
+                          renderTemplate(p, values, `personality.fsReach.workdir[${i}]`),
+                        ),
+                }),
+          },
+        }
+      : {}),
+  };
+}
+
+function renderPersonality(
+  personality: RecipeBundle['personality'],
+  values: Record<string, string>,
+): RecipeBundle['personality'] {
+  if (personality.mode === 'attach') return renderAttachFields(personality, values);
+  if (personality.mode === 'both') {
+    return {
+      ...renderCreateFields(personality, values),
+      attach: renderAttachFields(personality.attach, values),
+    };
+  }
+  return renderCreateFields(personality, values);
+}
+
 /**
  * Resolve every templated field. Throws `RecipeTemplateError` on the first
  * unresolved placeholder, so a half-substituted bundle never reaches a write.
  */
 export function renderRecipe(bundle: RecipeBundle, values: Record<string, string>): ResolvedRecipe {
-  const { personality } = bundle;
-  const fsReach = personality.fsReach;
-  const workdir = fsReach?.workdir;
   return {
-    personality: {
-      ...personality,
-      // D15 — a bundle that declares no network policy installs with
-      // `allow: ['*']` rather than with nothing. Nothing is not neutral: it
-      // resolves every `allowedHosts: ['*']` tool to an empty host set and
-      // denies every fetch. A bundle that declares its own wins.
-      safety: personality.safety ?? defaultRecipeSafety(),
-      soulMd: renderTemplate(personality.soulMd, values, 'personality.soulMd'),
-      ...(fsReach
-        ? {
-            fsReach: {
-              ...(fsReach.read
-                ? {
-                    read: fsReach.read.map((p, i) =>
-                      renderTemplate(p, values, `personality.fsReach.read[${i}]`),
-                    ),
-                  }
-                : {}),
-              ...(fsReach.write
-                ? {
-                    write: fsReach.write.map((p, i) =>
-                      renderTemplate(p, values, `personality.fsReach.write[${i}]`),
-                    ),
-                  }
-                : {}),
-              ...(workdir === undefined
-                ? {}
-                : {
-                    workdir:
-                      typeof workdir === 'string'
-                        ? renderTemplate(workdir, values, 'personality.fsReach.workdir')
-                        : workdir.map((p, i) =>
-                            renderTemplate(p, values, `personality.fsReach.workdir[${i}]`),
-                          ),
-                  }),
-            },
-          }
-        : {}),
-    },
+    personality: renderPersonality(bundle.personality, values),
     cronJobs: bundle.cronJobs.map((job, i) => ({
       ...job,
       schedule: renderTemplate(job.schedule, values, `cronJobs[${i}].schedule`),
       prompt: renderTemplate(job.prompt, values, `cronJobs[${i}].prompt`),
     })),
   };
+}
+
+// ---------------------------------------------------------------------------
+// Attach mode — the marked SOUL section
+// ---------------------------------------------------------------------------
+
+/**
+ * The marker lines an attach install wraps its SOUL section in. HTML comments:
+ * nothing in the prompt-assembly path strips them, the model ignores them, and
+ * they make the section findable — for "already attached" in preflight, and
+ * for a human editing the file later.
+ */
+export function recipeSoulMarkers(bundleId: string): { start: string; end: string } {
+  return { start: `<!-- recipe:${bundleId}:start -->`, end: `<!-- recipe:${bundleId}:end -->` };
+}
+
+/** Whether a SOUL.md already carries this recipe's section. */
+export function hasRecipeSoulSection(soulMd: string, bundleId: string): boolean {
+  return soulMd.includes(recipeSoulMarkers(bundleId).start);
+}
+
+/** The target's SOUL.md with the rendered section appended between the markers. */
+export function appendRecipeSoulSection(soulMd: string, bundleId: string, section: string): string {
+  const { start, end } = recipeSoulMarkers(bundleId);
+  const base = soulMd.length === 0 || soulMd.endsWith('\n') ? soulMd : `${soulMd}\n`;
+  return `${base}\n${start}\n${section.trim()}\n${end}\n`;
 }

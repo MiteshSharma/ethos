@@ -94,6 +94,7 @@ import {
   RecipeBundleWireSchema,
   RecipeChannelSetupSchema,
   RecipeDiscoverChatsOutputSchema,
+  RecipeInstallModeSchema,
   RecipeInstallReportSchema,
   RecipeListItemSchema,
   RecipePreflightSchema,
@@ -4319,8 +4320,18 @@ const RecipesGetOutput = z.object({ recipe: RecipeBundleWireSchema });
 const RecipesPreflightInput = z.object({
   id: z.string().min(1),
   inputs: z.record(z.string(), z.string()).optional(),
-  /** Install under a different personality id (the collision escape hatch). */
+  /**
+   * Create mode: install under a different personality id (the collision
+   * escape hatch). Attach mode: the TARGET personality the recipe attaches
+   * to — required there, and preflight emits `PERSONALITY_REQUIRED` until it
+   * is given.
+   */
   personalityIdOverride: z.string().min(1).optional(),
+  /**
+   * For a `mode: 'both'` recipe: which view to preflight — `create` (default)
+   * or `attach`. Ignored for a single-mode recipe, whose mode is its own.
+   */
+  installMode: RecipeInstallModeSchema.optional(),
   /**
    * The named secret picked for each credential requirement. Preflight's
    * satisfied-check runs against THIS binding — the one the install would
@@ -4344,7 +4355,10 @@ const RecipesInstallInput = z.object({
   id: z.string().min(1),
   version: z.number().int().positive(),
   inputs: z.record(z.string(), z.string()),
+  /** Same meaning as on `preflight`: an alternate id (create) or the target (attach). */
   personalityIdOverride: z.string().min(1).optional(),
+  /** Same meaning as on `preflight`: the view a `both` recipe installs as. */
+  installMode: RecipeInstallModeSchema.optional(),
   deliverTo: CronDeliverToSchema.optional(),
   /**
    * Inline channel setup — the fix for the chicken-and-egg that made

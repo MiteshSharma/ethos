@@ -14,5 +14,18 @@ export const recipeKeys = {
     id: string,
     inputs: Record<string, string>,
     secretBindings: Record<string, { provider: string; secret: string }>,
-  ) => [...recipeKeys.all(), 'preflight', id, inputs, secretBindings] as const,
+    /** Attach mode's chosen target — a different target is a different report. */
+    personalityIdOverride?: string,
+    /** A `both` recipe's chosen view — likewise a different report. */
+    installMode?: string,
+  ) =>
+    [
+      ...recipeKeys.all(),
+      'preflight',
+      id,
+      inputs,
+      secretBindings,
+      personalityIdOverride ?? null,
+      installMode ?? null,
+    ] as const,
 };

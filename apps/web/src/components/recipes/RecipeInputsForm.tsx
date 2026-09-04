@@ -1,10 +1,12 @@
 import type {
   CronDeliveryTarget,
+  Personality,
   RecipeBundleWire,
+  RecipeInstallMode,
   RecipePreflight,
   RecipeSecretBindings,
 } from '@ethosagent/web-contracts';
-import { Input, Radio, Select, Spin } from 'antd';
+import { Input, Radio, Segmented, Select, Spin } from 'antd';
 import {
   type ChannelSetupDraft,
   chatTargetValue,
@@ -44,6 +46,11 @@ import { RecipeSecretSetup } from './RecipeSecretSetup';
 // recipe's personality is not written until the install runs, so "go bind one
 // in Communications" could never be done first. Both routes are offered
 // together: an existing chat, or a new bot set up right here.
+//
+// An ATTACH recipe opens with one more row: the personality it attaches to.
+// The picker is the first thing on the step because every other answer may
+// depend on it — a `path` input prefills from the chosen personality's
+// working directory, and preflight re-runs against the chosen target.
 
 export function RecipeInputsForm({
   bundle,
@@ -59,11 +66,31 @@ export function RecipeInputsForm({
   onGatewayOwnsToken,
   secretBindings,
   onSecretBinding,
+  attachTargets = [],
+  attachTarget = null,
+  onPickAttachTarget,
+  modeChoice,
 }: {
+  /** The bundle PROJECTED to the mode being installed — create or attach, never both. */
   bundle: RecipeBundleWire;
+  /**
+   * A `both` recipe's choice: create its own personality, or attach to one.
+   * Present only when the recipe offers both; drawn first, because the rest
+   * of the form depends on it.
+   */
+  modeChoice?: {
+    createName: string;
+    value: RecipeInstallMode;
+    onChange: (mode: RecipeInstallMode) => void;
+  };
   preflight: RecipePreflight | undefined;
   values: Record<string, string>;
   onChange: (key: string, value: string) => void;
+  /** Attach mode: the personalities that can be attached to (built-ins are read-only). */
+  attachTargets?: Personality[];
+  /** Attach mode: the chosen target's id. */
+  attachTarget?: string | null;
+  onPickAttachTarget?: (id: string) => void;
   targets: CronDeliveryTarget[];
   targetsLoading: boolean;
   selectedTarget: CronDeliveryTarget | null;
@@ -83,6 +110,59 @@ export function RecipeInputsForm({
 
   return (
     <ul className="recipe-rowlist recipe-form">
+      {modeChoice ? (
+        <li className="recipe-rowlist-row">
+          <span className="recipe-glyph recipe-glyph--ok">✓</span>
+          <span className="recipe-rowlist-key">
+            <span className="recipe-field-label">How to install</span>
+            <span className="recipe-rowlist-sub">
+              Create {modeChoice.createName} as a new personality, or give this recipe to one you
+              already have.
+            </span>
+            <span className="recipe-field-control">
+              <Segmented<RecipeInstallMode>
+                value={modeChoice.value}
+                onChange={modeChoice.onChange}
+                options={[
+                  { value: 'create', label: `Create ${modeChoice.createName}` },
+                  { value: 'attach', label: 'Attach to an existing personality' },
+                ]}
+              />
+            </span>
+          </span>
+          <span className="recipe-rowlist-value recipe-mono">{modeChoice.value}</span>
+        </li>
+      ) : null}
+      {bundle.personality.mode === 'attach' ? (
+        <li className="recipe-rowlist-row">
+          <span className={`recipe-glyph recipe-glyph--${attachTarget ? 'ok' : 'warn'}`}>
+            {attachTarget ? '✓' : '!'}
+          </span>
+          <span className="recipe-rowlist-key">
+            <label className="recipe-field-label" htmlFor="recipe-attach-target">
+              Attach to
+            </label>
+            <span className="recipe-rowlist-sub">
+              The personality that gains this recipe's tools, reach and instructions. Its name,
+              model and network policy stay as they are.
+            </span>
+            <span className="recipe-field-control">
+              <Select
+                id="recipe-attach-target"
+                value={attachTarget ?? undefined}
+                placeholder="Choose a personality"
+                onChange={(id: string) => onPickAttachTarget?.(id)}
+                options={attachTargets.map((p) => ({
+                  value: p.id,
+                  label: p.name === p.id ? p.id : `${p.name} (${p.id})`,
+                }))}
+                className="recipe-field-select"
+              />
+            </span>
+          </span>
+          <span className="recipe-rowlist-value recipe-mono">personality</span>
+        </li>
+      ) : null}
       {credentials.map((row) => {
         const toolName = credentialToolName(row);
         return (

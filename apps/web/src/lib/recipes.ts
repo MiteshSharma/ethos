@@ -2,6 +2,7 @@ import type {
   CronDeliverTo,
   CronDeliveryTarget,
   RecipeBundleWire,
+  RecipeInstallMode,
   RecipePreflight,
 } from '@ethosagent/web-contracts';
 
@@ -104,6 +105,64 @@ export function defaultInputValues(bundle: RecipeBundleWire): Record<string, str
 }
 
 /**
+ * Attach mode: prefill every still-empty `kind: 'path'` input with the chosen
+ * personality's first working directory, normalised to end with `/` (reach is
+ * a prefix match, and the input's own help says so). A value the user already
+ * typed is never overwritten; with no workdir the field stays empty and
+ * required, exactly as before.
+ */
+export function prefillPathInputs(
+  bundle: RecipeBundleWire,
+  values: Record<string, string>,
+  workdir: string[] | null | undefined,
+): Record<string, string> {
+  const first = workdir?.[0];
+  if (!first) return values;
+  const root = first.endsWith('/') ? first : `${first}/`;
+  const next = { ...values };
+  for (const input of bundle.requires.inputs) {
+    if (input.kind === 'path' && !next[input.key]?.trim()) next[input.key] = root;
+  }
+  return next;
+}
+
+/**
+ * The mode an install runs in — the same rule the server applies
+ * (`resolveInstallMode` in `@ethosagent/recipes`, which the browser cannot
+ * import): a single-mode recipe IS its mode, a `both` recipe takes the choice
+ * and defaults to create.
+ */
+export function resolveInstallMode(
+  bundle: RecipeBundleWire,
+  requested?: RecipeInstallMode,
+): RecipeInstallMode {
+  const mode = bundle.personality.mode;
+  return mode === 'both' ? (requested ?? 'create') : mode;
+}
+
+/**
+ * The bundle as ONE view — create or attach — so every surface below keeps
+ * its two branches. A `both` recipe projects either way; anything else is
+ * itself.
+ */
+export function projectBundle(bundle: RecipeBundleWire, mode: RecipeInstallMode): RecipeBundleWire {
+  const p = bundle.personality;
+  if (p.mode !== 'both') return bundle;
+  if (mode === 'attach') return { ...bundle, personality: { mode: 'attach', ...p.attach } };
+  const { attach: _attach, mode: _mode, ...create } = p;
+  return { ...bundle, personality: { mode: 'create', ...create } };
+}
+
+/**
+ * What to call the agent on this page: the bundle's own name in create mode;
+ * in attach mode the chosen personality's, or a placeholder until one is.
+ */
+export function recipeAgentName(bundle: RecipeBundleWire, targetName?: string | null): string {
+  if (bundle.personality.mode !== 'attach') return bundle.personality.name;
+  return targetName ?? 'the personality you choose';
+}
+
+/**
  * Why the install cannot run yet, or `null` when it can.
  *
  * BLOCKING rows and unanswered inputs stop it. WARNINGS never do — a warning
@@ -151,15 +210,21 @@ export function describeDailyTime(schedule: string): string | null {
 export function installActionLabel(
   bundle: RecipeBundleWire,
   jobs: RecipePreflight['willCreate']['cronJobs'],
+  targetName?: string | null,
 ): string {
-  const name = bundle.personality.name;
-  if (jobs.length === 0) return `Create ${name}`;
+  // An attach writes onto an agent that exists — "Attach to Writer", never
+  // "Create Writer".
+  const lead =
+    bundle.personality.mode === 'attach'
+      ? `Attach to ${recipeAgentName(bundle, targetName)}`
+      : `Create ${bundle.personality.name}`;
+  if (jobs.length === 0) return lead;
   const first = jobs[0];
   if (jobs.length === 1 && first) {
     const when = describeDailyTime(first.schedule);
-    return `Create ${name} and its ${when ?? first.name} job`;
+    return `${lead} and its ${when ?? first.name} job`;
   }
-  return `Create ${name} and its ${jobs.length} jobs`;
+  return `${lead} and its ${jobs.length} jobs`;
 }
 
 /** Why a chat is offered at all — the picker never shows a bare id. */
@@ -398,20 +463,43 @@ export interface CreatesRow {
  * with real schedules, is preflight's `willCreate` on the preview step.
  */
 export function createsRows(bundle: RecipeBundleWire): CreatesRow[] {
-  const rows: CreatesRow[] = [
-    {
-      key: 'personality',
-      label: `An agent — ${bundle.personality.name}`,
-      detail: bundle.personality.description,
-      value: bundle.personality.id,
-    },
-  ];
+  const { personality } = bundle;
+  const rows: CreatesRow[] =
+    personality.mode === 'create'
+      ? [
+          {
+            key: 'personality',
+            label: `An agent — ${personality.name}`,
+            detail: personality.description,
+            value: personality.id,
+          },
+        ]
+      : personality.mode === 'both'
+        ? [
+            {
+              key: 'personality',
+              label: `Creates ${personality.name}, or attaches to a personality you choose`,
+              detail: `${personality.description} Attaching adds a marked section to the chosen personality's SOUL.md; its name, model and network policy stay as they are.`,
+              value: personality.id,
+            },
+          ]
+        : [
+            {
+              key: 'personality',
+              label: 'Attaches to a personality you choose',
+              detail:
+                'Adds a marked section to its SOUL.md. Its name, model and network policy stay as they are.',
+              value: 'attach',
+            },
+          ];
 
-  const { toolset } = bundle.personality;
+  const { toolset } = personality;
   if (toolset.length > 0) {
     rows.push({
       key: 'toolset',
-      label: `${toolset.length} tool${toolset.length === 1 ? '' : 's'}`,
+      label: `${toolset.length} tool${toolset.length === 1 ? '' : 's'}${
+        personality.mode === 'attach' ? ' added' : ''
+      }`,
       detail: toolset.join(', '),
       value: 'toolset',
     });

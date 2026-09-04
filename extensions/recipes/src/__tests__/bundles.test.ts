@@ -3,8 +3,13 @@
 // rather than at install time on someone's machine.
 
 import { describe, expect, it } from 'vitest';
-import { morningBriefing, RECIPES } from '../data';
-import { RecipeBundleSchema } from '../schema';
+import { morningBriefing, obsidianSecondBrain, RECIPES } from '../data';
+import {
+  projectBundle,
+  projectPersonality,
+  RecipeBundleSchema,
+  resolveInstallMode,
+} from '../schema';
 
 describe('RECIPES', () => {
   it('ships at least one bundle', () => {
@@ -34,6 +39,16 @@ describe('RECIPES', () => {
         expect([...(recipe.personality.plugins ?? [])].sort()).toEqual(
           recipe.requires.plugins.map((p) => p.id).sort(),
         );
+      });
+
+      it('names the same tools in every view it offers', () => {
+        // `unknownToolNames` and preflight both read the projected toolset, so
+        // a `both` bundle whose halves disagreed would pass one and fail the
+        // other at install time.
+        const views = recipe.personality.mode === 'both' ? (['create', 'attach'] as const) : [];
+        for (const mode of views) {
+          expect(projectPersonality(recipe, mode).toolset).toEqual(recipe.requires.tools);
+        }
       });
     });
   }
@@ -112,5 +127,121 @@ describe('authoring invariants', () => {
     const result = RecipeBundleSchema.safeParse(bad);
     expect(result.success).toBe(false);
     expect(result.error?.issues[0]?.message).toContain('not in requires.tools');
+  });
+});
+
+describe('RecipeBundleSchema — attach and both modes', () => {
+  /** The shipped `both` bundle as a pure attach bundle. */
+  const attachOnly = projectBundle(obsidianSecondBrain, 'attach');
+
+  it('accepts the shipped both bundle, and each of its projections', () => {
+    for (const bundle of [
+      obsidianSecondBrain,
+      attachOnly,
+      projectBundle(obsidianSecondBrain, 'create'),
+    ]) {
+      const result = RecipeBundleSchema.safeParse(bundle);
+      expect(result.error?.issues ?? []).toEqual([]);
+    }
+  });
+
+  it('rejects create-only fields on an attach personality', () => {
+    // Identity, routing and network policy belong to the target. A bundle that
+    // tries to set them is refused, not silently stripped.
+    for (const extra of [
+      { id: 'archivist' },
+      { name: 'Archivist' },
+      { model: 'claude-sonnet-4-6' },
+      { safety: { network: { allow: [] } } },
+      { fsReach: { read: ['/x/'], workdir: '/x/' } },
+    ]) {
+      const bad = { ...attachOnly, personality: { ...attachOnly.personality, ...extra } };
+      expect(RecipeBundleSchema.safeParse(bad).success, JSON.stringify(extra)).toBe(false);
+    }
+  });
+
+  it('rejects the same fields inside a both bundle’s attach half', () => {
+    const p = obsidianSecondBrain.personality;
+    const bad = {
+      ...obsidianSecondBrain,
+      personality: { ...p, attach: { ...p.attach, safety: { network: { allow: [] } } } },
+    };
+    expect(RecipeBundleSchema.safeParse(bad).success).toBe(false);
+  });
+
+  it('requires every {{input.*}} in soulSection to be declared — in both shapes', () => {
+    const p = obsidianSecondBrain.personality;
+    for (const bad of [
+      {
+        ...attachOnly,
+        personality: { ...attachOnly.personality, soulSection: '{{input.nowhere}}' },
+      },
+      {
+        ...obsidianSecondBrain,
+        personality: { ...p, attach: { ...p.attach, soulSection: 'Vault: {{input.nowhere}}' } },
+      },
+    ]) {
+      const result = RecipeBundleSchema.safeParse(bad);
+      expect(result.success).toBe(false);
+      expect(JSON.stringify(result.error?.issues)).toContain('nowhere');
+    }
+  });
+
+  it('scans attach fsReach for undeclared inputs too — in both shapes', () => {
+    const p = obsidianSecondBrain.personality;
+    for (const bad of [
+      {
+        ...attachOnly,
+        personality: { ...attachOnly.personality, fsReach: { read: ['{{input.ghost}}'] } },
+      },
+      {
+        ...obsidianSecondBrain,
+        personality: { ...p, attach: { ...p.attach, fsReach: { read: ['{{input.ghost}}'] } } },
+      },
+    ]) {
+      const result = RecipeBundleSchema.safeParse(bad);
+      expect(result.success).toBe(false);
+      expect(JSON.stringify(result.error?.issues)).toContain('ghost');
+    }
+  });
+
+  it('holds attach mcpServers to the same set-equality rule — in both shapes', () => {
+    const p = obsidianSecondBrain.personality;
+    const bad = {
+      ...obsidianSecondBrain,
+      personality: { ...p, attach: { ...p.attach, mcpServers: ['obsidian-rest'] } },
+    };
+    const result = RecipeBundleSchema.safeParse(bad);
+    expect(result.success).toBe(false);
+    expect(JSON.stringify(result.error?.issues)).toContain('personality.attach.mcpServers');
+  });
+});
+
+describe('resolveInstallMode / projectPersonality', () => {
+  it('a single-mode bundle is its mode, whatever is requested', () => {
+    expect(resolveInstallMode(morningBriefing)).toBe('create');
+    expect(resolveInstallMode(morningBriefing, 'attach')).toBe('create');
+    const attachOnly = projectBundle(obsidianSecondBrain, 'attach');
+    expect(resolveInstallMode(attachOnly, 'create')).toBe('attach');
+  });
+
+  it('a both bundle takes the request and defaults to create', () => {
+    expect(resolveInstallMode(obsidianSecondBrain)).toBe('create');
+    expect(resolveInstallMode(obsidianSecondBrain, 'attach')).toBe('attach');
+  });
+
+  it('projects a both bundle to either view, and nothing leaks across', () => {
+    const create = projectPersonality(obsidianSecondBrain, 'create');
+    expect(create.mode).toBe('create');
+    expect(create.id).toBe('obsidian-archivist');
+    expect('attach' in create).toBe(false);
+    const attach = projectPersonality(obsidianSecondBrain, 'attach');
+    expect(attach.mode).toBe('attach');
+    expect(attach).toEqual({ mode: 'attach', ...obsidianSecondBrain.personality.attach });
+  });
+
+  it('returns a single-mode personality as itself and refuses the other view', () => {
+    expect(projectPersonality(morningBriefing, 'create')).toBe(morningBriefing.personality);
+    expect(() => projectPersonality(morningBriefing, 'attach')).toThrow(/create-only/);
   });
 });

@@ -1,4 +1,4 @@
-import type { RecipeSecretBindings } from '@ethosagent/web-contracts';
+import type { RecipeInstallMode, RecipeSecretBindings } from '@ethosagent/web-contracts';
 import { keepPreviousData, useQueries, useQuery } from '@tanstack/react-query';
 import { useEffect, useState } from 'react';
 import { rpc } from '../../../rpc';
@@ -58,14 +58,23 @@ export function useRecipePreflight(
   id: string,
   inputs: Record<string, string>,
   secretBindings: RecipeSecretBindings,
-  options?: { enabled?: boolean },
+  options?: { enabled?: boolean; personalityIdOverride?: string; installMode?: RecipeInstallMode },
 ) {
   const debounced = useDebouncedValue(inputs, PREFLIGHT_DEBOUNCE_MS);
-  // Not debounced: a binding changes on a pick, not on a keystroke, and the
-  // credential row should clear the instant a key is chosen.
+  const target = options?.personalityIdOverride;
+  const mode = options?.installMode;
+  // Not debounced: a binding, a target or a mode changes on a pick, not on a
+  // keystroke, and its row should clear the instant it is chosen.
   return useQuery({
-    queryKey: recipeKeys.preflight(id, debounced, secretBindings),
-    queryFn: () => rpc.recipes.preflight({ id, inputs: debounced, secretBindings }),
+    queryKey: recipeKeys.preflight(id, debounced, secretBindings, target, mode),
+    queryFn: () =>
+      rpc.recipes.preflight({
+        id,
+        inputs: debounced,
+        secretBindings,
+        ...(target ? { personalityIdOverride: target } : {}),
+        ...(mode ? { installMode: mode } : {}),
+      }),
     placeholderData: keepPreviousData,
     enabled: (options?.enabled ?? true) && id.length > 0,
   });

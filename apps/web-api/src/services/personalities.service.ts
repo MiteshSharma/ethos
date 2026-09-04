@@ -19,6 +19,7 @@ import {
   EthosError,
   type ExecutionPosture,
   type LearningLogEntry,
+  type PersonalityConfig,
   type Storage,
 } from '@ethosagent/types';
 import type { McpPolicy, Personality, PersonalitySkill } from '@ethosagent/web-contracts';
@@ -146,6 +147,19 @@ export class PersonalitiesService {
     if (!described) throw notFound(id);
     const soulMd = await this.opts.personalities.readSoulMd(id);
     return { personality: toWire(described), soulMd, mcpPolicy: described.mcpPolicy ?? null };
+  }
+
+  /**
+   * The stored `PersonalityConfig` itself, for a caller that renders a
+   * character sheet from a VARIANT of it — the recipes attach preview, which
+   * draws the target with the recipe's additions applied. Never returned over
+   * the wire (`get` is the wire shape).
+   */
+  async config(id: string): Promise<PersonalityConfig> {
+    await this.opts.refresh?.();
+    const described = this.opts.personalities.describe(id);
+    if (!described) throw notFound(id);
+    return described.config;
   }
 
   /** Generated Markdown character sheet — the same artifact `ethos personality

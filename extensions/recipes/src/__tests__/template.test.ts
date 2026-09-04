@@ -2,11 +2,15 @@
 // fsReach, and the hard error on an unresolved placeholder.
 
 import { describe, expect, it } from 'vitest';
-import { morningBriefing } from '../data';
-import type { RecipeBundle } from '../schema';
+import { morningBriefing, obsidianSecondBrain } from '../data';
+import { projectBundle, type RecipeBundle } from '../schema';
 import {
+  appendRecipeSoulSection,
+  hasRecipeSoulSection,
   placeholderKeys,
   RecipeTemplateError,
+  type ResolvedRecipe,
+  recipeSoulMarkers,
   renderRecipe,
   renderTemplate,
   renderTemplatePreview,
@@ -21,6 +25,13 @@ const FILLED = {
   briefingTime: '20 6 * * *',
   chatTarget: '12345',
 };
+
+/** The create variant of a resolved personality — what every bundle rendered below is. */
+function created(resolved: ResolvedRecipe) {
+  const p = resolved.personality;
+  if (p.mode !== 'create') throw new Error('expected a create-mode personality');
+  return p;
+}
 
 describe('placeholderKeys', () => {
   it('finds each key once, in first-seen order', () => {
@@ -89,8 +100,8 @@ describe('resolveInputs', () => {
 describe('renderRecipe', () => {
   it('resolves the soul, the schedule and the prompt', () => {
     const resolved = renderRecipe(morningBriefing, FILLED);
-    expect(resolved.personality.soulMd).toContain('city: Bengaluru');
-    expect(resolved.personality.soulMd).not.toContain('{{input.');
+    expect(created(resolved).soulMd).toContain('city: Bengaluru');
+    expect(created(resolved).soulMd).not.toContain('{{input.');
     expect(resolved.cronJobs[0]?.schedule).toBe('20 6 * * *');
     expect(resolved.cronJobs[0]?.prompt).toContain('morning briefing');
   });
@@ -108,7 +119,7 @@ describe('renderRecipe', () => {
       },
     };
     const resolved = renderRecipe(bundle, FILLED);
-    expect(resolved.personality.fsReach).toEqual({
+    expect(created(resolved).fsReach).toEqual({
       read: ['Bengaluru/notes'],
       write: ['Bengaluru/out'],
       workdir: ['Bengaluru'],
@@ -133,7 +144,7 @@ describe('renderRecipe — network policy', () => {
     // an empty host set — every fetch denied with HOST_NOT_ALLOWED.
     expect(morningBriefing.personality.safety).toBeUndefined();
     const resolved = renderRecipe(morningBriefing, FILLED);
-    expect(resolved.personality.safety).toEqual({ network: { allow: ['*'] } });
+    expect(created(resolved).safety).toEqual({ network: { allow: ['*'] } });
   });
 
   it('leaves a bundle that declares its own alone', () => {
@@ -145,15 +156,69 @@ describe('renderRecipe — network policy', () => {
       },
     };
     const resolved = renderRecipe(locked, FILLED);
-    expect(resolved.personality.safety).toEqual({
+    expect(created(resolved).safety).toEqual({
       network: { allow: ['api.open-meteo.com'], deny: ['example.com'] },
     });
   });
 
   it('does not share one array between two installs', () => {
     const first = renderRecipe(morningBriefing, FILLED);
-    first.personality.safety?.network.allow?.push('mutated.example');
+    created(first).safety?.network.allow?.push('mutated.example');
     const second = renderRecipe(morningBriefing, FILLED);
-    expect(second.personality.safety).toEqual({ network: { allow: ['*'] } });
+    expect(created(second).safety).toEqual({ network: { allow: ['*'] } });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Attach mode — the section, the reach, and the markers
+// ---------------------------------------------------------------------------
+
+describe('renderRecipe — attach mode', () => {
+  const VAULT = { vaultPath: '/Users/you/Vault/', consolidationTime: '30 23 * * *' };
+  const attach = projectBundle(obsidianSecondBrain, 'attach');
+
+  it('resolves the soul section and both reach lists, and nothing else', () => {
+    const resolved = renderRecipe(attach, VAULT);
+    const p = resolved.personality;
+    if (p.mode !== 'attach') throw new Error('expected an attach-mode personality');
+    expect(p.soulSection).toContain('/Users/you/Vault/');
+    expect(p.soulSection).not.toContain('{{input.');
+    expect(p.fsReach).toEqual({ read: ['/Users/you/Vault/'], write: ['/Users/you/Vault/'] });
+    // No network policy is ever minted for an attach — that is the target's.
+    expect('safety' in p).toBe(false);
+  });
+
+  it('refuses an unfilled placeholder in the section', () => {
+    expect(() => renderRecipe(attach, { consolidationTime: '30 23 * * *' })).toThrow(
+      RecipeTemplateError,
+    );
+  });
+
+  it('renders BOTH halves of a `both` bundle when it is not projected', () => {
+    const resolved = renderRecipe(obsidianSecondBrain, VAULT);
+    const p = resolved.personality;
+    if (p.mode !== 'both') throw new Error('expected a both-mode personality');
+    expect(p.soulMd).toContain('/Users/you/Vault/');
+    expect(p.fsReach?.workdir).toBe('/Users/you/Vault/');
+    expect(p.attach.soulSection).toContain('/Users/you/Vault/');
+    expect(p.attach.fsReach).toEqual({ read: ['/Users/you/Vault/'], write: ['/Users/you/Vault/'] });
+  });
+});
+
+describe('the marked SOUL section', () => {
+  it('appends between the markers and is detectable afterwards', () => {
+    const soul = 'I am Writer.\n';
+    const next = appendRecipeSoulSection(soul, 'obsidian-second-brain', '## Vault\n\nRules.\n');
+    const { start, end } = recipeSoulMarkers('obsidian-second-brain');
+    expect(next).toBe(`I am Writer.\n\n${start}\n## Vault\n\nRules.\n${end}\n`);
+    expect(hasRecipeSoulSection(soul, 'obsidian-second-brain')).toBe(false);
+    expect(hasRecipeSoulSection(next, 'obsidian-second-brain')).toBe(true);
+    // A different recipe's marker is a different section.
+    expect(hasRecipeSoulSection(next, 'link-archiver')).toBe(false);
+  });
+
+  it('does not double the newline when the SOUL already ends with one', () => {
+    const next = appendRecipeSoulSection('I am Writer.', 'r', 'Section');
+    expect(next.startsWith('I am Writer.\n\n<!-- recipe:r:start -->')).toBe(true);
   });
 });

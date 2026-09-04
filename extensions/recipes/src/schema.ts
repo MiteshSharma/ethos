@@ -56,13 +56,13 @@ export function defaultRecipeSafety(): { network: { allow: string[] } } {
 }
 
 /**
- * Exactly the fields `PersonalityCreateInput` accepts (§0.6), camel-cased.
- * A SUBSET is fine; a superset is not — a bundle that needs a field the
- * personality contract does not have is a wrong bundle, not a schema gap.
- * Maps to `PersonalityCreateInput` as: mcpServers → `mcp_servers`,
- * fsReach → `fs_reach`; every other key is already identical.
+ * The create-side fields — exactly what `PersonalityCreateInput` accepts
+ * (§0.6), camel-cased. A SUBSET is fine; a superset is not — a bundle that
+ * needs a field the personality contract does not have is a wrong bundle, not
+ * a schema gap. Maps to `PersonalityCreateInput` as: mcpServers →
+ * `mcp_servers`, fsReach → `fs_reach`; every other key is already identical.
  */
-const RecipePersonalitySchema = z.object({
+const RecipeCreateFields = z.object({
   id: KebabId,
   name: z.string().min(1),
   description: z.string().min(1),
@@ -90,6 +90,69 @@ const RecipePersonalitySchema = z.object({
    */
   safety: z.object({ network: RecipeNetworkPolicySchema }).optional(),
 });
+
+/**
+ * The attach-side fields — what a recipe adds ONTO an existing personality.
+ * The target is chosen at install time (`personalityId`), so nothing here
+ * names, models or network-scopes an agent: identity, routing and `safety`
+ * belong to the personality that already exists, and an attach never changes
+ * them. `.strict()` makes that a schema error rather than a silently stripped
+ * field.
+ *
+ * What it does carry is ADDITIVE: a marked SOUL section, tools to union into
+ * the toolset, reach entries to append, and the MCP/plugin allowlists the
+ * recipe's requirements demand.
+ */
+const RecipeAttachFields = z
+  .object({
+    /**
+     * Markdown appended to the target's SOUL.md, wrapped by the installer in
+     * `<!-- recipe:<bundle.id>:start -->` / `:end -->` marker lines so a second
+     * install can detect it and an undo can find it. May contain `{{input.*}}`.
+     */
+    soulSection: z.string().min(1),
+    /** Tools ADDED to the target's toolset (union). Same rule as `requires.tools`. */
+    toolset: z.array(z.string()),
+    /** Must equal `requires.mcpServers[].name` as a set. */
+    mcpServers: z.array(z.string()).optional(),
+    /** Must equal `requires.plugins[].id` as a set. */
+    plugins: z.array(z.string()).optional(),
+    /** Appended (deduped) to the target's `fs_reach`. No `workdir`: that is the target's. */
+    fsReach: z
+      .object({
+        read: z.array(z.string()).optional(),
+        write: z.array(z.string()).optional(),
+      })
+      .strict()
+      .optional(),
+  })
+  .strict();
+
+/** `mode: 'create'` — the recipe writes a new personality. */
+const RecipeCreatePersonalitySchema = RecipeCreateFields.extend({ mode: z.literal('create') });
+
+/** `mode: 'attach'` — the recipe installs onto a personality chosen at install time. */
+const RecipeAttachPersonalitySchema = RecipeAttachFields.extend({
+  mode: z.literal('attach'),
+}).strict();
+
+/**
+ * `mode: 'both'` — the recipe is offered either way, and the user picks at
+ * install time (`installMode`, default `create`). The create side is the top
+ * level; the attach side is the `attach` sub-object. `projectPersonality`
+ * turns it into one of the two views above, so nothing downstream grows a
+ * third code path.
+ */
+const RecipeBothPersonalitySchema = RecipeCreateFields.extend({
+  mode: z.literal('both'),
+  attach: RecipeAttachFields,
+});
+
+const RecipePersonalitySchema = z.discriminatedUnion('mode', [
+  RecipeCreatePersonalitySchema,
+  RecipeAttachPersonalitySchema,
+  RecipeBothPersonalitySchema,
+]);
 
 const RecipeMcpServerSchema = z.object({
   name: z.string().min(1),
@@ -257,13 +320,19 @@ function sameSet(a: readonly string[], b: readonly string[]): boolean {
 
 /** Every `{{input.<key>}}` in a bundle, across every templated field. */
 function referencedInputKeys(bundle: z.infer<typeof RecipeBundleShape>): string[] {
-  const fsReach = bundle.personality.fsReach;
-  const workdir = fsReach?.workdir;
+  const p = bundle.personality;
+  const fsReach = p.fsReach;
+  const workdir = p.mode === 'attach' ? undefined : p.fsReach?.workdir;
+  // A `both` bundle carries two templated halves; both are scanned.
+  const attach = p.mode === 'both' ? p.attach : undefined;
   const texts = [
-    bundle.personality.soulMd,
+    p.mode === 'attach' ? p.soulSection : p.soulMd,
     ...(fsReach?.read ?? []),
     ...(fsReach?.write ?? []),
     ...(workdir === undefined ? [] : typeof workdir === 'string' ? [workdir] : workdir),
+    ...(attach
+      ? [attach.soulSection, ...(attach.fsReach?.read ?? []), ...(attach.fsReach?.write ?? [])]
+      : []),
     ...bundle.cronJobs.flatMap((j) => [j.schedule, j.prompt]),
   ];
   const keys = new Set<string>();
@@ -282,24 +351,33 @@ function referencedInputKeys(bundle: z.infer<typeof RecipeBundleShape>): string[
  * they fail at `pnpm test` (the table test) rather than at install time.
  */
 export const RecipeBundleSchema = RecipeBundleShape.superRefine((bundle, ctx) => {
-  const declaredMcp = bundle.personality.mcpServers ?? [];
-  const requiredMcp = bundle.requires.mcpServers.map((s) => s.name);
-  if (!sameSet(declaredMcp, requiredMcp)) {
-    ctx.addIssue({
-      code: 'custom',
-      path: ['personality', 'mcpServers'],
-      message: `personality.mcpServers [${declaredMcp.join(', ')}] must equal requires.mcpServers[].name [${requiredMcp.join(', ')}]`,
-    });
+  // Every half that carries allowlists is held to the same set-equality: the
+  // top level always, and the `attach` sub-object of a `both` bundle too.
+  const halves: Array<[path: string[], half: { mcpServers?: string[]; plugins?: string[] }]> = [
+    [['personality'], bundle.personality],
+  ];
+  if (bundle.personality.mode === 'both') {
+    halves.push([['personality', 'attach'], bundle.personality.attach]);
   }
-
-  const declaredPlugins = bundle.personality.plugins ?? [];
+  const requiredMcp = bundle.requires.mcpServers.map((s) => s.name);
   const requiredPlugins = bundle.requires.plugins.map((p) => p.id);
-  if (!sameSet(declaredPlugins, requiredPlugins)) {
-    ctx.addIssue({
-      code: 'custom',
-      path: ['personality', 'plugins'],
-      message: `personality.plugins [${declaredPlugins.join(', ')}] must equal requires.plugins[].id [${requiredPlugins.join(', ')}]`,
-    });
+  for (const [path, half] of halves) {
+    const declaredMcp = half.mcpServers ?? [];
+    if (!sameSet(declaredMcp, requiredMcp)) {
+      ctx.addIssue({
+        code: 'custom',
+        path: [...path, 'mcpServers'],
+        message: `${path.join('.')}.mcpServers [${declaredMcp.join(', ')}] must equal requires.mcpServers[].name [${requiredMcp.join(', ')}]`,
+      });
+    }
+    const declaredPlugins = half.plugins ?? [];
+    if (!sameSet(declaredPlugins, requiredPlugins)) {
+      ctx.addIssue({
+        code: 'custom',
+        path: [...path, 'plugins'],
+        message: `${path.join('.')}.plugins [${declaredPlugins.join(', ')}] must equal requires.plugins[].id [${requiredPlugins.join(', ')}]`,
+      });
+    }
   }
 
   const inputKeys = bundle.requires.inputs.map((i) => i.key);
@@ -366,5 +444,79 @@ export type RecipeBundle = z.infer<typeof RecipeBundleSchema>;
 export type RecipeInput = RecipeBundle['requires']['inputs'][number];
 export type RecipeCronJob = RecipeBundle['cronJobs'][number];
 export type RecipePersonality = RecipeBundle['personality'];
+export type RecipeCreatePersonality = z.infer<typeof RecipeCreatePersonalitySchema>;
+export type RecipeAttachPersonality = z.infer<typeof RecipeAttachPersonalitySchema>;
+export type RecipeBothPersonality = z.infer<typeof RecipeBothPersonalitySchema>;
+/** A bundle whose `personality` is statically the create variant — how the create-mode data files are typed. */
+export type RecipeCreateBundle = Omit<RecipeBundle, 'personality'> & {
+  personality: RecipeCreatePersonality;
+};
+/** The attach counterpart. */
+export type RecipeAttachBundle = Omit<RecipeBundle, 'personality'> & {
+  personality: RecipeAttachPersonality;
+};
+/** The both counterpart. */
+export type RecipeBothBundle = Omit<RecipeBundle, 'personality'> & {
+  personality: RecipeBothPersonality;
+};
+
+// ---------------------------------------------------------------------------
+// Install mode — the two views of a bundle
+// ---------------------------------------------------------------------------
+
+/** How an install writes: a new personality, or onto an existing one. */
+export type RecipeInstallMode = 'create' | 'attach';
+
+/**
+ * The mode an install runs in. A `create` or `attach` bundle IS its mode —
+ * the request cannot change it. A `both` bundle takes the request, and
+ * defaults to `create`.
+ */
+export function resolveInstallMode(
+  bundle: Pick<RecipeBundle, 'personality'>,
+  requested?: RecipeInstallMode,
+): RecipeInstallMode {
+  const mode = bundle.personality.mode;
+  return mode === 'both' ? (requested ?? 'create') : mode;
+}
+
+/**
+ * The bundle's personality as ONE view — the create variant or the attach
+ * variant — so preflight, the templater, the installer and the UI keep their
+ * two code paths. A `both` personality projects either way; a single-mode one
+ * is itself, and asking it for the other mode is a caller bug.
+ */
+export function projectPersonality(
+  bundle: Pick<RecipeBundle, 'personality'>,
+  mode: 'create',
+): RecipeCreatePersonality;
+export function projectPersonality(
+  bundle: Pick<RecipeBundle, 'personality'>,
+  mode: 'attach',
+): RecipeAttachPersonality;
+export function projectPersonality(
+  bundle: Pick<RecipeBundle, 'personality'>,
+  mode: RecipeInstallMode,
+): RecipeCreatePersonality | RecipeAttachPersonality;
+export function projectPersonality(
+  bundle: Pick<RecipeBundle, 'personality'>,
+  mode: RecipeInstallMode,
+): RecipeCreatePersonality | RecipeAttachPersonality {
+  const p = bundle.personality;
+  if (p.mode === 'both') {
+    if (mode === 'attach') return { mode: 'attach', ...p.attach };
+    const { attach: _attach, mode: _mode, ...create } = p;
+    return { mode: 'create', ...create };
+  }
+  if (p.mode !== mode) {
+    throw new Error(`recipe personality is ${p.mode}-only; cannot project it as ${mode}`);
+  }
+  return p;
+}
+
+/** The whole bundle with its personality projected — what the pipeline consumes. */
+export function projectBundle(bundle: RecipeBundle, mode: RecipeInstallMode): RecipeBundle {
+  return { ...bundle, personality: projectPersonality(bundle, mode) };
+}
 export type RecipeSecretRequirement = NonNullable<RecipeBundle['requires']['secrets']>[number];
 export type RecipePostInstall = RecipeBundle['postInstall'][number];

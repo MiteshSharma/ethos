@@ -183,8 +183,10 @@ function makeWorld(o: Options = {}) {
 
   const recipes = new RecipesService({
     personalities: {
+      list: personalitiesService.list.bind(personalitiesService),
       exists: personalitiesService.exists.bind(personalitiesService),
       get: personalitiesService.get.bind(personalitiesService),
+      config: personalitiesService.config.bind(personalitiesService),
       create: personalitiesService.create.bind(personalitiesService),
       update: personalitiesService.update.bind(personalitiesService),
       delete: personalitiesService.delete.bind(personalitiesService),
