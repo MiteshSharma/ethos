@@ -1,5 +1,15 @@
-import { basename, join } from 'node:path';
+import { join } from 'node:path';
 import type { Storage, Tool, ToolContext, ToolResult } from '@ethosagent/types';
+
+/**
+ * `targetFile` is an LLM tool argument that ends up in three places a loose
+ * value would damage: the pending FILENAME (`<id>.md`), the generated
+ * frontmatter (`name:` and `target_file:`, unquoted YAML), and the operator's
+ * apply-command notice. A path-separator check alone let through spaces, `;`,
+ * `$(…)`, quotes and newlines. Same class as `analyze.ts`'s filename guard,
+ * with the extension optional because the id builder strips a trailing `.md`.
+ */
+const TARGET_FILE_RE = /^[a-zA-Z0-9_-]+(\.md)?$/;
 
 interface SkillProposeArgs {
   content: string;
@@ -38,15 +48,13 @@ export function createSkillProposeTool(opts: {
       required: ['content', 'reason'],
     },
     async execute(args: SkillProposeArgs, _ctx: ToolContext): Promise<ToolResult> {
-      if (args.targetFile) {
-        const safeTarget = basename(args.targetFile);
-        if (safeTarget !== args.targetFile || args.targetFile.includes('..')) {
-          return {
-            ok: false,
-            error: 'Invalid targetFile: path separators not allowed',
-            code: 'input_invalid',
-          };
-        }
+      if (args.targetFile && !TARGET_FILE_RE.test(args.targetFile)) {
+        return {
+          ok: false,
+          error:
+            'Invalid targetFile: use a plain skill filename (letters, digits, `_`, `-`, optional `.md`)',
+          code: 'input_invalid',
+        };
       }
 
       const ts = now();
