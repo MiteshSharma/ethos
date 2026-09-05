@@ -37,10 +37,13 @@ describe('ChannelOverrideStore — zod parameterisation', () => {
     expect(simple.safeParse('regex_match').success).toBe(false);
   });
 
-  it('rejects a stored mode the adapter enum does not know', async () => {
-    // A Telegram file read back by a Discord-shaped enum: the `regex_match`
-    // line is skipped, not adopted, so widening one adapter's enum never
-    // corrupts another's in-memory index.
+  it('keeps a stored mode the adapter enum does not know, verbatim', async () => {
+    // A Telegram file read back by a Discord-shaped enum. The `regex_match`
+    // line is not ADOPTED — no adapter treats it as one of its own modes, and
+    // `evaluateChannelMode` fails closed on anything it does not recognise —
+    // but it is kept, because dropping it is what made `get()` return
+    // `undefined`, indistinguishable from "no override stored", so the caller
+    // substituted its answering default.
     const storage = new InMemoryStorage();
     await seed(
       storage,
@@ -49,7 +52,7 @@ describe('ChannelOverrideStore — zod parameterisation', () => {
     );
     const store = new ChannelOverrideStore(storage, DIR, SimpleModeSchema);
     await store.load();
-    expect(store.get('c1')).toBeUndefined();
+    expect(store.get('c1')).toEqual({ mode: 'regex_match' });
     expect(store.get('c2')).toEqual({ mode: 'observe' });
   });
 });
@@ -170,6 +173,82 @@ describe('ChannelOverrideStore — malformed input', () => {
     const store = new ChannelOverrideStore(storage, DIR, SimpleModeSchema);
     await store.load();
     expect(store.entries()).toEqual([['c1', { mode: 'all' }]]);
+  });
+});
+
+// The store is what stands between a bad override string and
+// `evaluateChannelMode`'s fail-closed branch. Dropping the record put the
+// caller's ANSWERING default there instead, which is why that branch was dead
+// code in production; keeping it is what makes the branch reachable.
+describe('ChannelOverrideStore — an unreadable stored mode', () => {
+  /** Every shape that actually reaches disk, not one shape of nonsense. */
+  const UNREADABLE = ['observe ', 'Observe', 'obserev', 'silent_digest_only', ''];
+
+  for (const mode of UNREADABLE) {
+    it(`keeps ${JSON.stringify(mode)} verbatim instead of dropping the record`, async () => {
+      const storage = new InMemoryStorage();
+      await seed(storage, `${JSON.stringify({ channel: 'c1', mode, updatedAt: 1 })}\n`);
+      const store = new ChannelOverrideStore(storage, DIR, SimpleModeSchema);
+      await store.load();
+      expect(store.get('c1')).toEqual({ mode });
+    });
+  }
+
+  it('leaves an ABSENT override undefined — the distinction callers depend on', async () => {
+    // `undefined` must keep meaning "no override stored, use your default".
+    // If it also meant "stored but unreadable" the caller could not tell a
+    // room that never chose a mode from a room whose choice it cannot read.
+    const storage = new InMemoryStorage();
+    await seed(storage, `${JSON.stringify({ channel: 'c1', mode: 'obserev', updatedAt: 1 })}\n`);
+    const store = new ChannelOverrideStore(storage, DIR, SimpleModeSchema);
+    await store.load();
+    expect(store.get('c1')).toEqual({ mode: 'obserev' });
+    expect(store.get('c2')).toBeUndefined();
+  });
+
+  it('still drops a record whose mode is not a string at all', async () => {
+    // A non-string `mode` is structurally malformed, the same class as the
+    // truncated line above — not a mode this build cannot read.
+    const storage = new InMemoryStorage();
+    await seed(
+      storage,
+      [
+        JSON.stringify({ channel: 'c1', mode: 7, updatedAt: 1 }),
+        JSON.stringify({ channel: 'c2', mode: null, updatedAt: 1 }),
+        JSON.stringify({ channel: 'c3', updatedAt: 1 }),
+      ].join('\n'),
+    );
+    const store = new ChannelOverrideStore(storage, DIR, SimpleModeSchema);
+    await store.load();
+    expect(store.entries()).toEqual([]);
+  });
+
+  it('latest record wins in both directions', async () => {
+    const storage = new InMemoryStorage();
+    await seed(
+      storage,
+      [
+        JSON.stringify({ channel: 'c1', mode: 'observe', updatedAt: 1 }),
+        JSON.stringify({ channel: 'c1', mode: 'obserev', updatedAt: 2 }),
+        JSON.stringify({ channel: 'c2', mode: 'obserev', updatedAt: 1 }),
+        JSON.stringify({ channel: 'c2', mode: 'observe', updatedAt: 2 }),
+      ].join('\n'),
+    );
+    const store = new ChannelOverrideStore(storage, DIR, SimpleModeSchema);
+    await store.load();
+    expect(store.get('c1')).toEqual({ mode: 'obserev' });
+    expect(store.get('c2')).toEqual({ mode: 'observe' });
+  });
+
+  it('a valid set replaces an unreadable record', async () => {
+    const storage = new InMemoryStorage();
+    await seed(storage, `${JSON.stringify({ channel: 'c1', mode: 'obserev', updatedAt: 1 })}\n`);
+    const store = new ChannelOverrideStore(storage, DIR, SimpleModeSchema);
+    await store.set('c1', 'all');
+    expect(store.get('c1')).toEqual({ mode: 'all' });
+    const reopened = new ChannelOverrideStore(storage, DIR, SimpleModeSchema);
+    await reopened.load();
+    expect(reopened.get('c1')).toEqual({ mode: 'all' });
   });
 });
 

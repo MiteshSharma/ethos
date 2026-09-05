@@ -94,11 +94,17 @@ describe('ChannelOverrideStore (shared core store, Discord binding)', () => {
     expect(reloaded.get('ch1')).toEqual({ mode: 'observe' });
   });
 
-  it("rejects a mode Discord's enum does not know, rather than storing it", async () => {
+  it("keeps a mode Discord's enum does not know, rather than dropping it", async () => {
+    // Telegram's `regex_match` read back through Discord's enum. It is NOT
+    // adopted as a valid Discord mode — nothing in `evaluateChannelMode`'s
+    // Discord-reachable table matches it, so it fails closed — but it is kept
+    // rather than dropped. Dropping made `get()` return `undefined`, which the
+    // adapter could not tell from "no override", so it substituted the
+    // ANSWERING `mention_only` default.
     const line = JSON.stringify({ channel: 'ch1', mode: 'regex_match', updatedAt: 1 });
     await storage.write(`${BOT_DIR}/channel-overrides.jsonl`, `${line}\n`);
     const reloaded = new ChannelOverrideStore(storage, BOT_DIR, ChannelModeSchema);
     await reloaded.load();
-    expect(reloaded.get('ch1')).toBeUndefined();
+    expect(reloaded.get('ch1')).toEqual({ mode: 'regex_match' });
   });
 });

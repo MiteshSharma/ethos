@@ -699,14 +699,14 @@ describe('compose-tools wires the ssh gate to the tools', () => {
   const src = readFileSync(join(import.meta.dirname, '..', 'compose-tools.ts'), 'utf-8');
 
   it('assigns the routed backend from the gate', () => {
-    expect(src).toContain('executionBackend = await resolveSshExecutionBackend({');
+    expect(src).toContain('const built = await resolveSshExecutionBackend({');
   });
 
   it('hands the tools the posture refusal rather than a second wording', () => {
     expect(src).toContain(
-      'const refusal = resolveExecRefusal(posture, executionBackend !== undefined);',
+      'const turnRefusal = resolveExecRefusal(turn.posture, turn.backend !== undefined);',
     );
-    expect(src).toContain('const execForbiddenMessage = refusal.message;');
+    expect(src).toContain('const message = turn.buildError ?? turnRefusal.message;');
   });
 
   it('never hands the tools a remoteness flag beside the backend', () => {
@@ -718,18 +718,28 @@ describe('compose-tools wires the ssh gate to the tools', () => {
     expect(src).not.toContain('remoteBackend');
   });
 
-  it('still derives remoteExec for what the model is told', () => {
-    // Remoteness left compose-tools' hands for the TOOLS, but the injector that
-    // tells the model "your shell is on another machine" is still this file's
-    // decision, and it must stay tied to a backend that actually resolved.
-    expect(src).toContain(
-      "const remoteExec = posture.backend === 'ssh' && executionBackend !== undefined;",
-    );
+  it('gives every exec tool the SAME per-turn router, and none a frozen backend', () => {
+    // The defect this replaced: a backend resolved once from `activePerson` and
+    // handed to tools that never look at the turn's personality. If a static
+    // `backend:`/`personality:` pair reappears at these call sites, one
+    // personality's commands are running under another's posture again.
+    expect(src).toContain('for (const tool of createTerminalTools({ route: execRoute }))');
+    expect(src).toContain('route: execRoute,');
+    expect(src).toContain('route: processRoute,');
+    expect(src).not.toContain('personality: activePerson,\n    hostExecForbidden');
+  });
+
+  it('tells the model what the router resolved, not what the process booted as', () => {
+    // The injector and the tools must read ONE resolution: an injector keyed on
+    // the boot personality says "your shell is remote" to the wrong turn, or
+    // says nothing to the right one.
+    expect(src).toContain('const turn = await routing.resolveTurn(personalityId);');
+    expect(src).toContain("if (turn?.backend?.name !== 'ssh') return undefined;");
   });
 
   it('excludes process_* from remote routing (D4)', () => {
-    expect(src).toContain('...(sshPosture ? {} : { backend: executionBackend }),');
-    expect(src).toContain('hostExecForbidden: sshPosture ? true : hostExecForbidden,');
+    expect(src).toContain("if (kind === 'process' && turn.posture.backend === 'ssh') {");
+    expect(src).toContain('hostExecForbiddenMessage: processSshUnsupported,');
     expect(src).toContain(
       "const processSshUnsupported = 'process tools are not routed over ssh in v1';",
     );
@@ -741,11 +751,16 @@ describe('compose-tools wires the ssh gate to the tools', () => {
 // ---------------------------------------------------------------------------
 
 describe('createRemoteExecutionInjector', () => {
+  /** The shape compose-tools hands it: resolve the target for THIS turn's personality. */
+  function injectorFor(routes: Record<string, { target: string; remoteWorkdir?: string }>) {
+    return createRemoteExecutionInjector({
+      resolveTarget: (personalityId) => Promise.resolve(routes[personalityId]),
+    });
+  }
+
   it('states plainly that terminal is remote, unconfined, and split from the file tools', async () => {
-    const injector = createRemoteExecutionInjector({
-      personalityId: 'remote-hands',
-      target: 'deploy@build-01.internal:2222',
-      remoteWorkdir: '/srv/work',
+    const injector = injectorFor({
+      'remote-hands': { target: 'deploy@build-01.internal:2222', remoteWorkdir: '/srv/work' },
     });
 
     const result = await injector.inject({ personalityId: 'remote-hands' } as never);
@@ -763,20 +778,20 @@ describe('createRemoteExecutionInjector', () => {
   });
 
   it('names the remote login directory when no remote workdir is configured', async () => {
-    const injector = createRemoteExecutionInjector({
-      personalityId: 'remote-hands',
-      target: 'build-01',
-    });
+    const injector = injectorFor({ 'remote-hands': { target: 'build-01' } });
     const result = await injector.inject({ personalityId: 'remote-hands' } as never);
     expect(result?.content).toContain('the remote login directory');
   });
 
-  it('injects only for the personality it was built for', () => {
-    const injector = createRemoteExecutionInjector({
-      personalityId: 'remote-hands',
-      target: 'build-01',
-    });
-    expect(injector.shouldInject?.({ personalityId: 'remote-hands' } as never)).toBe(true);
-    expect(injector.shouldInject?.({ personalityId: 'someone-else' } as never)).toBe(false);
+  it('injects only for a personality whose execution actually routes remotely', async () => {
+    // The mirror of the routing defect, in the prompt: booted as the remote
+    // personality, this used to gate on that BOOT id — so a local personality's
+    // turn was told nothing (while its commands went to the remote box), and,
+    // booted the other way, a remote personality's turn was told nothing at
+    // all. It follows the turn now, and the turn only.
+    const injector = injectorFor({ 'remote-hands': { target: 'build-01' } });
+
+    expect(await injector.inject({ personalityId: 'remote-hands' } as never)).not.toBeNull();
+    expect(await injector.inject({ personalityId: 'stays-local' } as never)).toBeNull();
   });
 });

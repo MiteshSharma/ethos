@@ -3,6 +3,8 @@ import { resolve } from 'node:path';
 import {
   BoundaryError,
   type ExecutionBackend,
+  type ExecutionRoute,
+  type ExecutionRouter,
   type HookRegistry,
   type PersonalityConfig,
   type Tool,
@@ -130,11 +132,8 @@ async function fireProcessComplete(
 function makeProcessStart(
   dataDir: string,
   capMax: number,
+  route: ExecutionRouter,
   notifier?: CompletionNotifier,
-  backend?: ExecutionBackend,
-  personality?: PersonalityConfig,
-  hostExecForbidden = false,
-  hostExecForbiddenMessage: string = DEFAULT_HOST_EXEC_FORBIDDEN,
 ): Tool {
   return {
     name: 'process_start',
@@ -170,13 +169,25 @@ function makeProcessStart(
 
       if (!command) return { ok: false, error: 'command is required', code: 'input_invalid' };
 
+      // The turn's route, resolved from `ctx.personalityId` rather than frozen
+      // at composition: a background process started under the wrong
+      // personality's posture lands on the wrong machine, or un-sandboxed on
+      // this one, and then OUTLIVES the turn that misplaced it.
+      const { backend, personality, hostExecForbidden, hostExecForbiddenMessage } = await route(
+        ctx.personalityId,
+      );
+
       // Host execution forbidden: the posture requires a sandbox or a remote
       // target that this tool is not routed to, and the host fallback is not
       // permitted. Refuse rather than silently spawn a detached host process
       // (F1) — under an ssh posture that would put a background process on the
       // wrong machine entirely.
       if (!backend && hostExecForbidden) {
-        return { ok: false, error: hostExecForbiddenMessage, code: 'not_available' as const };
+        return {
+          ok: false,
+          error: hostExecForbiddenMessage ?? DEFAULT_HOST_EXEC_FORBIDDEN,
+          code: 'not_available' as const,
+        };
       }
 
       const id = randomUUID();
@@ -626,6 +637,11 @@ export function createProcessTools(
   opts?: {
     capMax?: number;
     hookRegistry?: HookRegistry;
+    /**
+     * Per-turn route resolution. When present it is the ONLY source of the
+     * backend / personality / refusal; the static fields below are ignored.
+     */
+    route?: ExecutionRouter;
     backend?: ExecutionBackend;
     personality?: PersonalityConfig;
     /** Refuse host spawn when the posture requires a sandbox/remote but none is wired. */
@@ -649,15 +665,18 @@ export function createProcessTools(
   const notifier = opts?.hookRegistry
     ? createCompletionNotifier(opts.hookRegistry, dataDir)
     : undefined;
+  const staticRoute: ExecutionRoute = {
+    ...(opts?.backend !== undefined ? { backend: opts.backend } : {}),
+    ...(opts?.personality !== undefined ? { personality: opts.personality } : {}),
+    hostExecForbidden: opts?.hostExecForbidden ?? false,
+    hostExecForbiddenMessage: opts?.hostExecForbiddenMessage ?? DEFAULT_HOST_EXEC_FORBIDDEN,
+  };
   return [
     makeProcessStart(
       dataDir,
       capMax,
+      opts?.route ?? (() => Promise.resolve(staticRoute)),
       notifier,
-      opts?.backend,
-      opts?.personality,
-      opts?.hostExecForbidden,
-      opts?.hostExecForbiddenMessage,
     ),
     makeProcessList(dataDir),
     makeProcessLogs(dataDir),

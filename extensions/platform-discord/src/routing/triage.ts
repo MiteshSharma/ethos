@@ -38,8 +38,16 @@ export interface TriageResult {
   envelope?: InboundMessage;
   /** Reason for dropping; surfaced in logs when present. */
   drop?: 'no_text' | 'channel_mode';
-  /** Effective channel mode after overrides — surfaced for diagnostics. */
-  effectiveMode: ChannelMode;
+  /**
+   * Effective channel mode after overrides — surfaced for diagnostics.
+   *
+   * `string`, not `ChannelMode`: a stored override this build's enum cannot
+   * read is preserved verbatim by `ChannelOverrideStore` (rather than dropped
+   * and replaced by the answering default), so this reports the string that
+   * actually governed the decision. That is also where the operator learns
+   * about a bad override — the same value reaches `/ethos help`.
+   */
+  effectiveMode: string;
 }
 
 export async function triageMessage(
@@ -92,7 +100,21 @@ export async function triageMessage(
   };
 }
 
-export function resolveChannelMode(channel: string, ctx: TriageContext): ChannelMode {
+/**
+ * The chat's effective mode.
+ *
+ * Returns `string`, not `ChannelMode`. Three cases, and the middle one is the
+ * bug this shape exists to close:
+ *
+ *   - no override stored      → the configured default (unchanged).
+ *   - an override this build's enum REJECTS → the stored string verbatim,
+ *     which `evaluateChannelMode` does not recognise and therefore fails
+ *     closed on. The store used to drop such a record, making it
+ *     indistinguishable from "no override" and laundering it into the
+ *     answering `mention_only` default.
+ *   - a valid override        → its mode (unchanged).
+ */
+export function resolveChannelMode(channel: string, ctx: TriageContext): string {
   // `.mode` — the shared store indexes `{ mode, regexPattern? }`, where
   // Discord's own copy indexed a bare mode.
   const override = ctx.channelOverrides?.get(channel);

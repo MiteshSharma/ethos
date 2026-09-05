@@ -3,6 +3,8 @@ import type {
   ExecChunk,
   ExecOpts,
   ExecutionBackend,
+  ExecutionRoute,
+  ExecutionRouter,
   PersonalityConfig,
   Tool,
   ToolResult,
@@ -107,15 +109,11 @@ function withExitCode(body: string, budgetChars: number): string {
 // ---------------------------------------------------------------------------
 
 function createRunCodeTool(
-  backend: ExecutionBackend | undefined,
-  personality: PersonalityConfig | undefined,
+  route: ExecutionRouter,
+  backendWired: boolean,
+  routed: boolean,
+  staticBackend: ExecutionBackend | undefined,
 ): Tool {
-  // Remoteness is a property OF the backend, never a flag passed beside it. An
-  // independently-settable boolean can disagree with the backend actually
-  // wired, and both consequences are silent: the capability ledger names the
-  // wrong binary, and the host `ctx.workingDir` goes to the remote as a remote
-  // path (D8). Deriving it here means the two cannot come apart.
-  const remoteBackend = backend?.name === 'ssh';
   return {
     name: 'run_code',
     description:
@@ -135,13 +133,28 @@ function createRunCodeTool(
       // runtime's: `docker` for the container posture, `ssh` when execution is
       // routed to a remote target. Declaring `docker` while running `ssh` would
       // put a false entry in the capability ledger.
-      process: { allowedBinaries: remoteBackend ? ['ssh'] : ['docker'] },
+      //
+      // `capabilities` is one static declaration per tool instance, but the
+      // route is per turn, so under per-turn routing the honest entry is every
+      // binary this tool can spawn on this host for ANY personality — the
+      // ledger says "one of these, depending on whose turn it is" rather than
+      // naming one and being wrong on the other's turn. A single static route
+      // still names exactly the one binary it will use.
+      process: {
+        allowedBinaries: routed
+          ? ['docker', 'ssh']
+          : staticBackend?.name === 'ssh'
+            ? ['ssh']
+            : ['docker'],
+      },
     },
-    // Sync gate per the Tool contract: report available when a backend is
-    // wired. The async daemon liveness check happens in execute(), which
-    // returns `not_available` if the backend is actually down.
+    // Sync gate per the Tool contract, and it has NO turn context — so it
+    // answers the process-level question ("can this deployment route code
+    // execution at all"), not the per-personality one. The per-turn truth is
+    // enforced in execute(), which returns `not_available` with the posture's
+    // own reason. The async daemon liveness check also happens there.
     isAvailable() {
-      return backend !== undefined;
+      return backendWired;
     },
     schema: {
       type: 'object',
@@ -178,6 +191,16 @@ function createRunCodeTool(
           code: 'input_invalid',
         };
       }
+      // The turn's route. run_code never runs on the host, so only the backend
+      // and the personality whose `fs_reach` derives the mounts are read here.
+      const { backend, personality } = await route(ctx.personalityId);
+      // Remoteness is a property OF the backend, never a flag passed beside it.
+      // An independently-settable boolean can disagree with the backend
+      // actually resolved, and both consequences are silent: the framed RPC
+      // path would be attempted against a backend that has none, and the host
+      // `ctx.workingDir` would go to the remote as a remote path (D8).
+      const remoteBackend = backend?.name === 'ssh';
+
       // No host fallback: if the backend is absent or unavailable, run_code is
       // simply not available (it never executes on the host). The check runs on
       // EVERY invocation — the backend decides what to cache, and the ssh
@@ -328,13 +351,12 @@ interface CommandToolOpts {
 
 function makeCommandTool(
   opts: CommandToolOpts,
-  backend: ExecutionBackend | undefined,
-  personality: PersonalityConfig | undefined,
-  hostExecForbidden: boolean,
-  hostExecForbiddenMessage: string,
+  route: ExecutionRouter,
+  routed: boolean,
+  staticBackend: ExecutionBackend | undefined,
 ): Tool {
   // Derived from the backend, not passed beside it — see `createRunCodeTool`.
-  const remoteBackend = backend?.name === 'ssh';
+  const staticRemote = staticBackend?.name === 'ssh';
   return {
     name: opts.name,
     description: opts.description,
@@ -345,7 +367,23 @@ function makeCommandTool(
       // The binary this tool spawns on THIS host: the backend's, or `bash` when
       // it runs on the host itself. `docker` while routed over ssh would be a
       // false entry in the capability ledger.
-      process: { allowedBinaries: remoteBackend ? ['ssh'] : backend ? ['docker'] : ['bash'] },
+      //
+      // Under per-turn routing the entry must cover every binary any turn could
+      // reach, because `capabilities` is static per tool instance and the route
+      // is not. Naming only the boot personality's binary is not merely a false
+      // ledger entry here: `allowedBinaries` builds `ctx.scopedProcess`, so a
+      // ledger reading `['docker']` would make the host path below fail with
+      // BINARY_NOT_ALLOWED for a `local`-posture personality that is entitled
+      // to run. A single static route still names exactly its one binary.
+      process: {
+        allowedBinaries: routed
+          ? ['bash', 'docker', 'ssh']
+          : staticRemote
+            ? ['ssh']
+            : staticBackend
+              ? ['docker']
+              : ['bash'],
+      },
     },
     schema: {
       type: 'object',
@@ -362,6 +400,15 @@ function makeCommandTool(
     },
     async execute(args, ctx): Promise<ToolResult> {
       const { command = opts.defaultCommand, cwd } = args as { command?: string; cwd?: string };
+
+      // The turn's route — backend, the personality whose `fs_reach` derives
+      // the mounts, and the refusal wording, all from ONE personality.
+      const { backend, personality, hostExecForbidden, hostExecForbiddenMessage } = await route(
+        ctx.personalityId,
+      );
+      // Derived from the backend, not passed beside it — see `createRunCodeTool`.
+      const remoteBackend = backend?.name === 'ssh';
+
       // D8 — the host's `ctx.workingDir` is NEVER sent to a remote backend: it
       // names a directory on THIS machine, and on the remote it is either absent
       // or a different directory that happens to share the name. Omitting it
@@ -415,7 +462,11 @@ function makeCommandTool(
       // Host execution forbidden: the posture requires a sandbox/remote backend
       // that is not wired, and the constitution forbids the host fallback (F1).
       if (hostExecForbidden) {
-        return { ok: false, error: hostExecForbiddenMessage, code: 'not_available' as const };
+        return {
+          ok: false,
+          error: hostExecForbiddenMessage ?? DEFAULT_HOST_EXEC_FORBIDDEN,
+          code: 'not_available' as const,
+        };
       }
 
       // Local path (posture local/none): host ScopedProcess execution.
@@ -461,10 +512,9 @@ function makeCommandTool(
 }
 
 function createRunTestsTool(
-  backend: ExecutionBackend | undefined,
-  personality: PersonalityConfig | undefined,
-  hostExecForbidden: boolean,
-  hostExecForbiddenMessage: string,
+  route: ExecutionRouter,
+  routed: boolean,
+  staticBackend: ExecutionBackend | undefined,
 ): Tool {
   return makeCommandTool(
     {
@@ -477,18 +527,16 @@ function createRunTestsTool(
       failurePrefix: (code) => `Tests failed (code ${code}):`,
       emptySuccess: '(tests passed with no output)',
     },
-    backend,
-    personality,
-    hostExecForbidden,
-    hostExecForbiddenMessage,
+    route,
+    routed,
+    staticBackend,
   );
 }
 
 function createLintTool(
-  backend: ExecutionBackend | undefined,
-  personality: PersonalityConfig | undefined,
-  hostExecForbidden: boolean,
-  hostExecForbiddenMessage: string,
+  route: ExecutionRouter,
+  routed: boolean,
+  staticBackend: ExecutionBackend | undefined,
 ): Tool {
   return makeCommandTool(
     {
@@ -501,10 +549,9 @@ function createLintTool(
       failurePrefix: () => 'Lint failed:',
       emptySuccess: '(no lint issues)',
     },
-    backend,
-    personality,
-    hostExecForbidden,
-    hostExecForbiddenMessage,
+    route,
+    routed,
+    staticBackend,
   );
 }
 
@@ -513,6 +560,20 @@ function createLintTool(
 // ---------------------------------------------------------------------------
 
 export function createCodeTools(opts?: {
+  /**
+   * Per-turn route resolution. When present it is the ONLY source of the
+   * backend / personality / refusal — the static fields below are then ignored
+   * for execution, because two answers to "what runs this command" is exactly
+   * the disagreement this seam exists to remove.
+   */
+  route?: ExecutionRouter;
+  /**
+   * Whether a code-execution backend is wired in this PROCESS — the answer
+   * `run_code.isAvailable()` gives. That gate is sync and has no turn context,
+   * so it cannot answer per personality; `execute()` gives the per-turn truth.
+   * Defaults to `backend !== undefined`, so the static form is unchanged.
+   */
+  backendWired?: boolean;
   backend?: ExecutionBackend;
   personality?: PersonalityConfig;
   /** Refuse host execution when the posture requires a sandbox/remote but none is wired. */
@@ -523,11 +584,18 @@ export function createCodeTools(opts?: {
    */
   hostExecForbiddenMessage?: string;
 }): Tool[] {
-  const hostExecForbidden = opts?.hostExecForbidden ?? false;
-  const message = opts?.hostExecForbiddenMessage ?? DEFAULT_HOST_EXEC_FORBIDDEN;
+  const staticRoute: ExecutionRoute = {
+    ...(opts?.backend !== undefined ? { backend: opts.backend } : {}),
+    ...(opts?.personality !== undefined ? { personality: opts.personality } : {}),
+    hostExecForbidden: opts?.hostExecForbidden ?? false,
+    hostExecForbiddenMessage: opts?.hostExecForbiddenMessage ?? DEFAULT_HOST_EXEC_FORBIDDEN,
+  };
+  const routed = opts?.route !== undefined;
+  const route: ExecutionRouter = opts?.route ?? (() => Promise.resolve(staticRoute));
+  const backendWired = opts?.backendWired ?? opts?.backend !== undefined;
   return [
-    createRunCodeTool(opts?.backend, opts?.personality),
-    createRunTestsTool(opts?.backend, opts?.personality, hostExecForbidden, message),
-    createLintTool(opts?.backend, opts?.personality, hostExecForbidden, message),
+    createRunCodeTool(route, backendWired, routed, opts?.backend),
+    createRunTestsTool(route, routed, opts?.backend),
+    createLintTool(route, routed, opts?.backend),
   ];
 }

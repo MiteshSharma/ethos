@@ -132,14 +132,18 @@ describe('ChannelOverrideStore (shared core store, Slack binding)', () => {
     expect(replay.get('C1')).toEqual({ mode: 'observe' });
   });
 
-  it("rejects a mode Slack's enum does not know, rather than storing it", async () => {
+  it("keeps a mode Slack's enum does not know, rather than dropping it", async () => {
+    // Not adopted as a valid Slack mode — `evaluateChannelMode` still refuses
+    // to answer or record on it — but kept, so the adapter can tell it apart
+    // from "no override stored" and does not substitute the ANSWERING
+    // `mention_only` default.
     const storage = memStorage();
     const line = JSON.stringify({ channel: 'C1', mode: 'regex_match', updatedAt: 1 });
     await storage.write('/slack/bot-a/channel-overrides.jsonl', `${line}\n`);
 
     const store = new ChannelOverrideStore(storage, BOT_DIR, ChannelModeSchema);
     await store.load();
-    expect(store.get('C1')).toBeUndefined();
+    expect(store.get('C1')).toEqual({ mode: 'regex_match' });
   });
 });
 

@@ -493,7 +493,11 @@ export class TelegramAdapter
     text: string;
   }): { shouldReply: boolean; shouldRecord: boolean } {
     const override = this.channelOverrides?.get(input.chatIdStr);
-    const channelMode: ChannelMode =
+    // `string`, not `ChannelMode`: a stored override this build's enum cannot
+    // read is preserved verbatim by the shared store rather than dropped, so
+    // it reaches `evaluateChannelMode` and fails closed there instead of
+    // being replaced by the answering default.
+    const channelMode: string =
       override?.mode ?? this.config.defaultChannelMode ?? DEFAULT_CHANNEL_MODE;
     const hasBotPosted =
       input.threadId !== undefined && this.threadState !== undefined

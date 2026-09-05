@@ -1,10 +1,12 @@
-import type { Binding, ChannelMode } from '../config';
+import type { Binding } from '../config';
 import { context, divider, header, type SlackBlock, section } from './shared';
 
 export function helpBlocks(input: {
   binding: Binding;
   channel: string;
-  channelMode: ChannelMode;
+  /** `string`, not `ChannelMode`: an unreadable stored override is rendered
+   *  verbatim so the operator can see the value that silenced the channel. */
+  channelMode: string;
 }): SlackBlock[] {
   const { binding, channel, channelMode } = input;
   return [

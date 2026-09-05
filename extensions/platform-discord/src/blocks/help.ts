@@ -1,10 +1,12 @@
-import type { Binding, ChannelMode } from '../config';
+import type { Binding } from '../config';
 import { type DiscordEmbed, embed } from './shared';
 
 export function helpEmbed(input: {
   binding: Binding;
   channelId: string;
-  channelMode: ChannelMode;
+  /** `string`, not `ChannelMode`: an unreadable stored override is rendered
+   *  verbatim so the operator can see the value that silenced the channel. */
+  channelMode: string;
 }): DiscordEmbed {
   const { binding, channelMode } = input;
   return embed({

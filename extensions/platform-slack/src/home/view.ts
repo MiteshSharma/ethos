@@ -23,7 +23,7 @@ import {
   section,
   truncate,
 } from '../blocks/shared';
-import type { Binding, ChannelMode } from '../config';
+import type { Binding } from '../config';
 
 /** `action_id` for the home tab's Refresh button. */
 export const HOME_REFRESH_ACTION_ID = 'home:refresh';
@@ -85,7 +85,9 @@ export interface HomeViewInput {
   /** Last N MEMORY.md entries. Empty when the reader isn't wired. */
   memorySnippets: string[];
   /** Channels the bot is in, with their current mode. */
-  channelModes: Array<[string, ChannelMode]>;
+  /** Modes as stored — a value this build's enum cannot read is listed
+   *  verbatim rather than hidden. */
+  channelModes: Array<[string, string]>;
   /** Pending clarifies for this user — rendered above sessions as
    *  "Waiting on you" so the user can answer without hunting the channel.
    *  Optional for back-compat: when omitted the section is hidden. */

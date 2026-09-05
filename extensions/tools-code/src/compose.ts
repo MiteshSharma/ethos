@@ -1,4 +1,4 @@
-import type { ExecutionBackend, PersonalityConfig, Tool } from '@ethosagent/types';
+import type { ExecutionBackend, ExecutionRouter, PersonalityConfig, Tool } from '@ethosagent/types';
 import type { WiringContext } from '@ethosagent/wiring/types';
 import { createCodeTools } from './index';
 
@@ -9,6 +9,8 @@ export interface CodeToolsCompose {
 export function compose(
   _ctx: WiringContext,
   deps: {
+    route?: ExecutionRouter;
+    backendWired?: boolean;
     backend?: ExecutionBackend;
     personality?: PersonalityConfig;
     hostExecForbidden?: boolean;
@@ -17,6 +19,8 @@ export function compose(
 ): CodeToolsCompose {
   return {
     tools: createCodeTools({
+      route: deps.route,
+      backendWired: deps.backendWired,
       backend: deps.backend,
       personality: deps.personality,
       hostExecForbidden: deps.hostExecForbidden,

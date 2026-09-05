@@ -4,15 +4,18 @@
 // adapter calls during `start()` and stashes for this handler.
 
 import type { App } from '@slack/bolt';
-import type { Binding, ChannelMode } from '../config';
+import type { Binding } from '../config';
 
 export interface MemberJoinedDeps {
   /** The bot's own Slack user id, e.g. `U0123ABCD`. Used to filter the
    *  `member_joined_channel` event so we only greet for the bot itself. */
   selfUserId: string | null;
   binding: Binding;
-  /** Resolves the active channel mode for a given channel id. */
-  resolveChannelMode: (channel: string) => ChannelMode;
+  /** Resolves the active channel mode for a given channel id. `string`, not
+   *  `ChannelMode`: a stored override this build's enum cannot read resolves
+   *  to the raw stored string, and the greeting names it rather than naming a
+   *  default that is not in force. */
+  resolveChannelMode: (channel: string) => string;
 }
 
 export function registerMemberEvents(app: App, deps: MemberJoinedDeps): void {

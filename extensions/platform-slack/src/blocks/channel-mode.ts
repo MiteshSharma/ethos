@@ -3,7 +3,10 @@ import { context, header, type SlackBlock, section } from './shared';
 
 export function channelModeShowBlocks(input: {
   channel: string;
-  mode: ChannelMode;
+  /** `string`, not `ChannelMode`: `/ethos channel-mode show` is where an
+   *  operator looks when a channel has gone quiet, so an unreadable stored
+   *  override is shown verbatim instead of as the default it is not. */
+  mode: string;
   isOverride: boolean;
 }): SlackBlock[] {
   const { channel, mode, isOverride } = input;

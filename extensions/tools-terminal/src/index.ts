@@ -1,6 +1,8 @@
 import type {
   ExecChunk,
   ExecutionBackend,
+  ExecutionRoute,
+  ExecutionRouter,
   PersonalityConfig,
   Tool,
   ToolResult,
@@ -45,23 +47,14 @@ async function drainExec(
 // ---------------------------------------------------------------------------
 
 /**
- * Build the terminal tool. When `backend` is injected (posture ≠ local/none)
- * the command runs through the backend's mount-confined `exec`; otherwise the
- * existing ScopedProcess host path is used unchanged.
+ * Build the terminal tool. The route is resolved PER CALL, from the turn's
+ * `ctx.personalityId` — the personality a turn runs as is not the one the
+ * process booted with (teams route every member through one loop, `/personality`
+ * switches the id on a loop already built). When the route carries a backend
+ * (posture ≠ local/none) the command runs through that backend's `exec`;
+ * otherwise the existing ScopedProcess host path is used unchanged.
  */
-function makeTerminalTool(
-  backend: ExecutionBackend | undefined,
-  personality: PersonalityConfig | undefined,
-  hostExecForbidden = false,
-  hostExecForbiddenMessage: string = DEFAULT_HOST_EXEC_FORBIDDEN,
-): Tool {
-  // Remoteness is a property OF the backend, never a flag passed beside it. An
-  // independently-settable boolean can disagree with the backend actually
-  // wired, and every consequence of that disagreement is silent: the host
-  // `ctx.workingDir` goes to the remote as a remote path (D8), and the
-  // capability ledger names the wrong binary. Deriving it here means the two
-  // cannot come apart.
-  const remoteBackend = backend?.name === 'ssh';
+function makeTerminalTool(route: ExecutionRouter): Tool {
   return {
     name: 'terminal',
     description:
@@ -98,6 +91,21 @@ function makeTerminalTool(
       };
 
       if (!command) return { ok: false, error: 'command is required', code: 'input_invalid' };
+
+      // The turn's route. Everything below reads from it, so the backend, the
+      // personality whose `fs_reach` derives the mounts, and the refusal wording
+      // cannot come from different personalities.
+      const { backend, personality, hostExecForbidden, hostExecForbiddenMessage } = await route(
+        ctx.personalityId,
+      );
+
+      // Remoteness is a property OF the backend, never a flag passed beside it.
+      // An independently-settable boolean can disagree with the backend
+      // actually resolved, and every consequence of that disagreement is
+      // silent: the host `ctx.workingDir` goes to the remote as a remote path
+      // (D8), and the capability ledger names the wrong binary. Deriving it
+      // here means the two cannot come apart.
+      const remoteBackend = backend?.name === 'ssh';
 
       // D8 — the host's `ctx.workingDir` is NEVER sent to a remote backend. It
       // names a directory on THIS machine; on the remote it is either absent
@@ -166,7 +174,11 @@ function makeTerminalTool(
       // no backend is available AND the constitution forbids the host fallback.
       // Refuse rather than silently run on the host (F1).
       if (hostExecForbidden) {
-        return { ok: false, error: hostExecForbiddenMessage, code: 'not_available' as const };
+        return {
+          ok: false,
+          error: hostExecForbiddenMessage ?? DEFAULT_HOST_EXEC_FORBIDDEN,
+          code: 'not_available' as const,
+        };
       }
 
       // Local path (posture local/none): unchanged ScopedProcess execution.
@@ -216,14 +228,49 @@ function makeTerminalTool(
   };
 }
 
+/**
+ * Turn a set of static options into a router that answers the same for every
+ * personality. That IS the honest route for a deployment with one personality,
+ * and for a directly constructed tool; it is not a second mechanism, because
+ * the tool reads a router either way.
+ *
+ * Deliberately not shared with `@ethosagent/tools-code` / `-process`, which
+ * carry the same six lines: a helper this small is not worth an
+ * extension-to-extension dependency, and `@ethosagent/types` holds no runtime
+ * code to put it in.
+ */
+function staticExecutionRouter(opts: {
+  backend?: ExecutionBackend;
+  personality?: PersonalityConfig;
+  hostExecForbidden?: boolean;
+  hostExecForbiddenMessage?: string;
+}): ExecutionRouter {
+  const route: ExecutionRoute = {
+    ...(opts.backend !== undefined ? { backend: opts.backend } : {}),
+    ...(opts.personality !== undefined ? { personality: opts.personality } : {}),
+    hostExecForbidden: opts.hostExecForbidden ?? false,
+    ...(opts.hostExecForbiddenMessage !== undefined
+      ? { hostExecForbiddenMessage: opts.hostExecForbiddenMessage }
+      : {}),
+  };
+  return () => Promise.resolve(route);
+}
+
 /** Local-posture terminal tool (no backend). Exported for tests. */
-export const terminalTool: Tool = makeTerminalTool(undefined, undefined);
+export const terminalTool: Tool = makeTerminalTool(staticExecutionRouter({}));
 
 // ---------------------------------------------------------------------------
 // Factory
 // ---------------------------------------------------------------------------
 
 export function createTerminalTools(opts?: {
+  /**
+   * Per-turn route resolution. When present it is the ONLY source of the
+   * backend/personality/refusal — the static fields below are ignored, because
+   * two answers to "what runs this command" is exactly the disagreement this
+   * seam exists to remove.
+   */
+  route?: ExecutionRouter;
   backend?: ExecutionBackend;
   personality?: PersonalityConfig;
   /** Refuse host execution when the posture requires a sandbox/remote but none is wired. */
@@ -234,14 +281,7 @@ export function createTerminalTools(opts?: {
    */
   hostExecForbiddenMessage?: string;
 }): Tool[] {
-  return [
-    makeTerminalTool(
-      opts?.backend,
-      opts?.personality,
-      opts?.hostExecForbidden,
-      opts?.hostExecForbiddenMessage,
-    ),
-  ];
+  return [makeTerminalTool(opts?.route ?? staticExecutionRouter(opts ?? {}))];
 }
 
 export { checkCommand, createTerminalGuardHook } from './guard';

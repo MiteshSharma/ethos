@@ -65,6 +65,12 @@ interface DeliverOptions {
   /** Stored `regex_match` pattern for chat 100, written to the override store. */
   regexPattern?: string;
   /**
+   * Mode written to chat 100's override record, when it must differ from the
+   * configured default — including a string Telegram's enum REJECTS, which is
+   * how the fail-closed case actually reaches production.
+   */
+  storedMode?: string;
+  /**
    * Raw value of Telegram's `date` field. Defaults to a real send time; the
    * point of overriding it is to drive the shapes grammy's types say cannot
    * occur but a wire payload can still carry.
@@ -78,13 +84,13 @@ async function mount(opts: DeliverOptions): Promise<InboundMessage[]> {
   for (const key of Object.keys(registeredHandlers)) delete registeredHandlers[key];
 
   let storage: Storage | undefined;
-  if (opts.regexPattern !== undefined) {
+  if (opts.regexPattern !== undefined || opts.storedMode !== undefined) {
     storage = new InMemoryStorage();
     const record = {
       channel: '100',
-      mode: opts.mode,
+      mode: opts.storedMode ?? opts.mode,
       updatedAt: 1,
-      regexPattern: opts.regexPattern,
+      ...(opts.regexPattern !== undefined && { regexPattern: opts.regexPattern }),
     };
     await storage.mkdir(`telegram/${BOT_KEY}`);
     await storage.write(OVERRIDES_FILE, `${JSON.stringify(record)}\n`);
@@ -424,5 +430,67 @@ describe('Telegram inbound — media on a record-only message', () => {
     expect(captured[0].recordOnly).toBe(false);
     expect(captured[0].attachments).toHaveLength(1);
     expect(mockApi.getFile).toHaveBeenCalledTimes(1);
+  });
+});
+
+// A stored mode this build cannot read, driven from the override file through
+// the real `bot.on('message')` handler.
+//
+// `evaluateChannelMode` fails closed on a mode it does not recognise, but
+// until the shared store KEPT such a record that branch was unreachable here:
+// the store dropped the line, `get()` returned `undefined` —
+// indistinguishable from "no override stored" — and `channelDecision`
+// substituted `defaultChannelMode`, which answers.
+describe('Telegram inbound — a stored mode this build cannot read', () => {
+  beforeEach(() => {
+    for (const key of Object.keys(registeredHandlers)) delete registeredHandlers[key];
+  });
+
+  /** Every shape that actually reaches disk, not one shape of nonsense. */
+  const UNREADABLE = [
+    'observe ', // trailing space
+    'Observe', // wrong case
+    'obserev', // typo
+    'silent_digest_only', // a mode a newer binary knows and this one does not
+    '', // empty
+  ];
+
+  for (const storedMode of UNREADABLE) {
+    it(`forwards nothing for an unmentioned group message under ${JSON.stringify(storedMode)}`, async () => {
+      const captured = await deliver({ mode: 'mention_only', storedMode });
+      expect(captured).toHaveLength(0);
+    });
+
+    it(`forwards nothing for an @mention under ${JSON.stringify(storedMode)}`, async () => {
+      // The dangerous case: under the answering default this is exactly what
+      // `mention_only` replies to.
+      const captured = await deliver({
+        mode: 'mention_only',
+        storedMode,
+        text: '@testbot are we on track?',
+      });
+      expect(captured).toHaveLength(0);
+      expect(mockApi.setMessageReaction).not.toHaveBeenCalled();
+    });
+  }
+
+  it('a DM is still a conversation — a bad override must not deafen the bot to its owner', async () => {
+    const captured = await deliver({ mode: 'mention_only', storedMode: 'obserev', isDm: true });
+    expect(captured).toHaveLength(1);
+    expect(captured[0].recordOnly).toBe(false);
+  });
+
+  // The two cases that must NOT change. An absent override is not the same as
+  // an override this build cannot read.
+  it('an ABSENT override still falls back to the configured default', async () => {
+    const captured = await deliver({ mode: 'all' });
+    expect(captured).toHaveLength(1);
+    expect(captured[0].recordOnly).toBe(false);
+  });
+
+  it('a VALID stored override behaves exactly as before', async () => {
+    const captured = await deliver({ mode: 'mention_only', storedMode: 'observe' });
+    expect(captured).toHaveLength(1);
+    expect(captured[0].recordOnly).toBe(true);
   });
 });

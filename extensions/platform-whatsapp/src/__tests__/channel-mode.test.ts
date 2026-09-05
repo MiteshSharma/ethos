@@ -321,6 +321,100 @@ describe('per-chat overrides', () => {
   });
 });
 
+// A stored mode this build cannot read, driven from the override file through
+// the real `messages.upsert` handler.
+//
+// `evaluateChannelMode` fails closed on a mode it does not recognise, but
+// until the shared store KEPT such a record that branch was unreachable here:
+// the store dropped the line, `get()` returned `undefined` —
+// indistinguishable from "no override stored" — and the gate substituted
+// `defaultMode`, which for this adapter is `all`.
+describe('a stored mode this build cannot read', () => {
+  /** Every shape that actually reaches disk, not one shape of nonsense. */
+  const UNREADABLE = [
+    'observe ', // trailing space
+    'Observe', // wrong case
+    'obserev', // typo
+    'silent_digest_only', // a mode a newer binary knows and this one does not
+    '', // empty
+  ];
+
+  const storedAs = (mode: string) =>
+    fakeStorage({
+      'whatsapp/bot1/channel-overrides.jsonl': `${JSON.stringify({
+        channel: GROUP,
+        mode,
+        updatedAt: 1,
+      })}\n`,
+    });
+
+  for (const mode of UNREADABLE) {
+    it(`forwards nothing for an unmentioned group message under ${JSON.stringify(mode)}`, async () => {
+      const { received, deliver } = await harness({ defaultMode: 'all', storage: storedAs(mode) });
+
+      await deliver(textMessage(GROUP, 'hello room'));
+
+      expect(received).toHaveLength(0);
+      expect(reactions()).toEqual([]);
+    });
+
+    it(`forwards nothing for an @mention under ${JSON.stringify(mode)}`, async () => {
+      // The dangerous case: an explicit mention is what every answering mode
+      // replies to.
+      const { received, deliver } = await harness({
+        defaultMode: 'mention_only',
+        storage: storedAs(mode),
+      });
+
+      await deliver(
+        mentionChipMessage(GROUP, 'please handle this', [`${BOT_NUMBER}@s.whatsapp.net`]),
+      );
+
+      expect(received).toHaveLength(0);
+      expect(reactions()).toEqual([]);
+    });
+  }
+
+  it('a DM is still a conversation — a bad override must not deafen the bot to its owner', async () => {
+    const storage = fakeStorage({
+      'whatsapp/bot1/channel-overrides.jsonl': `${JSON.stringify({
+        channel: DM,
+        mode: 'obserev',
+        updatedAt: 1,
+      })}\n`,
+    });
+    const { received, deliver } = await harness({ defaultMode: 'mention_only', storage });
+
+    await deliver(textMessage(DM, 'hello'));
+
+    expect(received).toHaveLength(1);
+    expect(received[0]?.recordOnly).toBe(false);
+  });
+
+  // The two cases that must NOT change. An absent override is not the same as
+  // an override this build cannot read.
+  it('an ABSENT override still falls back to the configured default', async () => {
+    const { received, deliver } = await harness({ defaultMode: 'all', storage: fakeStorage({}) });
+
+    await deliver(textMessage(GROUP, 'hello room'));
+
+    expect(received).toHaveLength(1);
+    expect(received[0]?.recordOnly).toBe(false);
+  });
+
+  it('a VALID stored override behaves exactly as before', async () => {
+    const { received, deliver } = await harness({
+      defaultMode: 'all',
+      storage: storedAs('observe'),
+    });
+
+    await deliver(textMessage(GROUP, 'hello room'));
+
+    expect(received).toHaveLength(1);
+    expect(received[0]?.recordOnly).toBe(true);
+  });
+});
+
 describe('sentAt', () => {
   it('is the platform send time in milliseconds, not arrival time', async () => {
     const { received, deliver } = await harness({ defaultMode: 'all' });

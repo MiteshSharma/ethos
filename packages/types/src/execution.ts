@@ -237,6 +237,50 @@ export interface ExecutionBackend {
   attest?(): SandboxAttestation;
 }
 
+/**
+ * Everything an execution-bearing tool needs to run ONE command, resolved for
+ * the personality whose turn it is.
+ *
+ * The four fields travel together because they are one decision: which backend
+ * (if any) runs the command, whose `fs_reach` derives its mounts and network
+ * mode, whether the host fallback is permitted, and — when it is not — in whose
+ * words the refusal is spoken. Passing them separately is what let a `docker`
+ * backend be wired beside another personality's refusal message.
+ */
+export interface ExecutionRoute {
+  /** The backend to run through. Absent → host `ScopedProcess`, or a refusal. */
+  backend?: ExecutionBackend;
+  /**
+   * The personality this route belongs to. Handed to `ExecOpts.personality`, so
+   * the container's mounts and network mode follow THIS personality's
+   * `fs_reach` / `safety.network` rather than whichever one the process booted
+   * with.
+   */
+  personality?: PersonalityConfig;
+  /** Refuse host execution: the posture requires a sandbox/remote that is not wired. */
+  hostExecForbidden: boolean;
+  /** Why, in the posture's own words. Absent → the tool's built-in Docker sentence. */
+  hostExecForbiddenMessage?: string;
+}
+
+/**
+ * Resolve the execution route for the turn's personality (`ToolContext.personalityId`).
+ *
+ * A personality is not fixed for the life of a process: a team routes every
+ * member's turn through one loop, the CLI `/personality` command switches the
+ * id on the loop it already built, and web-api sends any personality's turn to
+ * the loop composed for the deployment default. Freezing the route at
+ * composition therefore ran one personality's commands under another's posture
+ * — a member declaring `execution: remote` on the coordinator's local backend,
+ * and, booted the other way round, every other personality's commands on the
+ * remote host. Same shape and same reason as the per-call `fs_reach` and
+ * network-policy resolvers in wiring: hold the registry, take the id per call.
+ *
+ * `undefined` means the caller has no turn personality (a directly constructed
+ * tool); the router answers with the deployment's own default route.
+ */
+export type ExecutionRouter = (personalityId: string | undefined) => Promise<ExecutionRoute>;
+
 export interface ExecutionBackendConfig {
   /** Runtime image refs pinned by @sha256: digest (review #2). Keyed by logical runtime name. */
   images?: Record<string, string>;

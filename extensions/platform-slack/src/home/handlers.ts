@@ -15,7 +15,7 @@ import type { SessionSummary } from '../blocks/session';
 import type { KanbanReader } from '../commands/kanban';
 import type { MemoryReader } from '../commands/memory';
 import { extractRecentEntries } from '../commands/memory';
-import type { Binding, ChannelMode } from '../config';
+import type { Binding } from '../config';
 import { buildHomeView, HOME_REFRESH_ACTION_ID, type SlackHomeView } from './view';
 
 /** Surface for pending clarifies — implemented by `SlackClarifySurface`.
@@ -42,7 +42,7 @@ export interface SessionReader {
  *  own copy indexed a bare mode; the home view still wants channel→mode, so
  *  the shape is narrowed once here rather than in the view. */
 interface ChannelModeSource {
-  entries(): Array<[string, { mode: ChannelMode }]>;
+  entries(): Array<[string, { mode: string }]>;
 }
 
 export interface HomeEventDeps {
