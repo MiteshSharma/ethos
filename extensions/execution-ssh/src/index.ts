@@ -1,4 +1,7 @@
 import { type ChildProcess, spawn } from 'node:child_process';
+import { accessSync, constants as fsConstants } from 'node:fs';
+import { homedir } from 'node:os';
+import { dirname, join } from 'node:path';
 import type {
   ExecChunk,
   ExecOpts,
@@ -81,12 +84,19 @@ export class SshDestinationInvalidError extends Error {
  * NOTHING, so every connection fails. That is safe and useless, and it fails at
  * the first tool call with an ssh error instead of at boot with this one.
  *
- * {@link sshKnownHostsError} is the pre-spawn layer; `packages/config` carries
- * the other, at boot. KNOWN LIMIT: the check is LEXICAL — it refuses the
- * spellings an operator would actually write, not every path that happens to
- * resolve to a null device (`/dev/./null`, a symlink to it). Deciding that
- * needs a filesystem oracle, which would put raw `node:fs` behind a personality
- * boundary for no gain against an operator who is circumventing on purpose.
+ * This error covers BOTH pre-spawn known-hosts gates, because they are the same
+ * failure told two ways:
+ *
+ *  - {@link sshKnownHostsError}, lexical, on the configured VALUE — `none` and
+ *    the null devices. `packages/config` carries a copy of this one, at boot.
+ *  - {@link sshKnownHostsUnwritableError}, on the effective DESTINATION — a
+ *    perfectly ordinary path that this machine cannot actually write.
+ *
+ * KNOWN LIMIT: the lexical half stays lexical — it refuses the spellings an
+ * operator would actually write, not every path that happens to resolve to a
+ * null device (`/dev/./null`, a symlink to it). `/dev/null` is writable, so the
+ * probe waves it through and the lexical rule is what catches it; neither
+ * pretends to defend against an operator circumventing on purpose.
  */
 export class SshKnownHostsInvalidError extends Error {
   readonly code = 'SSH_KNOWN_HOSTS_INVALID';
@@ -331,6 +341,133 @@ export function sshKnownHostsError(ssh: SshTarget): string | null {
   return null;
 }
 
+/**
+ * OpenSSH's default `UserKnownHostsFile`, and where a newly learned key lands
+ * when the operator sets no `knownHostsFile` — the common case, and the one
+ * most likely to be unwritable in a container. ssh_config(5): "The default is
+ * ~/.ssh/known_hosts, ~/.ssh/known_hosts2". A learned key is written to the
+ * FIRST file listed, so `known_hosts2` is a read-only fallback and never this
+ * probe's subject.
+ */
+const DEFAULT_KNOWN_HOSTS = '~/.ssh/known_hosts';
+
+type Writability = 'writable' | 'unwritable' | 'missing';
+
+function writability(path: string): Writability {
+  try {
+    accessSync(path, fsConstants.W_OK);
+    return 'writable';
+  } catch (err) {
+    if (err instanceof Error && 'code' in err && err.code === 'ENOENT') return 'missing';
+    return 'unwritable';
+  }
+}
+
+/**
+ * `path` with a leading `~` resolved, or `null` when this process cannot say
+ * what the path is.
+ *
+ * `UserKnownHostsFile` also accepts the `%`-tokens and `${ENV}` expansions
+ * ssh_config(5) describes, and `~user` needs a passwd lookup. None of those can
+ * be resolved here, so the probe DECLINES rather than guessing at a path that
+ * may not be the one ssh writes — refusing a target on a mis-resolved path
+ * would be worse than the gap it closes.
+ */
+function expandHome(path: string): string | null {
+  if (path.includes('%') || path.includes('$')) return null;
+  if (path === '~') return homedir();
+  if (path.startsWith('~/')) return join(homedir(), path.slice(2));
+  if (path.startsWith('~')) return null;
+  return path;
+}
+
+function knownHostsUnwritableMessage(file: string, problem: string, fix: string): string {
+  return (
+    `execution.ssh: with strictHostKeys 'accept-new' the learned host key is written to ` +
+    `'${file}', but ${problem}. ssh WARNS AND CONTINUES when it cannot record a key, so ` +
+    'every connection would be a first connection and would accept whatever key is ' +
+    `offered. ${fix}, or set execution.ssh.strictHostKeys: yes with the key already in place.`
+  );
+}
+
+/**
+ * Why the effective known-hosts destination cannot PERSIST a learned key on
+ * this machine, or `null` when it can.
+ *
+ * {@link sshKnownHostsError} refuses the values that keep nothing by
+ * construction. This is the other half of the same promise: `accept-new` means
+ * "learn the key on first sight, refuse it if it ever changes", and the second
+ * clause is bought entirely by the write succeeding. It often does not — and
+ * OpenSSH does not treat that as an error. Verified against OpenSSH 9.6p1
+ * against a real sshd, for an unwritable destination and for a missing parent
+ * directory alike:
+ *
+ *     Failed to add the host to the list of known hosts (…/known_hosts).
+ *     REMOTE_OK
+ *     exit=0
+ *
+ * The remote command RAN, ssh exited 0, and nothing was pinned. Repeat that and
+ * every connection is a first connection: silent MITM exposure, while
+ * `config.yaml` and the character sheet both say the host key is pinned. So the
+ * refusal has to happen BEFORE ssh is spawned, not be inferred afterwards from
+ * a warning line buried in the tool's stderr.
+ *
+ * Only `accept-new` is probed. Under `yes` nothing is ever learned — an unknown
+ * host is refused outright — so whether a key COULD be written is irrelevant,
+ * and a deliberately read-only known_hosts is a legitimate `yes` deployment
+ * this must not break.
+ *
+ * A file that does not exist yet is fine and must stay fine: `accept-new`
+ * creates it on the first connection, which is exactly how an operator adopts a
+ * dedicated `knownHostsFile`. What must hold in that case is the DIRECTORY.
+ * Same OpenSSH 9.6p1 run: a missing directory is not created and the write
+ * fails — with one exception, `~/.ssh` itself, which ssh makes for itself
+ * (`hostfile_create_user_ssh_dir`, and the "Could not create directory" string
+ * is in the shipped binary) and only there. A missing `~/.ssh` therefore defers
+ * to the home directory, so a fresh container is not refused for a directory
+ * ssh would have created.
+ *
+ * Deliberately NOT duplicated into `packages/config` the way the lexical check
+ * is. That one refuses a VALUE, which is as true at boot as it ever will be;
+ * this one reads the filesystem, which a `chmod`, a mount, or a container's
+ * first run can change under a process that is already up.
+ */
+export function sshKnownHostsUnwritableError(ssh: SshTarget): string | null {
+  if ((ssh.strictHostKeys ?? 'accept-new') !== 'accept-new') return null;
+
+  const configured = ssh.knownHostsFile?.split(/\s+/).filter((p) => p.length > 0)[0];
+  const file = expandHome(configured ?? DEFAULT_KNOWN_HOSTS);
+  if (file === null) return null;
+
+  const fileState = writability(file);
+  if (fileState === 'writable') return null;
+  if (fileState === 'unwritable') {
+    return knownHostsUnwritableMessage(
+      file,
+      'that file is not writable',
+      `Make it writable (chmod u+w '${file}')`,
+    );
+  }
+
+  const parent = dirname(file);
+  const sshDir = join(homedir(), '.ssh');
+  const dir = parent === sshDir && writability(parent) === 'missing' ? homedir() : parent;
+  const dirState = writability(dir);
+  if (dirState === 'writable') return null;
+  if (dirState === 'missing') {
+    return knownHostsUnwritableMessage(
+      file,
+      `its directory '${dir}' does not exist and ssh will not create it`,
+      `Create it (mkdir -p '${dir}')`,
+    );
+  }
+  return knownHostsUnwritableMessage(
+    file,
+    `its directory '${dir}' is not writable`,
+    `Make it writable (chmod u+w '${dir}')`,
+  );
+}
+
 function sshDestination(ssh: SshTarget): string {
   return ssh.user ? `${ssh.user}@${ssh.host}` : ssh.host;
 }
@@ -341,12 +478,37 @@ function sshDestination(ssh: SshTarget): string {
  *
  * `-o BatchMode=yes` — never prompt; a passphrase prompt on a background exec
  * hangs forever. `-T` — no pseudo-tty, so remote output is not line-disciplined
- * and stdout/stderr stay separable. Host keys default to `accept-new` (TOFU:
+ * and stdout/stderr stay separable.
+ *
+ * `-o PermitLocalCommand=no` — the operator's own `~/.ssh/config` is TRUSTED
+ * input, but it is also the one place where a command this backend calls REMOTE
+ * can be made to run locally without anything here being wrong. A `Host`/`Match`
+ * block matching the destination may set `LocalCommand`, which ssh runs ON THE
+ * ETHOS HOST with the user's shell after every successful connection. This pins
+ * it off: a command-line `-o` is read before any config file and ssh keeps the
+ * FIRST value it obtains for an option, so a `PermitLocalCommand yes` in the
+ * config file cannot win. Verified against OpenSSH 9.6p1 — with a config file
+ * setting `PermitLocalCommand yes`, `ssh -F cfg -o PermitLocalCommand=no -G`
+ * resolves `permitlocalcommand no`.
+ *
+ * It closes `LocalCommand` and the `!command` escape and NOTHING ELSE
+ * (ssh_config(5): "Allow local command execution via the LocalCommand option or
+ * using the !command escape sequence in ssh(1)"). `ProxyCommand`, `ProxyJump`
+ * and `Match exec` still execute on the Ethos host and are still reachable from
+ * the operator's config. That is deliberate: `-F none` would close them by
+ * disabling the config file wholesale, taking the jump hosts and host aliases a
+ * large share of real deployments need in order to reach anything. The residue
+ * is documented for operators in `docs/content/using/how-to/run-tools-over-ssh.md`
+ * rather than papered over here.
+ *
+ * Host keys default to `accept-new` (TOFU:
  * unknown hosts are learned, CHANGED ones still refused); `strictHostKeys` is
  * forwarded verbatim when the operator set it. The "changed ones refused" half
  * only holds if the learned key is KEPT, so `knownHostsFile` is refused before
  * this point when it names a destination that keeps nothing — see
- * {@link sshKnownHostsError}. There is no argv-level neutralisation for that
+ * {@link sshKnownHostsError} — and when the effective destination is one this
+ * machine cannot write (see {@link sshKnownHostsUnwritableError}). There is no
+ * argv-level neutralisation for that
  * the way `--` neutralises a hostile destination: `UserKnownHostsFile=none`
  * means exactly what it says.
  *
@@ -374,6 +536,8 @@ export function buildSshArgs(
   const args = [
     '-o',
     'BatchMode=yes',
+    '-o',
+    'PermitLocalCommand=no',
     '-o',
     `ConnectTimeout=${connectTimeoutSec}`,
     '-T',
@@ -622,7 +786,7 @@ export class SshExecutionBackend implements ExecutionBackend {
     if (!ssh?.host) throw new SshHostMissingError();
     const invalid = sshDestinationError(ssh);
     if (invalid) throw new SshDestinationInvalidError(invalid);
-    const knownHosts = sshKnownHostsError(ssh);
+    const knownHosts = sshKnownHostsError(ssh) ?? sshKnownHostsUnwritableError(ssh);
     if (knownHosts) throw new SshKnownHostsInvalidError(knownHosts);
     return ssh;
   }
@@ -639,8 +803,12 @@ export class SshExecutionBackend implements ExecutionBackend {
       return Promise.resolve({ ok: false, error: new SshHostMissingError().message });
     }
     // Mirrors the missing-host guard rather than throwing: `isAvailable` must
-    // still answer false (uncached) for an unusable target, not reject.
-    const invalid = sshDestinationError(ssh) ?? sshKnownHostsError(ssh);
+    // still answer false (uncached) for an unusable target, not reject. The
+    // writability probe belongs here too — a probe connection under
+    // `accept-new` is itself a first connection that learns and pins a key, so
+    // it must not run against a destination that cannot keep one.
+    const invalid =
+      sshDestinationError(ssh) ?? sshKnownHostsError(ssh) ?? sshKnownHostsUnwritableError(ssh);
     if (invalid) return Promise.resolve({ ok: false, error: invalid });
     const args = buildSshArgs(ssh, ['true'], PROBE_CONNECT_TIMEOUT_SEC);
     return new Promise((resolve) => {

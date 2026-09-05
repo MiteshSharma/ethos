@@ -1,8 +1,11 @@
 import type { ChildProcess } from 'node:child_process';
 import { EventEmitter } from 'node:events';
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { runExecutionConformance } from '@ethosagent/core';
 import type { ExecChunk, Logger, PersonalityConfig, SecretsResolver } from '@ethosagent/types';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('node:child_process', () => ({ spawn: vi.fn() }));
 
@@ -17,6 +20,7 @@ import {
   SshTransportError,
   sshDestinationError,
   sshKnownHostsError,
+  sshKnownHostsUnwritableError,
 } from '../index';
 
 const secretsStub: SecretsResolver = {
@@ -137,18 +141,64 @@ async function collect(stream: AsyncIterable<ExecChunk>): Promise<ExecChunk[]> {
   return chunks;
 }
 
+/**
+ * A throwaway `$HOME` with a writable `.ssh/`, for the duration of every test.
+ *
+ * The known-hosts writability probe reads the real filesystem, and with
+ * `knownHostsFile` unset it resolves ssh's own default — `~/.ssh/known_hosts`.
+ * Left pointing at the developer's or the runner's actual home, every test that
+ * reaches `exec` or `probe` would pass or fail on whatever that machine happens
+ * to look like. Same save/restore shape as
+ * `extensions/llm-codex/src/__tests__/token-store.test.ts`.
+ */
+let tmpHome = '';
+let savedHome: string | undefined;
+/** Directories a test made read-only, restored before the tree is removed. */
+const restorePerms: string[] = [];
+
+/**
+ * `chmod` means nothing to uid 0 — a 0500 directory is still writable for root,
+ * so the permission-based cases assert nothing there and are skipped rather
+ * than reported as passing. The missing-directory cases below cover the same
+ * refusal for any uid.
+ */
+const asUnprivilegedUser = process.getuid?.() === 0 ? it.skip : it;
+
 beforeEach(() => {
   spawned.length = 0;
   debugLines.length = 0;
   vi.mocked(spawn).mockReset();
   useReplies([{ code: 0 }]);
+  savedHome = process.env.HOME;
+  tmpHome = mkdtempSync(join(tmpdir(), 'ethos-ssh-home-'));
+  mkdirSync(join(tmpHome, '.ssh'));
+  process.env.HOME = tmpHome;
 });
+
+afterEach(() => {
+  for (const dir of restorePerms) chmodSync(dir, 0o700);
+  restorePerms.length = 0;
+  if (savedHome === undefined) delete process.env.HOME;
+  else process.env.HOME = savedHome;
+  rmSync(tmpHome, { recursive: true, force: true });
+});
+
+/** A directory inside the throwaway home that this process cannot write. */
+function readOnlyDir(name: string): string {
+  const dir = join(tmpHome, name);
+  mkdirSync(dir);
+  chmodSync(dir, 0o500);
+  restorePerms.push(dir);
+  return dir;
+}
 
 describe('buildSshArgs', () => {
   it('emits BatchMode, ConnectTimeout, -T and accept-new host keys by default', () => {
     expect(buildSshArgs({ host: 'build-01' }, ['sh', '-c', "'true'"])).toEqual([
       '-o',
       'BatchMode=yes',
+      '-o',
+      'PermitLocalCommand=no',
       '-o',
       'ConnectTimeout=10',
       '-T',
@@ -179,6 +229,8 @@ describe('buildSshArgs', () => {
       '-o',
       'BatchMode=yes',
       '-o',
+      'PermitLocalCommand=no',
+      '-o',
       'ConnectTimeout=10',
       '-T',
       '-o',
@@ -193,6 +245,21 @@ describe('buildSshArgs', () => {
       'deploy@build-01',
       'true',
     ]);
+  });
+
+  // The operator's `~/.ssh/config` is trusted input, but a `Host`/`Match` block
+  // setting `LocalCommand` runs ON THE ETHOS HOST after every successful
+  // connection, while the execution posture says the command ran remotely. A
+  // command-line `-o` is read before any config file and ssh keeps the FIRST
+  // value it obtains, so pinning it here is what a config-file
+  // `PermitLocalCommand yes` cannot beat. It must also land BEFORE the
+  // terminator — anything after the destination is remote words, not options.
+  it('pins PermitLocalCommand off, before the option terminator', () => {
+    const args = buildSshArgs({ host: 'build-01' }, ['true']);
+    const at = args.indexOf('PermitLocalCommand=no');
+    expect(at).toBeGreaterThan(0);
+    expect(args[at - 1]).toBe('-o');
+    expect(at).toBeLessThan(args.indexOf('--'));
   });
 
   // The terminator goes BEFORE the destination, which is where ssh honours it.
@@ -307,6 +374,122 @@ describe('sshKnownHostsError (pre-spawn host-key persistence)', () => {
   });
 });
 
+// `accept-new` promises "learn the key on first sight, refuse it if it ever
+// changes", and the second clause is bought entirely by the learned key being
+// PERSISTED. OpenSSH warns and CONTINUES when it cannot write one (verified
+// 9.6p1 against a real sshd: "Failed to add the host to the list of known
+// hosts", remote command ran, exit 0), so an unwritable destination means every
+// connection is a first connection — with the config still claiming pinning.
+// The lexical check above cannot see any of this.
+describe('sshKnownHostsUnwritableError (pre-spawn host-key persistence on this machine)', () => {
+  it('accepts a writable file', () => {
+    const file = join(tmpHome, '.ssh', 'known_hosts');
+    writeFileSync(file, '');
+    expect(sshKnownHostsUnwritableError({ host: 'build-01', knownHostsFile: file })).toBeNull();
+  });
+
+  // Absence is the ORDINARY case — `accept-new` creates the file on the first
+  // connection, which is how an operator adopts a dedicated known-hosts file.
+  it('accepts a file that does not exist yet in a writable directory', () => {
+    const file = join(tmpHome, '.ssh', 'known_hosts_ethos');
+    expect(sshKnownHostsUnwritableError({ host: 'build-01', knownHostsFile: file })).toBeNull();
+  });
+
+  it('rejects a file whose directory does not exist, naming the directory to create', () => {
+    const file = join(tmpHome, 'nodir', 'known_hosts');
+    const err = sshKnownHostsUnwritableError({ host: 'build-01', knownHostsFile: file });
+    expect(err).toContain(file);
+    expect(err).toContain(`mkdir -p '${join(tmpHome, 'nodir')}'`);
+  });
+
+  asUnprivilegedUser('rejects a file whose directory is not writable', () => {
+    const dir = readOnlyDir('ro-dir');
+    const file = join(dir, 'known_hosts');
+    const err = sshKnownHostsUnwritableError({ host: 'build-01', knownHostsFile: file });
+    expect(err).toContain(file);
+    expect(err).toContain('is not writable');
+  });
+
+  asUnprivilegedUser('rejects an existing file that is not writable', () => {
+    const file = join(tmpHome, '.ssh', 'known_hosts');
+    writeFileSync(file, '');
+    chmodSync(file, 0o400);
+    const err = sshKnownHostsUnwritableError({ host: 'build-01', knownHostsFile: file });
+    expect(err).toContain(file);
+    expect(err).toContain('that file is not writable');
+  });
+
+  // The unset case is the common one and the one most likely to be unwritable
+  // in a container, so the probe must resolve ssh's own default rather than
+  // skip. Here `$HOME` itself does not exist, so nothing about the path is
+  // inherited from the machine running the test.
+  it('resolves ssh’s own default when knownHostsFile is unset', () => {
+    process.env.HOME = join(tmpHome, 'no-such-home');
+    const err = sshKnownHostsUnwritableError({ host: 'build-01' });
+    expect(err).toContain(join(tmpHome, 'no-such-home', '.ssh', 'known_hosts'));
+    expect(err).toContain('does not exist');
+  });
+
+  it('accepts the unset default when ~/.ssh is writable', () => {
+    expect(sshKnownHostsUnwritableError({ host: 'build-01' })).toBeNull();
+  });
+
+  // `~/.ssh` is the ONE directory ssh creates for itself
+  // (`hostfile_create_user_ssh_dir`), so a fresh container missing it must not
+  // be refused for a directory ssh would have made. Verified 9.6p1: any OTHER
+  // missing directory is not created and the write fails.
+  it('defers to the home directory when only ~/.ssh is missing', () => {
+    rmSync(join(tmpHome, '.ssh'), { recursive: true });
+    expect(sshKnownHostsUnwritableError({ host: 'build-01' })).toBeNull();
+  });
+
+  asUnprivilegedUser('rejects the unset default under an unwritable home', () => {
+    const home = readOnlyDir('ro-home');
+    process.env.HOME = home;
+    const err = sshKnownHostsUnwritableError({ host: 'build-01' });
+    expect(err).toContain(join(home, '.ssh', 'known_hosts'));
+  });
+
+  // Under `yes` nothing is ever LEARNED — an unknown host is refused outright —
+  // so whether a key could be written is irrelevant, and a deliberately
+  // read-only known_hosts is a legitimate deployment this must not break.
+  it('does not probe at all when strictHostKeys is yes', () => {
+    const file = join(tmpHome, 'nodir', 'known_hosts');
+    expect(
+      sshKnownHostsUnwritableError({
+        host: 'build-01',
+        knownHostsFile: file,
+        strictHostKeys: 'yes',
+      }),
+    ).toBeNull();
+  });
+
+  // A learned key goes to the FIRST file listed; the rest are read-only
+  // fallbacks (ssh_config(5)), so they are not this probe's subject.
+  it('probes only the first file of a list', () => {
+    const first = join(tmpHome, '.ssh', 'known_hosts');
+    expect(
+      sshKnownHostsUnwritableError({
+        host: 'build-01',
+        knownHostsFile: `${first} ${join(tmpHome, 'nodir', 'known_hosts2')}`,
+      }),
+    ).toBeNull();
+  });
+
+  // `%`-tokens and `${ENV}` expansions are resolved by ssh, not here. Refusing
+  // a target on a path this process mis-resolved would be worse than the gap.
+  // ssh_config(5) spells the environment form `${ENV}`; here it is INPUT to the
+  // code under test, not an interpolation that lost its backticks.
+  it.each([
+    '~build/known_hosts',
+    '%d/.ssh/known_hosts',
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: ssh's own syntax, quoted verbatim.
+    '${HOME}/.ssh/known_hosts',
+  ])('declines to guess at the unresolvable path %j', (knownHostsFile) => {
+    expect(sshKnownHostsUnwritableError({ host: 'build-01', knownHostsFile })).toBeNull();
+  });
+});
+
 describe('buildRemoteWords', () => {
   it('wraps the command in sh -c with no cd when no workdir is configured', () => {
     expect(buildRemoteWords({ host: 'h' }, 'echo hi', {})).toEqual(['sh', '-c', "'echo hi'"]);
@@ -397,6 +580,8 @@ describe('SshExecutionBackend.exec', () => {
       '-o',
       'BatchMode=yes',
       '-o',
+      'PermitLocalCommand=no',
+      '-o',
       'ConnectTimeout=10',
       '-T',
       '-o',
@@ -478,9 +663,69 @@ describe('SshExecutionBackend.exec', () => {
   });
 
   it('still spawns for a persistent knownHostsFile, forwarded verbatim', async () => {
-    const be = backend({ knownHostsFile: '/keys/known_hosts' });
+    const file = join(tmpHome, '.ssh', 'known_hosts');
+    writeFileSync(file, '');
+    const be = backend({ knownHostsFile: file });
     await collect(be.exec('echo hi', {}));
-    expect(spawned[0]?.args).toContain('UserKnownHostsFile=/keys/known_hosts');
+    expect(spawned[0]?.args).toContain(`UserKnownHostsFile=${file}`);
+  });
+
+  // Absence is not a failure: `accept-new` creates the file on the first
+  // connection, and refusing that would break the ordinary way an operator
+  // adopts a dedicated known-hosts file.
+  it('still spawns for a knownHostsFile that does not exist yet', async () => {
+    const be = backend({ knownHostsFile: join(tmpHome, '.ssh', 'known_hosts_ethos') });
+    await collect(be.exec('echo hi', {}));
+    expect(spawned).toHaveLength(1);
+  });
+
+  // The other half of the `accept-new` promise. ssh warns and CONTINUES when it
+  // cannot record a key, so by the time the warning exists the command has
+  // already run remotely, unpinned — the refusal has to beat the spawn, which
+  // is what is asserted here rather than merely the thrown message.
+  it('refuses an unpersistable known-hosts destination before spawning anything', async () => {
+    const file = join(tmpHome, 'nodir', 'known_hosts');
+    const be = backend({ knownHostsFile: file });
+    await expect(collect(be.exec('echo hi', {}))).rejects.toThrow(
+      new RegExp(file.replaceAll('/', '\\/')),
+    );
+    expect(spawned).toHaveLength(0);
+    expect(vi.mocked(spawn)).not.toHaveBeenCalled();
+  });
+
+  asUnprivilegedUser(
+    'refuses an unwritable known-hosts directory before spawning anything',
+    async () => {
+      const file = join(readOnlyDir('ro-exec'), 'known_hosts');
+      const be = backend({ knownHostsFile: file });
+      await expect(collect(be.exec('echo hi', {}))).rejects.toBeInstanceOf(
+        SshKnownHostsInvalidError,
+      );
+      expect(spawned).toHaveLength(0);
+      expect(vi.mocked(spawn)).not.toHaveBeenCalled();
+    },
+  );
+
+  // The unset case resolves ssh's own `~/.ssh/known_hosts` rather than skipping
+  // — it is the common configuration, and the one a container is most likely to
+  // get wrong.
+  it('refuses the unset default when the home directory does not exist', async () => {
+    process.env.HOME = join(tmpHome, 'no-such-home');
+    const be = backend({});
+    await expect(collect(be.exec('echo hi', {}))).rejects.toBeInstanceOf(SshKnownHostsInvalidError);
+    expect(spawned).toHaveLength(0);
+    expect(vi.mocked(spawn)).not.toHaveBeenCalled();
+  });
+
+  // Nothing is learned under `yes`, so persistence is irrelevant and a
+  // read-only known-hosts file is a legitimate deployment.
+  it('spawns under strictHostKeys yes even when the destination cannot be written', async () => {
+    const be = backend({
+      knownHostsFile: join(tmpHome, 'nodir', 'known_hosts'),
+      strictHostKeys: 'yes',
+    });
+    await collect(be.exec('echo hi', {}));
+    expect(spawned).toHaveLength(1);
   });
 
   it('rejects a non-empty env instead of silently dropping it', async () => {
@@ -539,6 +784,8 @@ describe('SshExecutionBackend.isAvailable', () => {
       '-o',
       'BatchMode=yes',
       '-o',
+      'PermitLocalCommand=no',
+      '-o',
       'ConnectTimeout=5',
       '-T',
       '-o',
@@ -590,6 +837,18 @@ describe('SshExecutionBackend.isAvailable', () => {
     expect(spawned).toHaveLength(0);
     expect(vi.mocked(spawn)).not.toHaveBeenCalled();
     expect(be.lastProbeError).toContain('cannot persist a learned host key');
+  });
+
+  // A probe connection under `accept-new` is ITSELF a first connection that
+  // learns and pins a key, so it must not run against a destination that cannot
+  // keep one either.
+  it('resolves false for an unpersistable known-hosts destination, without spawning', async () => {
+    const file = join(tmpHome, 'nodir', 'known_hosts');
+    const be = backend({ knownHostsFile: file });
+    expect(await be.isAvailable()).toBe(false);
+    expect(spawned).toHaveLength(0);
+    expect(vi.mocked(spawn)).not.toHaveBeenCalled();
+    expect(be.lastProbeError).toContain(file);
   });
 });
 

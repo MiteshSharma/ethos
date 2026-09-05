@@ -212,6 +212,39 @@
 //                                here — it probes with `spawn` only, no
 //                                `node:fs` import at all.)
 //
+//   extensions/execution-ssh/   accessSync(path, W_OK) answers "can this
+//   src/index.ts                 machine actually KEEP a host key it learns"
+//                                before an `accept-new` connection is
+//                                spawned. It is a pre-flight probe on an
+//                                OPERATOR-supplied path — `execution.ssh.
+//                                knownHostsFile`, or ssh's own
+//                                `~/.ssh/known_hosts` when that is unset —
+//                                which lives outside `~/.ethos/` entirely and
+//                                is read by the ssh binary, never by Ethos:
+//                                nothing is opened, nothing is parsed, no
+//                                personality data passes through it. Storage
+//                                could not express it even if the path were
+//                                in scope, because Storage has no writability
+//                                probe at all: `exists()` answers a different
+//                                question (the file legitimately does not
+//                                exist yet — accept-new creates it), and the
+//                                only way to ask Storage whether a write
+//                                would succeed is to PERFORM one, which would
+//                                mean Ethos writing into the operator's
+//                                known_hosts to find out whether ssh could.
+//                                Same category as platform-callcapture/
+//                                src/detector.ts's binary-presence existsSync
+//                                and web-api's documents.service.ts lstat: a
+//                                fact about the host filesystem that the
+//                                storage contract does not model. It has to
+//                                be asked BEFORE the spawn — OpenSSH warns
+//                                and CONTINUES when it cannot record a key
+//                                (verified 9.6p1: "Failed to add the host to
+//                                the list of known hosts", remote command
+//                                ran, exit 0), so the alternative is inferring
+//                                a silent loss of pinning from a warning line
+//                                after the command has already run remotely.
+//
 // If you need to add a new exception, document WHY here and in CLAUDE.md before
 // adding it to ALLOWED_PATHS below. The default answer for code on the
 // personality boundary is "use Storage."
@@ -265,6 +298,7 @@ const ALLOWED_FILES = new Set([
   'extensions/execution-pi/src/worktree.ts',
   'extensions/execution-pi/src/availability.ts',
   'extensions/execution-coding-agents/src/worktree.ts',
+  'extensions/execution-ssh/src/index.ts',
   'extensions/goal-store/src/index.ts',
   'extensions/kanban-store/src/index.ts',
   'extensions/platform-whatsapp/src/session-store.ts',
