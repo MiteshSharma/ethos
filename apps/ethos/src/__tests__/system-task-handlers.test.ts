@@ -22,13 +22,25 @@ const config: EthosConfig = {
   evolverCronEnabled: true,
 };
 
+// `channel-digest` is contributed by the gateway/boot commands
+// (`channelDigestSystemTask`), not by this shared table: it needs the live
+// Gateway — `sendVia`, the per-bot loops, the transcript store — which
+// `buildSystemTaskHandlers` has no handle on. It is the one documented
+// exception, so the check below still fails for anything else added to a
+// roster without a handler.
+const HOST_CONTRIBUTED = new Set(['channel-digest']);
+
 describe('buildSystemTaskHandlers', () => {
-  it('registers a handler for every system job spec', () => {
+  it('registers a handler for every system job spec, on every surface', () => {
     const handlers = buildSystemTaskHandlers(config);
-    for (const spec of systemJobSpecs(config)) {
-      expect(handlers[spec.systemTask], `no handler for "${spec.systemTask}"`).toBeTypeOf(
-        'function',
-      );
+    for (const surface of ['serve', 'gateway', 'boot'] as const) {
+      for (const spec of systemJobSpecs(config, surface)) {
+        if (HOST_CONTRIBUTED.has(spec.systemTask)) continue;
+        expect(
+          handlers[spec.systemTask],
+          `no handler for "${spec.systemTask}" (${surface})`,
+        ).toBeTypeOf('function');
+      }
     }
   });
 

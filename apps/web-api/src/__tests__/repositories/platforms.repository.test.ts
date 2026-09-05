@@ -501,6 +501,43 @@ describe('PlatformsRepository multi-bot whatsapp', () => {
     expect(yaml).not.toContain('allowed_numbers');
   });
 
+  // The bug this guards: `default_mode === 'all' ? 'all' : 'mention_only'`.
+  // `observe` has been a valid adapter mode and a valid config value since
+  // ambient-group-monitoring landed, and that line silently rewrote it into
+  // `mention_only` on the way to the Platforms table. It type-checked; it
+  // displayed a lie — a bot the operator had set to WATCH a room was drawn as
+  // one that answers mentions in it.
+  it('listWhatsApp carries an observe-mode bot through as observe', async () => {
+    await configRepo.update({
+      passthrough: {
+        'whatsapp.0.id': 'wa-watcher',
+        'whatsapp.0.default_mode': 'observe',
+      },
+    });
+    const [listed] = await repo.listWhatsApp();
+    expect(listed?.defaultMode).toBe('observe');
+  });
+
+  it('listWhatsApp round-trips every mode the adapter accepts', async () => {
+    for (const mode of ['all', 'mention_only', 'observe'] as const) {
+      const fresh = await repo.addWhatsApp({ id: `wa-${mode}`, defaultMode: mode, bind: WA_BIND });
+      expect(fresh.defaultMode).toBe(mode);
+    }
+    const entries = await repo.listWhatsApp();
+    expect(entries.map((e) => e.defaultMode)).toEqual(['all', 'mention_only', 'observe']);
+  });
+
+  it('falls back to mention_only only for a value no mode matches', async () => {
+    await configRepo.update({
+      passthrough: {
+        'whatsapp.0.id': 'wa-garbage',
+        'whatsapp.0.default_mode': 'sometimes',
+      },
+    });
+    const [listed] = await repo.listWhatsApp();
+    expect(listed?.defaultMode).toBe('mention_only');
+  });
+
   it('addWhatsApp generates a wa- id when none supplied', async () => {
     const entry = await repo.addWhatsApp({ bind: WA_BIND });
     expect(entry.botKey).toMatch(/^wa-/);

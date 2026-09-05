@@ -4,7 +4,7 @@ import Database from '@ethosagent/sqlite';
 import type { InboundMessage } from '@ethosagent/types';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-const PLATFORMS = ['telegram', 'discord', 'slack', 'email'] as const;
+const PLATFORMS = ['telegram', 'discord', 'slack', 'whatsapp', 'email'] as const;
 
 function msg(platform: string, overrides: Partial<InboundMessage> = {}): InboundMessage {
   return {
@@ -19,7 +19,7 @@ function msg(platform: string, overrides: Partial<InboundMessage> = {}): Inbound
   };
 }
 
-describe('channel-integration: 4 platforms × 4 controls', () => {
+describe('channel-integration: 5 platforms × 4 controls', () => {
   let db: Database.Database;
 
   beforeEach(() => {

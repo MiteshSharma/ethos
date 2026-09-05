@@ -54,6 +54,7 @@ export const srcAliases = {
   '@ethosagent/llm-xai': resolve('./extensions/llm-xai/src'),
   '@ethosagent/logger': resolve('./packages/logger/src'),
   '@ethosagent/pricing': resolve('./packages/pricing/src'),
+  '@ethosagent/acp-server': resolve('./apps/acp-server/src'),
 };
 
 export default defineConfig({

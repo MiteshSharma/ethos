@@ -32,12 +32,18 @@
 //   extensions/call-log/          delivery-ledger's atomic redelivery claim is a
 //   extensions/notify-queue/      conditional UPDATE and session-cards derives its
 //   extensions/inbound-dedup/     per-session `seq` with MAX()+1 inside the insert
+//   extensions/channel-transcript-sqlite/
 //                                 — both need a real transaction, not file IO.
 //                                 notify-queue's read-and-consume is the same shape:
 //                                 a SELECT then UPDATE inside one transaction, and
 //                                 inbound-dedup's check-and-record is one
 //                                 `INSERT OR IGNORE` whose affected-row count IS
-//                                 the answer.)
+//                                 the answer. channel-transcript-sqlite mkdirSyncs
+//                                 the same way, and its `pruneChannelTranscript`
+//                                 additionally existsSyncs the db file so a prune on
+//                                 a deployment that never enabled observe mode is a
+//                                 no-op rather than a call that CREATES an empty
+//                                 database on every machine.)
 //
 //   packages/a2a/                Same rationale as the SQLite stores above:
 //   src/sqlite-task-store.ts     SQLiteA2aTaskStore (T1.6) opens a raw path via
@@ -90,6 +96,23 @@
 //                                 — same carve-out as command-tts in
 //                                 extensions/voice-providers/, which shells out
 //                                 the same way for the same reason.
+//
+//   extensions/gateway/          The ambient channel digest's cross-process run
+//   src/channel-digest-lock.ts   sentinel: an advisory `wx`-flag exclusive-create
+//                                 lock with pid-liveness stale detection, so two
+//                                 gateways sharing one `~/.ethos` cannot both
+//                                 digest the same watched rooms and clobber each
+//                                 other's cursor file. The same primitive and the
+//                                 same carve-out as `acquireRegistryLock`
+//                                 (extensions/agent-mesh/) and `acquireBackupLock`
+//                                 (packages/wiring/src/backup-schedule.ts) — an
+//                                 atomic create-if-absent has no equivalent in the
+//                                 Storage interface, because `exists()` then
+//                                 `write()` is the exact race the lock closes.
+//                                 Copied rather than imported: packages/wiring sits
+//                                 ABOVE extensions/ in the layer model, so its
+//                                 version is not reachable from here. Everything
+//                                 else the digest touches still goes through Storage.
 //
 //   extensions/tools-code/       Textual false positive: the `node:fs` import sits
 //   src/shim/js-shim.ts          inside a String.raw literal — it is the
@@ -217,6 +240,7 @@ const ALLOWED_PREFIXES = [
   'extensions/call-log/',
   'extensions/notify-queue/',
   'extensions/inbound-dedup/',
+  'extensions/channel-transcript-sqlite/',
   'extensions/voice-providers/',
   'extensions/agent-mesh/',
   'extensions/llm-codex/',
@@ -235,6 +259,7 @@ const ALLOWED_FILES = new Set([
   'extensions/skills/src/file-context-injector.ts',
   'extensions/gateway/src/media.ts',
   'extensions/gateway/src/transcode.ts',
+  'extensions/gateway/src/channel-digest-lock.ts',
   'extensions/skills/src/env-resolver.ts',
   'extensions/execution-docker/src/index.ts',
   'extensions/execution-pi/src/worktree.ts',

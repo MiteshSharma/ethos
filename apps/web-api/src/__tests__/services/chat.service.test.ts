@@ -193,12 +193,17 @@ describe('ChatService', () => {
     await waitForEvent(seenA, (es) => es.some((x) => x.type === 'done'));
     await waitForEvent(seenB, (es) => es.some((x) => x.type === 'done'));
 
-    service.broadcastAll({
+    const recipients = service.broadcastAll({
       type: 'cron.fired',
       jobId: 'morning',
       ranAt: '2026-04-28T10:00:00Z',
       outputPath: null,
     });
+
+    // The count is a delivery answer, not a statistic: this is an ephemeral
+    // multicast, so a caller that consumes state on the fan-out (the channel
+    // digest's watermark) needs to know when it reached nobody.
+    expect(recipients).toBe(2);
 
     await waitForEvent(seenA, (es) => es.some((x) => x.type === 'cron.fired'));
     await waitForEvent(seenB, (es) => es.some((x) => x.type === 'cron.fired'));
@@ -208,6 +213,20 @@ describe('ChatService', () => {
 
     unA();
     unB();
+  });
+
+  it('broadcastAll reports zero recipients when no session is open', () => {
+    // The state a nightly cron fires into. `broadcastAll` writes to nothing
+    // and keeps no record, so a caller told only "it returned" would be told
+    // the digest landed.
+    expect(
+      makeService().broadcastAll({
+        type: 'cron.fired',
+        jobId: 'morning',
+        ranAt: '2026-04-28T10:00:00Z',
+        outputPath: null,
+      }),
+    ).toBe(0);
   });
 
   it('auto-titles on the first done even when turnCount > 1 (multi-turn first response)', async () => {

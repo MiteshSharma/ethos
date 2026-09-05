@@ -78,6 +78,7 @@
     "@ethosagent/platform-slack": "workspace:*",
     "@ethosagent/platform-telegram": "workspace:*",
     "@ethosagent/platform-voice": "workspace:*",
+    "@ethosagent/platform-whatsapp": "workspace:*",
     "@ethosagent/plugin-contract": "workspace:*",
     "@ethosagent/plugin-loader": "workspace:*",
     "@ethosagent/plugin-sdk": "workspace:*",

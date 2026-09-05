@@ -4,11 +4,11 @@
 // dispatch logic lets us unit-test subcommands without standing up a real
 // Slack app.
 
+import type { ChannelOverrideStore } from '@ethosagent/core';
 import type { Storage } from '@ethosagent/types';
 import { isUserAuthorized, SLASH_DENIED_TEXT } from '../authz';
 import { type SlackBlock, section } from '../blocks/shared';
 import type { Binding, ChannelMode } from '../config';
-import type { ChannelOverrideStore } from '../store/channel-overrides';
 import { handleAsk } from './ask';
 import { handleChannelMode } from './channel-mode';
 import { handleHelp } from './help';
@@ -29,7 +29,7 @@ export interface SlashCommandPayload {
 export interface SlashContext {
   binding: Binding;
   defaultChannelMode: ChannelMode;
-  channelOverrides?: ChannelOverrideStore;
+  channelOverrides?: ChannelOverrideStore<ChannelMode>;
   memory?: MemoryReader;
   kanban?: KanbanReader;
   personalityCard?: PersonalityCardReader;

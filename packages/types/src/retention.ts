@@ -13,6 +13,17 @@ export interface RetentionConfig {
   blobs?: string;
   archive?: string;
   /**
+   * How long observe-mode channel transcripts are kept (R4). Pruned against
+   * `recorded_at` — when we saw a message, not when the platform says it was
+   * sent — so a backdated message cannot outlive the window.
+   *
+   * Short by default (`30d`, against `messages: 365d`): these are rooms the
+   * agent watches without being addressed, so the corpus grows with the room's
+   * traffic rather than with the user's use of the agent, and only the last
+   * digest window is ever read.
+   */
+  channelTranscript?: string;
+  /**
    * Run `VACUUM` on the session database after a prune actually deleted rows.
    * Default `false` — VACUUM rewrites the whole file and holds a write lock,
    * so reclaiming the freed pages is opt-in.
@@ -32,6 +43,7 @@ export const RETENTION_DEFAULTS: {
   events: Required<RetentionEventsConfig>;
   blobs: string;
   archive: string;
+  channelTranscript: string;
 } = {
   messages: '365d',
   traces: '90d',
@@ -44,4 +56,5 @@ export const RETENTION_DEFAULTS: {
   },
   blobs: '7d',
   archive: '730d',
+  channelTranscript: '30d',
 };

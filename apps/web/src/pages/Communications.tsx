@@ -2,6 +2,7 @@ import type {
   BotBinding,
   SlackAppEntry,
   TelegramBotEntry,
+  WhatsAppChannelMode,
   WhatsAppEntry,
 } from '@ethosagent/web-contracts';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
@@ -33,6 +34,7 @@ import {
   useCallDetail,
   useCallsList,
 } from '../features/communications/api/queries';
+import { ObservedChats } from '../features/communications/ObservedChats';
 import { usePersonalityList } from '../features/personalities/api/queries';
 import { CallRow } from '../features/voice/CallRow';
 import {
@@ -564,7 +566,7 @@ const LEGACY_PLATFORMS: ReadonlyArray<PlatformShape> = [
 
 interface AddWhatsAppFormValues {
   id: string;
-  default_mode: 'mention_only' | 'all';
+  default_mode: WhatsAppChannelMode;
   owner_number: string;
   phone_number: string;
   bind_type: BindType;
@@ -781,6 +783,10 @@ function WhatsAppPanel() {
                 options={[
                   { label: 'Mention only', value: 'mention_only' },
                   { label: 'All messages', value: 'all' },
+                  // Observe records the room and never replies in it, not even
+                  // to an @mention. It was already a valid config value and a
+                  // valid adapter mode before it was offered here.
+                  { label: 'Observe only (never replies)', value: 'observe' },
                 ]}
               />
             </Form.Item>
@@ -1464,6 +1470,10 @@ export function Communications() {
           }),
         ]}
       />
+      {/* Page-level, not a tab: an observed room belongs to whichever bot
+          watches it, and grouping by platform would hide a Slack workspace and
+          a WhatsApp group that the same operator is watching for one reason. */}
+      <ObservedChats />
     </div>
   );
 }

@@ -836,8 +836,13 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
   // and a feature switched off has its job removed instead of firing forever.
   // Only the jobs in that table are touched — watcher ticks are seeded per
   // watcher by the watcher manager and are left alone.
+  //
+  // `'serve'` is load-bearing, not decoration. This process runs no channel
+  // adapters, so `channel-digest` is absent from its roster — NOT listed
+  // disabled, which would delete the job `ethos gateway` seeded, on every
+  // restart of either. See `SystemJobSurface` in `@ethosagent/wiring`.
   if (cronScheduler) {
-    void seedAllSystemJobs(cronScheduler, config)
+    void seedAllSystemJobs(cronScheduler, config, 'serve')
       .then((outcomes) => {
         for (const o of outcomes) {
           const problem = systemJobProblem(o);

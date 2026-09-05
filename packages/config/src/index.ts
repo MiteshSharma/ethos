@@ -380,6 +380,17 @@ export interface TelegramBotConfig {
   bind: BotBinding;
   piiRedaction?: boolean;
   /**
+   * Channel mode for group chats with no per-chat override. Absent = the
+   * adapter's own default (`mention_only`).
+   *
+   * The five values are `TelegramAdapterConfig`'s own enum
+   * (`extensions/platform-telegram/src/config.ts`), not a shared list: Slack
+   * has no `regex_match`, so the two unions are deliberately different
+   * lengths. `observe` records the chat and never replies in it — not even to
+   * an explicit @mention.
+   */
+  defaultChannelMode?: 'mention_only' | 'thread_follow' | 'all' | 'regex_match' | 'observe';
+  /**
    * Receive updates over an inbound webhook instead of long-polling.
    * Default `false` — long-poll, exactly today's behaviour.
    *
@@ -459,8 +470,11 @@ export interface SlackAppConfig {
    */
   webhookPath?: string;
   /** Channel mode for channels with no per-channel override. Absent = the
-   *  adapter's own default (`mention_only`). */
-  defaultChannelMode?: 'mention_only' | 'thread_follow' | 'all';
+   *  adapter's own default (`mention_only`). Four values, not Telegram's five:
+   *  the Slack adapter's enum has no `regex_match`
+   *  (`extensions/platform-slack/src/config.ts`). `observe` records the
+   *  channel and never replies in it — not even to an explicit @mention. */
+  defaultChannelMode?: 'mention_only' | 'thread_follow' | 'all' | 'observe';
   /** Slack emoji name (no colons) reacted onto inbound messages to
    *  acknowledge receipt. Absent = the adapter's default (`eyes`). */
   receiptReaction?: string;
@@ -492,7 +506,7 @@ export interface TeamRuntimeConfig {
 export interface WhatsAppConfig {
   id?: string;
   session_dir?: string;
-  default_mode?: 'all' | 'mention_only';
+  default_mode?: 'all' | 'mention_only' | 'observe';
   allowed_numbers?: string[];
   /** When set, the adapter links via phone-number pairing code instead of QR.
    *  Stored as entered; the adapter strips non-digits before requesting. */
@@ -1445,16 +1459,25 @@ export interface EthosConfig {
    */
   slack?: { apps: SlackAppConfig[] };
   /**
-   * Discord-adapter knobs that are not per-bot credentials. Today only the
-   * missed-message backfill: the first time the bot sees a channel it reads a
-   * slice of recent history so its first reply is not context-blind.
+   * Discord-adapter knobs that are not per-bot credentials: the mode every
+   * channel starts in, and the missed-message backfill (the first time the
+   * bot sees a channel it reads a slice of recent history so its first reply
+   * is not context-blind).
    *
    * Config format:
+   *   discord.defaultChannelMode: observe
    *   discord.missedMessageBackfill.enabled: false
    *   discord.missedMessageBackfill.windowSeconds: 3600
    *   discord.missedMessageBackfill.limit: 50
    */
   discord?: {
+    /**
+     * The mode every channel falls back to before any per-channel override.
+     * Mirrors `extensions/platform-discord/src/config.ts`'s
+     * `ChannelModeSchema` exactly — Discord, unlike Telegram, has no
+     * `regex_match`. Absent leaves the adapter on its own `mention_only`.
+     */
+    defaultChannelMode?: 'mention_only' | 'thread_follow' | 'all' | 'observe';
     missedMessageBackfill?: {
       /** Read history at all. Default `true` — today's behaviour. */
       enabled?: boolean;
@@ -2019,6 +2042,41 @@ export interface EthosConfig {
    *   weeklyDigest.recipients: alice@example.com, bob@example.com
    */
   weeklyDigest?: { enabled?: boolean; cron?: string; recipients?: string[] };
+  /**
+   * Ambient channel digest (plan/phases/ambient-group-monitoring.md R3/R9/R10).
+   * Default-off. Summarises what observe-mode chats recorded since the last
+   * run and delivers it to the owner's DM from the bot that watched, plus the
+   * in-app notifications feed.
+   *
+   * Seeded ONLY by `ethos gateway` and `ethos boot` — `ethos serve` runs no
+   * channel adapters, and `systemJobSpecs` omits the job from serve's roster
+   * rather than listing it disabled (which would delete it). Config keys:
+   *   channelDigest.enabled: true
+   *   channelDigest.cron: 0 8 * * *
+   *   channelDigest.deliverTo: owner
+   *   channelDigest.maxMessagesPerLane: 500
+   *   channelDigest.costWarnUsdPerLane: 0.50
+   */
+  channelDigest?: {
+    enabled?: boolean;
+    cron?: string;
+    /**
+     * `owner` — the owner's DM *and* the notifications feed. `inApp` — the
+     * feed only. The feed always gets it (R10), so this names the one delivery
+     * that can be switched off, not a choice between two.
+     */
+    deliverTo?: 'owner' | 'inApp';
+    /** Newest-N messages read per lane. Older ones are counted, not summarised. */
+    maxMessagesPerLane?: number;
+    /**
+     * Spend NOTICE threshold for one lane's summary turn, in USD — a lane that
+     * costs more is still delivered, with a footnote saying what it cost. Not
+     * a ceiling: the digest is a single provider call and the USD figure only
+     * exists in the `usage` chunk that arrives after billing, so nothing can
+     * refuse a call already made. See `ChannelDigestSettings.costWarnUsdPerLane`.
+     */
+    costWarnUsdPerLane?: number;
+  };
   /**
    * Kanban poll loop: periodically checks the board for tasks assigned to
    * this agent's personalityId with status=ready, and enqueues a stimulus.
@@ -2791,6 +2849,9 @@ export async function writeConfig(
       if (bot.dropPendingUpdates !== undefined) {
         lines.push(`telegram.bots.${i}.dropPendingUpdates: ${bot.dropPendingUpdates}`);
       }
+      if (bot.defaultChannelMode) {
+        lines.push(`telegram.bots.${i}.defaultChannelMode: ${bot.defaultChannelMode}`);
+      }
     }
   }
   if (config.slack?.apps.length) {
@@ -3220,6 +3281,16 @@ export async function writeConfig(
     if (config.weeklyDigest.recipients && config.weeklyDigest.recipients.length > 0)
       lines.push(`weeklyDigest.recipients: ${config.weeklyDigest.recipients.join(',')}`);
   }
+  if (config.channelDigest) {
+    const cd = config.channelDigest;
+    if (cd.enabled !== undefined) lines.push(`channelDigest.enabled: ${cd.enabled}`);
+    if (cd.cron) lines.push(`channelDigest.cron: ${cd.cron}`);
+    if (cd.deliverTo) lines.push(`channelDigest.deliverTo: ${cd.deliverTo}`);
+    if (cd.maxMessagesPerLane !== undefined)
+      lines.push(`channelDigest.maxMessagesPerLane: ${cd.maxMessagesPerLane}`);
+    if (cd.costWarnUsdPerLane !== undefined)
+      lines.push(`channelDigest.costWarnUsdPerLane: ${cd.costWarnUsdPerLane}`);
+  }
   if (config.toolLoop) {
     if (config.toolLoop.maxToolCallsWarnAt !== undefined)
       lines.push(`toolLoop.maxToolCallsWarnAt: ${config.toolLoop.maxToolCallsWarnAt}`);
@@ -3287,6 +3358,9 @@ export async function writeConfig(
       lines.push(`teamSupervisor.restartLoopGuard.maxRestarts: ${rg.maxRestarts}`);
     if (rg.windowSeconds !== undefined)
       lines.push(`teamSupervisor.restartLoopGuard.windowSeconds: ${rg.windowSeconds}`);
+  }
+  if (config.discord?.defaultChannelMode) {
+    lines.push(`discord.defaultChannelMode: ${config.discord.defaultChannelMode}`);
   }
   if (config.discord?.missedMessageBackfill) {
     const bf = config.discord.missedMessageBackfill;
@@ -3589,6 +3663,8 @@ function parseConfigYaml(src: string): EthosConfig {
   const restartLoopGuardKv: Record<string, string> = {};
   // discord.missedMessageBackfill.<field>: <value> — channel-history backfill.
   const discordBackfillKv: Record<string, string> = {};
+  // discord.<field>: <value> — non-backfill Discord knobs (defaultChannelMode).
+  const discordKv: Record<string, string> = {};
   // Call-capture personality binding (decision 3) — callCapture.personalityId: <id>.
   const callCaptureKv: Record<string, string> = {};
   // Phase 3 — memoryConsolidation.<field>: <value> (silent flush config).
@@ -4247,6 +4323,12 @@ function parseConfigYaml(src: string): EthosConfig {
       kv[`weeklyDigest.${wd[1]}`] = wd[2].trim().replace(/^["']|["']$/g, '');
       continue;
     }
+    // channelDigest.<field>: <value>
+    const cd = line.match(/^channelDigest\.(\w+):\s*(.+)$/);
+    if (cd) {
+      kv[`channelDigest.${cd[1]}`] = cd[2].trim().replace(/^["']|["']$/g, '');
+      continue;
+    }
     // toolLoop.<field>: <value>  (soft-warn tiers; the hard caps are not config)
     const tl = line.match(/^toolLoop\.(maxToolCallsWarnAt|maxIdenticalToolCallsWarnAt):\s*(.+)$/);
     if (tl) {
@@ -4336,6 +4418,13 @@ function parseConfigYaml(src: string): EthosConfig {
     );
     if (dbf) {
       discordBackfillKv[dbf[1]] = dbf[2].trim().replace(/^["']|["']$/g, '');
+      continue;
+    }
+    // discord.<field>: <value>  (single segment — the backfill keys above are
+    // dotted and have already been taken, and `\w` does not match a dot).
+    const dsc = line.match(/^discord\.(\w+):\s*(.+)$/);
+    if (dsc) {
+      discordKv[dsc[1]] = dsc[2].trim().replace(/^["']|["']$/g, '');
       continue;
     }
     // memoryCapture.<field>: <value>
@@ -4484,6 +4573,7 @@ function parseConfigYaml(src: string): EthosConfig {
   const execution = buildExecutionConfig(executionDockerKv);
   const restartLoopGuard = buildRestartLoopGuard(restartLoopGuardKv);
   const discordBackfill = buildDiscordBackfill(discordBackfillKv);
+  const discordModeResult = buildDiscordDefaultMode(discordKv);
   const callCapture = callCaptureKv.personalityId
     ? { personalityId: callCaptureKv.personalityId }
     : undefined;
@@ -4691,6 +4781,7 @@ function parseConfigYaml(src: string): EthosConfig {
     ...voiceInboundResult.errors,
     ...voiceBargeInResult.errors,
     ...webhooksResult.errors,
+    ...discordModeResult.errors,
   ];
 
   const pluginsAutoInstall: boolean | undefined =
@@ -4905,13 +4996,20 @@ function parseConfigYaml(src: string): EthosConfig {
               : {}),
           }
         : undefined,
+    channelDigest: buildChannelDigestConfig(kv),
     toolLoop: buildToolLoop(toolLoopKv),
     kanban: buildKanban(kanbanKv),
     grounding: groundingResult.grounding,
     browser: buildBrowser(browserKv),
     gateway: buildGateway(gatewayKv),
     teamSupervisor: restartLoopGuard ? { restartLoopGuard } : undefined,
-    discord: discordBackfill ? { missedMessageBackfill: discordBackfill } : undefined,
+    discord:
+      discordBackfill || discordModeResult.mode
+        ? {
+            ...(discordModeResult.mode ? { defaultChannelMode: discordModeResult.mode } : {}),
+            ...(discordBackfill ? { missedMessageBackfill: discordBackfill } : {}),
+          }
+        : undefined,
     kanbanPoll:
       kv['kanbanPoll.enabled'] !== undefined ||
       kv['kanbanPoll.intervalMs'] !== undefined ||
@@ -4956,6 +5054,42 @@ const parseWarningsByConfig = new WeakMap<EthosConfig, string[]>();
  * side of the two side-tables, for commands that read the raw config instead of
  * going through {@link loadConfigStrict} (`ethos doctor`).
  */
+/**
+ * The platforms this config puts into observe mode.
+ *
+ * Observe mode records group chats the agent never answers. That recording
+ * needs a `ChannelTranscriptStore` wired into the Gateway — without one the
+ * gateway's observe gate degrades to a drop, and the messages are gone. The
+ * gateway command always wires the store, so this is here for the deployments
+ * that assemble a `Gateway` themselves: they pass the result as
+ * `GatewayConfig.observeModePlatforms`, and the Gateway warns at construction
+ * if it has one without the other.
+ *
+ * Reads the three per-bot default-mode keys config.yaml can express:
+ * `whatsapp.<i>.default_mode`, `telegram.bots.<i>.defaultChannelMode`,
+ * `slack.apps.<i>.defaultChannelMode` and — Discord being single-bot — the
+ * top-level `discord.defaultChannelMode`. None of the four platforms'
+ * PER-CHAT overrides are visible here — those live in
+ * stores the adapters own — so a bot switched to observe by
+ * `/ethos channel-mode observe` alone does not appear. This is the configured
+ * default, which is what an operator writes down and what a boot-time check
+ * can see.
+ */
+export function observeModePlatforms(config: EthosConfig): string[] {
+  const platforms = new Set<string>();
+  for (const entry of config.whatsapp ?? []) {
+    if (entry.default_mode === 'observe') platforms.add('whatsapp');
+  }
+  for (const bot of config.telegram?.bots ?? []) {
+    if (bot.defaultChannelMode === 'observe') platforms.add('telegram');
+  }
+  for (const app of config.slack?.apps ?? []) {
+    if (app.defaultChannelMode === 'observe') platforms.add('slack');
+  }
+  if (config.discord?.defaultChannelMode === 'observe') platforms.add('discord');
+  return [...platforms];
+}
+
 export function configParseNotices(config: EthosConfig): { errors: string[]; warnings: string[] } {
   return {
     errors: parseErrorsByConfig.get(config) ?? [],
@@ -5391,6 +5525,7 @@ function buildRetentionConfig(kv: Record<string, string>): RetentionConfig | und
   if (kv.spans) cfg.spans = kv.spans;
   if (kv.blobs) cfg.blobs = kv.blobs;
   if (kv.archive) cfg.archive = kv.archive;
+  if (kv.channelTranscript) cfg.channelTranscript = kv.channelTranscript;
   const ev: RetentionEventsConfig = {};
   if (kv['events.error']) ev.error = kv['events.error'];
   if (kv['events.audit']) ev.audit = kv['events.audit'];
@@ -5704,6 +5839,59 @@ function buildBackupConfig(kv: Record<string, string>): EthosConfig['backup'] {
   };
 }
 
+/**
+ * `channelDigest.*` (ambient-group-monitoring R3/R9/R10).
+ *
+ * The two caps are validated as WHOLE strings for the same reason
+ * `buildBackupConfig` validates `keep` that way: `parseInt`/`parseFloat` stop
+ * at the first character they cannot use, so "500 messages" would be accepted
+ * as 500 and "0.5usd" as 0.5 by a message promising a number. A cap of zero is
+ * refused rather than silently meaning "no digest at all".
+ */
+function buildChannelDigestConfig(kv: Record<string, string>): EthosConfig['channelDigest'] {
+  const present = Object.keys(kv).some((k) => k.startsWith('channelDigest.'));
+  if (!present) return undefined;
+
+  const deliverToRaw = kv['channelDigest.deliverTo'];
+  if (deliverToRaw !== undefined && deliverToRaw !== 'owner' && deliverToRaw !== 'inApp') {
+    throw new Error(
+      `Invalid channelDigest.deliverTo "${deliverToRaw}". Expected 'owner' or 'inApp'.`,
+    );
+  }
+
+  const maxMessagesRaw = kv['channelDigest.maxMessagesPerLane'];
+  const maxMessages =
+    maxMessagesRaw !== undefined && /^\d+$/.test(maxMessagesRaw)
+      ? Number(maxMessagesRaw)
+      : Number.NaN;
+  if (maxMessagesRaw !== undefined && !(Number.isSafeInteger(maxMessages) && maxMessages >= 1)) {
+    throw new Error(
+      `Invalid channelDigest.maxMessagesPerLane "${maxMessagesRaw}". Expected a positive integer.`,
+    );
+  }
+
+  const costWarnRaw = kv['channelDigest.costWarnUsdPerLane'];
+  const costWarn =
+    costWarnRaw !== undefined && /^\d+(\.\d+)?$/.test(costWarnRaw)
+      ? Number(costWarnRaw)
+      : Number.NaN;
+  if (costWarnRaw !== undefined && !(Number.isFinite(costWarn) && costWarn > 0)) {
+    throw new Error(
+      `Invalid channelDigest.costWarnUsdPerLane "${costWarnRaw}". Expected a positive number.`,
+    );
+  }
+
+  return {
+    ...(kv['channelDigest.enabled'] !== undefined
+      ? { enabled: kv['channelDigest.enabled'] === 'true' }
+      : {}),
+    ...(kv['channelDigest.cron'] ? { cron: kv['channelDigest.cron'] } : {}),
+    ...(deliverToRaw !== undefined ? { deliverTo: deliverToRaw } : {}),
+    ...(maxMessagesRaw !== undefined ? { maxMessagesPerLane: maxMessages } : {}),
+    ...(costWarnRaw !== undefined ? { costWarnUsdPerLane: costWarn } : {}),
+  };
+}
+
 function buildMemoryCaptureConfig(kv: Record<string, string>): MemoryCaptureConfig | undefined {
   const present = Object.keys(kv).some((k) => k.startsWith('memoryCapture.'));
   if (!present) return undefined;
@@ -5817,6 +6005,42 @@ function sortedIndexes(kv: Record<number, Record<string, string>>): number[] {
     .sort((a, b) => a - b);
 }
 
+/**
+ * Each platform's `defaultChannelMode` values, mirroring that adapter's own
+ * `ChannelModeSchema` exactly — Telegram's five
+ * (`extensions/platform-telegram/src/config.ts`), Slack's four
+ * (`extensions/platform-slack/src/config.ts`) and Discord's four
+ * (`extensions/platform-discord/src/config.ts`); neither Slack nor Discord
+ * has `regex_match`. Kept as separate tables rather than one shared list
+ * precisely because they differ: a mode an adapter cannot honour must not
+ * validate here.
+ */
+const TELEGRAM_CHANNEL_MODES = [
+  'mention_only',
+  'thread_follow',
+  'all',
+  'regex_match',
+  'observe',
+] as const;
+const SLACK_CHANNEL_MODES = ['mention_only', 'thread_follow', 'all', 'observe'] as const;
+const DISCORD_CHANNEL_MODES = ['mention_only', 'thread_follow', 'all', 'observe'] as const;
+
+/**
+ * Narrows an operator-supplied string to one of a platform's modes. `some`
+ * rather than `includes` because `readonly T[]`'s `includes` only accepts a
+ * `T`, and the value being tested is exactly what has not been checked yet.
+ */
+function isOneOf<T extends string>(values: readonly T[], value: string): value is T {
+  return values.some((v) => v === value);
+}
+
+/** `'a', 'b' or 'c'` — the shape the existing mode errors already use. */
+function quotedList(values: readonly string[]): string {
+  const quoted = values.map((v) => `'${v}'`);
+  const last = quoted[quoted.length - 1] ?? '';
+  return quoted.length > 1 ? `${quoted.slice(0, -1).join(', ')} or ${last}` : last;
+}
+
 function buildTelegramBots(kv: Record<number, Record<string, string>>): {
   bots: TelegramBotConfig[];
   errors: string[];
@@ -5850,6 +6074,16 @@ function buildTelegramBots(kv: Record<number, Record<string, string>>): {
     if (entry.webhookSecretToken) bot.webhookSecretToken = entry.webhookSecretToken;
     if (entry.dropPendingUpdates !== undefined) {
       bot.dropPendingUpdates = entry.dropPendingUpdates === 'true';
+    }
+    const mode = entry.defaultChannelMode;
+    if (mode) {
+      if (!isOneOf(TELEGRAM_CHANNEL_MODES, mode)) {
+        errors.push(
+          `${label}: invalid defaultChannelMode '${mode}' (expected ${quotedList(TELEGRAM_CHANNEL_MODES)}).`,
+        );
+        continue;
+      }
+      bot.defaultChannelMode = mode;
     }
     bots.push(bot);
   }
@@ -5888,9 +6122,9 @@ function buildSlackApps(kv: Record<number, Record<string, string>>): {
     };
     const mode = entry.defaultChannelMode;
     if (mode) {
-      if (mode !== 'mention_only' && mode !== 'thread_follow' && mode !== 'all') {
+      if (!isOneOf(SLACK_CHANNEL_MODES, mode)) {
         errors.push(
-          `${label}: invalid defaultChannelMode '${mode}' (expected 'mention_only', 'thread_follow' or 'all').`,
+          `${label}: invalid defaultChannelMode '${mode}' (expected ${quotedList(SLACK_CHANNEL_MODES)}).`,
         );
         continue;
       }
@@ -5949,11 +6183,15 @@ function buildWhatsApps(kv: Record<number, Record<string, string>>): {
     if (entry.session_dir) app.session_dir = entry.session_dir;
     if (entry.phone_number) app.phone_number = entry.phone_number;
     if (entry.default_mode) {
-      if (entry.default_mode === 'all' || entry.default_mode === 'mention_only') {
+      if (
+        entry.default_mode === 'all' ||
+        entry.default_mode === 'mention_only' ||
+        entry.default_mode === 'observe'
+      ) {
         app.default_mode = entry.default_mode;
       } else {
         errors.push(
-          `${label}: invalid default_mode '${entry.default_mode}' (expected 'all' or 'mention_only').`,
+          `${label}: invalid default_mode '${entry.default_mode}' (expected 'all', 'mention_only' or 'observe').`,
         );
         continue;
       }
@@ -6850,6 +7088,29 @@ function buildRestartLoopGuard(
 }
 
 /**
+ * Discord's `discord.defaultChannelMode`. Loud rather than lenient, exactly
+ * like the per-bot Telegram and Slack keys: silently dropping a typo would
+ * leave an operator who asked for `observe` running a bot that answers, which
+ * is the failure this key exists to prevent.
+ */
+function buildDiscordDefaultMode(kv: Record<string, string>): {
+  mode: (typeof DISCORD_CHANNEL_MODES)[number] | undefined;
+  errors: string[];
+} {
+  const raw = kv.defaultChannelMode;
+  if (!raw) return { mode: undefined, errors: [] };
+  if (!isOneOf(DISCORD_CHANNEL_MODES, raw)) {
+    return {
+      mode: undefined,
+      errors: [
+        `discord: invalid defaultChannelMode '${raw}' (expected ${quotedList(DISCORD_CHANNEL_MODES)}).`,
+      ],
+    };
+  }
+  return { mode: raw, errors: [] };
+}
+
+/**
  * Discord channel-history backfill from the flat
  * `discord.missedMessageBackfill.<field>` keys. `limit` stops at 100 because
  * that is Discord's own `messages.fetch` ceiling — asking for more is an error
@@ -7104,6 +7365,7 @@ function retentionToLines(cfg: RetentionConfig): Array<[string, string]> {
   if (cfg.spans) lines.push(['spans', cfg.spans]);
   if (cfg.blobs) lines.push(['blobs', cfg.blobs]);
   if (cfg.archive) lines.push(['archive', cfg.archive]);
+  if (cfg.channelTranscript) lines.push(['channelTranscript', cfg.channelTranscript]);
   if (cfg.events) {
     if (cfg.events.error) lines.push(['events.error', cfg.events.error]);
     if (cfg.events.audit) lines.push(['events.audit', cfg.events.audit]);

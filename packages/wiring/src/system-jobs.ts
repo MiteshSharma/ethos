@@ -15,7 +15,9 @@
 //
 // Only the jobs listed here are ever removed. A system job this table does not
 // know about — the watcher ticks in `@ethosagent/watchers`, which are seeded
-// per watcher from `watchers.json` — is left strictly alone.
+// per watcher from `watchers.json` — is left strictly alone. That last
+// sentence is why the table is parameterised by SURFACE: see
+// {@link SystemJobSurface}.
 
 import type { EthosConfig } from '@ethosagent/config';
 import type { CronScheduler } from '@ethosagent/cron';
@@ -37,8 +39,33 @@ export interface SystemJobSpec {
   enabled: boolean;
 }
 
-/** What the operator's config says the system job roster should be right now. */
-export function systemJobSpecs(config: EthosConfig): SystemJobSpec[] {
+/**
+ * Which host process is reconciling.
+ *
+ * The roster is NOT the same for all three, and the difference is between
+ * "absent" and "present but disabled" — which for this function is the
+ * difference between leaving a job alone and DELETING it.
+ *
+ * `channel-digest` is the case that forced this parameter. It summarises what
+ * the channel adapters observed and delivers through the gateway's `sendVia`,
+ * so only `gateway` and `boot` can run it — `ethos serve` has no adapters
+ * (plan R3). A naive reading of R3 ("seed it in gateway/boot only") suggests
+ * listing it in every table with `enabled: false` for serve. That is exactly
+ * wrong: `seedAllSystemJobs` REMOVES a spec whose `enabled` is false, so a
+ * serve process would delete the job a gateway process had just seeded, and
+ * the two would fight over it on every restart of either. A spec this table
+ * does not mention is untouched, so serve must not mention it at all.
+ *
+ * Required, not defaulted. A default would put that hazard one forgotten
+ * argument away, and the compiler is the only thing that reliably remembers.
+ */
+export type SystemJobSurface = 'serve' | 'gateway' | 'boot';
+
+/**
+ * What the operator's config says the system job roster should be right now,
+ * for the host process named by `surface` (see {@link SystemJobSurface}).
+ */
+export function systemJobSpecs(config: EthosConfig, surface: SystemJobSurface): SystemJobSpec[] {
   return [
     {
       id: 'observability-prune',
@@ -75,6 +102,18 @@ export function systemJobSpecs(config: EthosConfig): SystemJobSpec[] {
       systemTask: 'backup',
       enabled: backupEnabled(config),
     },
+    // Omitted entirely on `serve` — NOT listed disabled. See `SystemJobSurface`.
+    ...(surface === 'serve'
+      ? []
+      : [
+          {
+            id: 'channel-digest',
+            name: 'Channel Digest',
+            schedule: config.channelDigest?.cron ?? '0 8 * * *',
+            systemTask: 'channel-digest',
+            enabled: config.channelDigest?.enabled === true,
+          },
+        ]),
   ];
 }
 
@@ -110,8 +149,13 @@ export function systemJobProblem(outcome: SystemJobOutcome): string | null {
 }
 
 /**
- * Reconcile every system job against `config`. Idempotent: a second run over an
- * unchanged config reports `unchanged` for everything and writes nothing.
+ * Reconcile every system job against `config`, for the roster `surface` owns.
+ * Idempotent: a second run over an unchanged config reports `unchanged` for
+ * everything and writes nothing.
+ *
+ * REMOVES jobs whose spec says `enabled: false`. Jobs the surface's table does
+ * not list are never touched — which is the whole reason the table knows which
+ * surface is asking (see {@link SystemJobSurface}).
  *
  * One job's failure — an unparseable schedule an operator typed into
  * config.yaml, say — must not stop the other four from being reconciled, so
@@ -121,9 +165,10 @@ export function systemJobProblem(outcome: SystemJobOutcome): string | null {
 export async function seedAllSystemJobs(
   scheduler: CronScheduler,
   config: EthosConfig,
+  surface: SystemJobSurface,
 ): Promise<SystemJobOutcome[]> {
   const outcomes: SystemJobOutcome[] = [];
-  for (const spec of systemJobSpecs(config)) {
+  for (const spec of systemJobSpecs(config, surface)) {
     try {
       const { action } = await scheduler.reconcileSystemJob(spec);
       outcomes.push({ id: spec.id, name: spec.name, action });

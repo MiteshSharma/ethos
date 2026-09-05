@@ -29,6 +29,10 @@ import {
   platformId as telegramId,
   platformPrompt as telegramPrompt,
 } from '@ethosagent/platform-telegram/format';
+import {
+  platformId as whatsappId,
+  platformPrompt as whatsappPrompt,
+} from '@ethosagent/platform-whatsapp/format';
 import { createSkillProposeTool } from '@ethosagent/skill-evolver';
 import { type SkillsInjector, SkillsLibrary, type UniversalScanner } from '@ethosagent/skills';
 import { compose as composeSkills } from '@ethosagent/skills/compose';
@@ -128,6 +132,7 @@ export const platformPrompts = new Map<string, string>([
   [telegramId, telegramPrompt],
   [discordId, discordPrompt],
   [emailId, emailPrompt],
+  [whatsappId, whatsappPrompt],
   ['web', WEB_PROMPT],
 ]);
 

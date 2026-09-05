@@ -227,6 +227,38 @@ describe('SlackAdapter — receipt reactions', () => {
     expect(adapter.canReact).toBe(true);
   });
 
+  // Observe mode (plan/phases/ambient-group-monitoring.md R11). A 👀 on every
+  // message is the bot answering — visibly, to everyone in the channel. The
+  // guard lives inside `addReceiptReaction`, so it holds for any caller.
+  it('adds no reaction to a record-only message, and tracks nothing to clear', () => {
+    const { internals, calls } = makeAdapter();
+
+    internals.addReceiptReaction({
+      platform: 'slack',
+      botKey: 'b',
+      chatId: 'C_SITE_7',
+      messageId: '111.222',
+      recordOnly: true,
+    });
+
+    expect(calls).toEqual([]);
+    expect(internals.pendingReactions.size).toBe(0);
+  });
+
+  it('still reacts on a message it will actually answer', () => {
+    const { internals, calls } = makeAdapter();
+
+    internals.addReceiptReaction({
+      platform: 'slack',
+      botKey: 'b',
+      chatId: 'C_SITE_7',
+      messageId: '111.222',
+      recordOnly: false,
+    });
+
+    expect(calls).toEqual([{ op: 'add', channel: 'C_SITE_7', ts: '111.222', name: 'eyes' }]);
+  });
+
   it("adds the 'eyes' reaction on inbound and clears it on reply (top-level post)", async () => {
     const { internals, calls } = makeAdapter();
 

@@ -90,6 +90,7 @@
     "@ethosagent/agent-bridge": "workspace:*",
     "@ethosagent/agent-mesh": "workspace:*",
     "@ethosagent/cas-fs": "workspace:*",
+    "@ethosagent/channel-transcript-sqlite": "workspace:*",
     "@ethosagent/config": "workspace:*",
     "@ethosagent/cron": "workspace:*",
     "@ethosagent/delivery-ledger": "workspace:*",

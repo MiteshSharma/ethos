@@ -11,6 +11,10 @@
     "./clarify-surface": {
       "import": "./src/clarify-surface.ts",
       "types": "./src/clarify-surface.ts"
+    },
+    "./format": {
+      "import": "./src/format.ts",
+      "types": "./src/format.ts"
     }
   },
   "scripts": {

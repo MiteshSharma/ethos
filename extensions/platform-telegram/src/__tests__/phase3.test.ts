@@ -868,7 +868,11 @@ describe('3.3 — edited_message handling', () => {
   });
 
   it('includes threadId on edited messages from forum topics', async () => {
-    const adapter = mk({ token: '1:fake-token', cache });
+    // This case is about thread propagation, not channel policy: an edit now
+    // takes the same channel-mode decision as the message it edits, and an
+    // unmentioned supergroup post under the default `mention_only` is dropped
+    // before any envelope is built. `all` keeps the fixture as written.
+    const adapter = mk({ token: '1:fake-token', cache, defaultChannelMode: 'all' });
     await adapter.start();
 
     const captured: InboundMessage[] = [];

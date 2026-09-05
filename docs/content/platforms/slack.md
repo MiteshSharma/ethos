@@ -5,7 +5,7 @@ kind: how-to
 audience: shared
 slug: platform-slack
 time: "15 min"
-updated: 2026-08-13
+updated: 2026-09-05
 ---
 
 ## Task
@@ -25,6 +25,7 @@ Run the Ethos [gateway](../getting-started/glossary.md#gateway) against a Slack 
 - `ethos chat` works locally with a configured LLM provider.
 - A Slack app created at `https://api.slack.com/apps` → **Create New App** → **From scratch**.
 - The app installed to the target workspace; the bot user added to at least one channel.
+- The bot's **Event Subscriptions** matched to the channel modes you intend to use — Slack sends an app only the events it subscribed to, and a missing subscription is silent. See [Platform prerequisites for unaddressed channel messages](#1a-platform-prerequisites-for-unaddressed-channel-messages).
 - Three secrets in hand: bot token (`xoxb-…`), app-level token (`xapp-…`) with `connections:write`, and the signing secret.
 
 ## Source
@@ -57,10 +58,46 @@ In `https://api.slack.com/apps`:
 3. Under **Socket Mode** → **Enable Socket Mode**.
 4. Under **Basic Information** → **App-Level Tokens** → **Generate Token and Scopes**, add the `connections:write` scope. Copy the `xapp-…` token.
 5. Under **Event Subscriptions** → **Enable Events**, subscribe to bot events:
-   - `app_mention`
-   - `message.im`
+   - `app_mention` — someone `@mentions` the bot.
+   - `message.im` — someone DMs the bot.
+   - `message.channels` — a message is posted in a public channel the bot is in. Only needed for channel modes that read messages nobody addressed to the bot; see [Platform prerequisites for unaddressed channel messages](#1a-platform-prerequisites-for-unaddressed-channel-messages).
+   - `message.groups` — the same for private channels.
 6. Under **Install App**, install to the workspace. Copy the **Bot User OAuth Token** (`xoxb-…`).
 7. Under **Basic Information**, copy the **Signing Secret**.
+
+### 1a. Platform prerequisites for unaddressed channel messages
+
+Slack delivers an app only the events that app subscribed to, and delivers nothing at all to say a subscription is missing. An app subscribed to `app_mention` and `message.im` alone hears mentions and DMs perfectly and is deaf to everything else in a channel — which is exactly right until a channel is set to a mode that reads messages nobody addressed to the bot.
+
+Two things gate that, and both are on the Slack side:
+
+| Requirement | Where | Covers |
+|---|---|---|
+| `message.channels` event subscription | **Event Subscriptions** → **Subscribe to bot events** | Messages in public channels |
+| `message.groups` event subscription | same | Messages in private channels |
+| `channels:history` bot scope | **OAuth & Permissions** → **Bot Token Scopes** | Reading public-channel message content |
+| `groups:history` bot scope | same | Reading private-channel message content |
+| Bot is a member of the channel | Invite the bot in Slack | Both — the events follow membership |
+
+The scopes are already in [step 1](#1-create-the-slack-app); the two `message.*` subscriptions are the pair most often left off, because mentions and DMs work without them.
+
+Slack grants a `message.*` subscription only when the matching `*:history` scope is already on the app. Adding the scope is what forces a reinstall, and reinstalling issues a new bot token — update `slackBotToken` in `~/.ethos/config.yaml` afterwards.
+
+Read a channel's current mode from inside it:
+
+```
+/ethos channel-mode
+```
+
+```
+Channel mode: mention_only
+#build-updates currently uses mention_only (app default).
+Set with: /ethos channel-mode all, /ethos channel-mode thread_follow, /ethos channel-mode mention_only, or /ethos channel-mode observe (records every message, never replies).
+```
+
+`/ethos channel-mode <mode>` sets it, and the setting is a per-channel override on top of the app default. Set that app-wide default with [`slack.apps.<i>.defaultChannelMode`](../using/reference/config-yaml.md#slack-apps) — the same four values, `mention_only` when the key is absent, read at gateway startup. `mention_only` is the default and needs neither subscription; `thread_follow`, `all`, and `observe` all read messages the bot was not addressed in, and all need `message.channels` (public) or `message.groups` (private) for the channel in question. `observe` additionally never replies — the bot reads the channel and says nothing in it.
+
+Only users on the `/ethos` allowlist can run this; see [step 5a](#5a-restrict-who-can-run-ethos-and-open-app-home).
 
 ### 2. Wire the secrets
 
@@ -199,10 +236,13 @@ Send the same prompt twice within 30 seconds. The bot answers once if generated 
 ## Troubleshoot
 
 **`⚡️ Bolt app started` prints but the bot ignores every message.**
-Either `app_mention` / `message.im` are not subscribed in **Event Subscriptions**, or Socket Mode is off. Both are required.
+Either `app_mention` / `message.im` are not subscribed in **Event Subscriptions**, or Socket Mode is off. Both are required. A bot that answers mentions but nothing else is a different fault — see the channel-mode entry below.
 
 **Bot replies in a channel it was just invited to but not in another.**
 Slack scopes are per-channel for `channels:history` and `groups:history`. Invite the bot to each channel you want it active in. `app_mention` works regardless of channel membership, but reading thread history does not.
+
+**Bot answers mentions in a channel but ignores it in `all`, `thread_follow`, or `observe` mode.**
+The app is not subscribed to `message.channels` (public channel) or `message.groups` (private channel), so Slack never sends those messages. Mentions arrive over `app_mention`, which is why the channel looks half-alive. Add the subscription under **Event Subscriptions** → **Subscribe to bot events**; see [Platform prerequisites for unaddressed channel messages](#1a-platform-prerequisites-for-unaddressed-channel-messages).
 
 **HTTP 429 / `ratelimited` from `chat.postMessage`.**
 Slack's tier-3 rate limit is ~50 calls per minute per workspace. Streaming edits stay under this because `reflowChunks` edits in place. Sustained 429s mean two gateways share a bot token or a [personality](../getting-started/glossary.md#personality) is auto-replying. Check `ethos errors` and the running gateway count.

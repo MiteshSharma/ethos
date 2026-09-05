@@ -1,5 +1,6 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { join } from 'node:path';
+import { ChannelOverrideStore, evaluateChannelMode } from '@ethosagent/core';
 import type {
   AdapterCapabilities,
   AdapterVoiceCaps,
@@ -9,6 +10,7 @@ import type {
   AttachmentCache,
   DeliveryResult,
   InboundMessage,
+  Logger,
   OutboundMessage,
   PlatformAdapter,
   SendVoiceNoteOptions,
@@ -16,10 +18,8 @@ import type {
   VoiceOutboundAdapter,
 } from '@ethosagent/types';
 import { Bot, InlineKeyboard, InputFile, webhookCallback } from 'grammy';
-import { type ChannelMode, DEFAULT_CHANNEL_MODE } from './config';
+import { type ChannelMode, ChannelModeSchema, DEFAULT_CHANNEL_MODE } from './config';
 import { chunkHash, markdownToTelegramHtml } from './format';
-import { shouldRespond } from './routing/channel-mode';
-import { ChannelOverrideStore } from './store/channel-overrides';
 import { ThreadStateStore } from './store/thread-state';
 
 // ---------------------------------------------------------------------------
@@ -149,6 +149,28 @@ const MEDIA_PLACEHOLDER: Record<Attachment['type'], string> = {
   file: '(attached file)',
   audio: '(voice message)',
 };
+
+/**
+ * Telegram's `date` is the message's send time in whole SECONDS. Scale to the
+ * epoch-milliseconds `InboundMessage.sentAt` is specified in.
+ *
+ * An absent or non-finite `date` leaves `sentAt` unset, which the contract says
+ * means "this adapter has no platform timestamp" — the consumer then falls back
+ * to its own clock. The same rule Slack's `tsToSentAt` and WhatsApp's
+ * `resolveSentAt` already follow, duplicated here rather than imported: an
+ * adapter must not depend on a sibling adapter's package.
+ *
+ * It matters that this can never be `NaN`. `sentAt` is persisted to
+ * `SQLiteChannelTranscriptStore`, whose `transcript.sent_at` is `INTEGER NOT
+ * NULL` in a STRICT table. SQLite has no NaN in its numeric domain, so a bound
+ * NaN arrives as NULL and the INSERT aborts with `NOT NULL constraint failed`
+ * — and the gateway's `message.sentAt ?? Date.now()` does not catch it, because
+ * NaN is not nullish.
+ */
+function resolveSentAt(date: unknown): number | undefined {
+  if (typeof date !== 'number' || !Number.isFinite(date) || date <= 0) return undefined;
+  return Math.round(date * 1000);
+}
 
 /**
  * Extract media descriptors from a Telegram message object.
@@ -329,6 +351,12 @@ export interface TelegramAdapterConfig {
    * Set from `gateway.maxInboundMediaBytes`.
    */
   maxInboundMediaBytes?: number;
+  /**
+   * Logger for startup diagnostics — currently the observe-mode privacy-mode
+   * warning. Absent means those diagnostics are not reported and the checks
+   * behind them are skipped. Matches `SlackAdapterConfig.logger`.
+   */
+  logger?: Logger;
 }
 
 /**
@@ -409,9 +437,11 @@ export class TelegramAdapter
   /** Anti-thrashing debounce timers for edited_message, keyed by messageId. */
   private readonly editDebounce = new Map<string, ReturnType<typeof setTimeout>>();
   /** JSONL-backed channel mode overrides (Gap 4). */
-  private readonly channelOverrides?: ChannelOverrideStore;
+  private readonly channelOverrides?: ChannelOverrideStore<ChannelMode>;
   /** JSONL-backed thread-follow tracking (Gap 4). */
   private readonly threadState?: ThreadStateStore;
+  /** Startup diagnostics sink. Absent = the diagnostics do not run at all. */
+  private readonly logger?: Logger;
   /** Webhook callback for external HTTP server wiring (Gap 6). */
   private webhookCb?: (req: IncomingMessage, res: ServerResponse) => Promise<void>;
 
@@ -431,13 +461,102 @@ export class TelegramAdapter
     // `telegram:<key>` — the shape is identical, the value carries the
     // routing identity.
     this.id = `telegram:${this.botKey}`;
+    // `child` rather than the logger as given, so a warning from here carries
+    // the platform tag whatever the host installed. Optional throughout: no
+    // logger means no startup diagnostics.
+    this.logger = config.logger?.child({ component: 'telegram' });
 
     // --- Persistence stores (Gap 4) ---
     if (config.storage) {
       const baseDir = join(config.telegramDir ?? 'telegram', this.botKey);
-      this.channelOverrides = new ChannelOverrideStore(config.storage, baseDir);
+      // The shared store (`@ethosagent/core`) takes the PER-BOT directory —
+      // which Telegram's deleted copy already did — plus the adapter's own
+      // mode enum, which is new.
+      this.channelOverrides = new ChannelOverrideStore(config.storage, baseDir, ChannelModeSchema);
       this.threadState = new ThreadStateStore(config.storage, baseDir);
     }
+  }
+
+  /**
+   * The one shared reply/record decision (`evaluateChannelMode` in
+   * `@ethosagent/core`), not a Telegram-local matrix. Note what it can answer
+   * that a boolean could not: `observe` says do NOT reply but DO record.
+   *
+   * Both inbound paths — `message` and `edited_message` — go through here, so
+   * an edit in an observed chat is gated exactly like the message it edits.
+   */
+  private channelDecision(input: {
+    chatIdStr: string;
+    isDm: boolean;
+    isGroupMention: boolean;
+    threadId: string | undefined;
+    text: string;
+  }): { shouldReply: boolean; shouldRecord: boolean } {
+    const override = this.channelOverrides?.get(input.chatIdStr);
+    const channelMode: ChannelMode =
+      override?.mode ?? this.config.defaultChannelMode ?? DEFAULT_CHANNEL_MODE;
+    const hasBotPosted =
+      input.threadId !== undefined && this.threadState !== undefined
+        ? this.threadState.hasBotPosted(input.chatIdStr, input.threadId)
+        : false;
+
+    return evaluateChannelMode({
+      isDm: input.isDm,
+      isGroupMention: input.isGroupMention,
+      channelMode,
+      hasBotPosted,
+      // A thunk, invoked only in `regex_match` mode: the shared evaluator
+      // never compiles a pattern, so the guard that turns a bad
+      // user-supplied pattern into a non-match — rather than a throw on
+      // every message in the chat — stays here with the compile.
+      matchesPattern: () => {
+        const pattern = override?.regexPattern;
+        if (!pattern) return false;
+        try {
+          return new RegExp(pattern).test(input.text);
+        } catch {
+          return false; // invalid regex stored — treat as no match
+        }
+      },
+    });
+  }
+
+  /**
+   * Warn when this bot watches a chat it cannot actually hear.
+   *
+   * Telegram bots are created with BotFather's Group Privacy ON, and a bot in
+   * privacy mode is delivered only the group messages that mention it, reply
+   * to it, or are commands. An `observe` chat under that setting records
+   * nothing, forever, with no error anywhere — the transcript just stays
+   * empty, which reads as a bug in Ethos rather than a setting in BotFather.
+   *
+   * `getMe` answers it outright: `can_read_all_group_messages` is documented
+   * as "True, if privacy mode is disabled for the bot", so this fires on the
+   * bot's real setting rather than on the mere presence of observe config. A
+   * warning that also fired on correctly configured bots would teach
+   * operators to scroll past it. For the same reason only an explicit `false`
+   * warns: an absent field is not evidence of privacy mode.
+   *
+   * Best-effort — a `getMe` that fails (bad token, network) is the polling
+   * loop's problem to report, not this check's.
+   */
+  private async warnIfPrivacyModeHidesObserved(): Promise<void> {
+    const logger = this.logger;
+    if (!logger) return;
+
+    const observed =
+      (this.config.defaultChannelMode ?? DEFAULT_CHANNEL_MODE) === 'observe' ||
+      (this.channelOverrides?.entries().some(([, entry]) => entry.mode === 'observe') ?? false);
+    if (!observed) return;
+
+    const me = await this.bot.api.getMe().catch(() => undefined);
+    if (me?.can_read_all_group_messages !== false) return;
+
+    logger.warn(
+      `Telegram privacy mode is ON for @${me.username} — chats set to observe will record ` +
+        'nothing. Disable it in BotFather (/setprivacy → select the bot → Disable), then ' +
+        'remove and re-add the bot to each observed group.',
+    );
   }
 
   // ---------------------------------------------------------------------------
@@ -473,6 +592,11 @@ export class TelegramAdapter
     await this.channelOverrides?.load();
     await this.threadState?.load();
 
+    // --- Observe-mode prerequisite (R11) --- after the override store loads,
+    // because a per-chat `observe` override is one of the two things that make
+    // the check worth a `getMe` call.
+    await this.warnIfPrivacyModeHidesObserved();
+
     this.bot.on('message', (ctx) => {
       if (!this.messageHandler) return;
 
@@ -501,33 +625,24 @@ export class TelegramAdapter
       const isDm = ctx.chat.type === 'private';
       const isGroupMention = ctx.message.text?.includes(`@${ctx.me.username}`) ?? false;
       const chatIdStr = String(chatId);
-      const override = this.channelOverrides?.get(chatIdStr);
-      const channelMode: ChannelMode =
-        override?.mode ?? this.config.defaultChannelMode ?? DEFAULT_CHANNEL_MODE;
-      const hasBotPosted =
-        threadId !== undefined && this.threadState !== undefined
-          ? this.threadState.hasBotPosted(chatIdStr, threadId)
-          : false;
+      const decision = this.channelDecision({ chatIdStr, isDm, isGroupMention, threadId, text });
 
-      if (
-        !shouldRespond({
-          isDm,
-          isGroupMention,
-          channelMode,
-          hasBotPosted,
-          messageText: text,
-          regexPattern: override?.regexPattern,
-        })
-      ) {
-        return;
-      }
+      // Only a message that is neither answered nor recorded is dropped here.
+      if (!decision.shouldRecord) return;
+      const recordOnly = !decision.shouldReply;
 
       // --- Reaction on receipt (best-effort, non-blocking) ---
-      const reaction = [{ type: 'emoji' as const, emoji: this.receiptReaction as TelegramEmoji }];
-      this.bot.api.setMessageReaction(chatId, messageId, reaction).catch(() => {});
-      this.pendingReactions.set(chatIdStr, messageId);
+      // Skipped for an observed message: a 👀 landing on every message in a
+      // chat the operator told the agent to be silent in is the bot
+      // answering — visibly, to everyone in the room. Silent means silent (R11).
+      if (!recordOnly) {
+        const reaction = [{ type: 'emoji' as const, emoji: this.receiptReaction as TelegramEmoji }];
+        this.bot.api.setMessageReaction(chatId, messageId, reaction).catch(() => {});
+        this.pendingReactions.set(chatIdStr, messageId);
+      }
 
       // --- Build initial message (attachments filled async below) ---
+      const sentAt = resolveSentAt(ctx.message.date);
       const msg: InboundMessage = {
         platform: 'telegram',
         botKey: this.botKey,
@@ -545,10 +660,22 @@ export class TelegramAdapter
         replyToUserId: ctx.message.reply_to_message?.from
           ? String(ctx.message.reply_to_message.from.id)
           : undefined,
+        // Recorded, not answered. The gateway reads this flag, writes the
+        // transcript row and returns before the channel filter ever runs.
+        recordOnly,
+        // Telegram's own send time, in seconds. Not a clock reading here: a
+        // message delayed in transit still orders by when it was sent. Omitted
+        // rather than stamped non-finite when Telegram sends no usable `date`.
+        ...(sentAt !== undefined ? { sentAt } : {}),
         raw: ctx,
       };
 
-      if (!hasMedia) {
+      // No download for a recorded-only message: the gateway's transcript row
+      // is TEXT, so the bytes would be fetched and cached only to be thrown
+      // away — and a third party's media would sit in the attachment cache
+      // under a lifetime the transcript's retention never touches. `text` is
+      // already the caption (or the media placeholder) and is unaffected.
+      if (!hasMedia || recordOnly) {
         this.messageHandler(msg);
         return;
       }
@@ -589,21 +716,42 @@ export class TelegramAdapter
       const threadId =
         rawThreadId !== undefined && rawThreadId !== 1 ? String(rawThreadId) : undefined;
 
+      // --- Channel-mode gating ---
+      // An edit is a message arriving in the same chat under the same mode, so
+      // it takes the same decision. Ungated, an edit in an `observe` chat was
+      // delivered answerable and the bot replied in a chat it was configured
+      // only to watch (R11), and the transcript's upsert-on-edit had no mode
+      // to stamp (R8). `isGroupMention` is computed rather than assumed false:
+      // in `mention_only` a false would drop an edit that mentions the bot.
+      const isDm = ctx.chat.type === 'private';
+      const isGroupMention = text.includes(`@${ctx.me.username}`);
+      const chatIdStr = String(chatId);
+      const decision = this.channelDecision({ chatIdStr, isDm, isGroupMention, threadId, text });
+      if (!decision.shouldRecord) return;
+      const recordOnly = !decision.shouldReply;
+
+      // Telegram keeps the original send time on an edited message; using it
+      // rather than `edit_date` keeps the row where it was in the transcript
+      // when the store upserts on (lane, message_id).
+      const sentAt = resolveSentAt(rawMsg.date);
+
       const msg: InboundMessage = {
         platform: 'telegram',
         botKey: this.botKey,
-        chatId: String(chatId),
+        chatId: chatIdStr,
         userId: ctx.from ? String(ctx.from.id) : undefined,
         username: ctx.from?.username,
         text,
         isEdit: true,
-        isDm: ctx.chat.type === 'private',
-        isGroupMention: false,
+        isDm,
+        isGroupMention,
         messageId: String(messageId),
         threadId,
         replyToId: rawMsg.reply_to_message
           ? String((rawMsg.reply_to_message as Record<string, unknown>).message_id)
           : undefined,
+        recordOnly,
+        ...(sentAt !== undefined ? { sentAt } : {}),
         raw: ctx,
       };
 
@@ -616,7 +764,7 @@ export class TelegramAdapter
         debounceKey,
         setTimeout(() => {
           this.editDebounce.delete(debounceKey);
-          if (!hasMedia) {
+          if (!hasMedia || recordOnly) {
             this.messageHandler?.(msg);
             return;
           }

@@ -5,6 +5,7 @@ import type {
   PlatformStatus,
   SlackAppEntry,
   TelegramBotEntry,
+  WhatsAppChannelMode,
   WhatsAppEntry,
 } from '@ethosagent/web-contracts';
 import type { PlatformsRepository } from '../repositories/platforms.repository';
@@ -117,7 +118,7 @@ export class PlatformsService {
 
   async addWhatsApp(input: {
     id?: string;
-    defaultMode?: 'all' | 'mention_only';
+    defaultMode?: WhatsAppChannelMode;
     allowedNumbers?: string[];
     phoneNumber?: string;
     bind: BotBinding;

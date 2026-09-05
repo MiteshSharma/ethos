@@ -2,17 +2,17 @@
 // decides whether it reaches the agent. All Discord-specific decisions
 // (channel-mode, thread isolation, mention extraction) live here.
 
+import type { ChannelOverrideStore } from '@ethosagent/core';
+import { evaluateChannelMode } from '@ethosagent/core';
 import type { InboundMessage } from '@ethosagent/types';
 import { type ChannelMode, DEFAULT_CHANNEL_MODE } from '../config';
-import type { ChannelOverrideStore } from '../store/channel-overrides';
 import type { ThreadStateStore } from '../store/thread-state';
-import { shouldRespond } from './channel-mode';
 
 /** What the adapter knows about itself + its persistent state. */
 export interface TriageContext {
   botKey: string;
   defaultChannelMode: ChannelMode;
-  channelOverrides?: ChannelOverrideStore;
+  channelOverrides?: ChannelOverrideStore<ChannelMode>;
   threadState?: ThreadStateStore;
 }
 
@@ -28,6 +28,8 @@ export interface RawDiscordMessage {
   parentChannelId?: string;
   isMention: boolean;
   reference?: { messageId?: string; userId?: string };
+  /** Platform send time (ms) — `Message.createdTimestamp`. Orders the transcript. */
+  sentAt: number;
   raw: unknown;
 }
 
@@ -54,14 +56,18 @@ export async function triageMessage(
   const hasBotPosted =
     threadId && ctx.threadState ? ctx.threadState.hasBotPosted(chatId, threadId) : false;
 
-  const responds = shouldRespond({
+  // The one shared decision (`@ethosagent/core`), not a Discord-local matrix.
+  // Note what it can now answer that a boolean could not: `observe` says do
+  // NOT reply but DO record.
+  const decision = evaluateChannelMode({
     isDm: msg.isDm,
     isGroupMention: msg.isMention,
     channelMode,
     hasBotPosted,
   });
 
-  if (!responds) return { drop: 'channel_mode', effectiveMode: channelMode };
+  // Only a message that is neither answered nor recorded is dropped here.
+  if (!decision.shouldRecord) return { drop: 'channel_mode', effectiveMode: channelMode };
 
   return {
     envelope: buildEnvelope({
@@ -76,6 +82,10 @@ export async function triageMessage(
       isGroupMention: msg.isMention,
       replyToId: msg.reference?.messageId,
       replyToUserId: msg.reference?.userId,
+      // Recorded, not answered. The gateway reads this flag, writes the
+      // transcript row and returns before the channel filter ever runs.
+      recordOnly: !decision.shouldReply,
+      sentAt: msg.sentAt,
       raw: msg.raw,
     }),
     effectiveMode: channelMode,
@@ -83,8 +93,10 @@ export async function triageMessage(
 }
 
 export function resolveChannelMode(channel: string, ctx: TriageContext): ChannelMode {
+  // `.mode` — the shared store indexes `{ mode, regexPattern? }`, where
+  // Discord's own copy indexed a bare mode.
   const override = ctx.channelOverrides?.get(channel);
-  return override ?? ctx.defaultChannelMode ?? DEFAULT_CHANNEL_MODE;
+  return override?.mode ?? ctx.defaultChannelMode ?? DEFAULT_CHANNEL_MODE;
 }
 
 interface EnvelopeInputs {
@@ -99,6 +111,8 @@ interface EnvelopeInputs {
   isGroupMention: boolean;
   replyToId?: string;
   replyToUserId?: string;
+  recordOnly: boolean;
+  sentAt: number;
   raw: unknown;
 }
 
@@ -116,6 +130,8 @@ function buildEnvelope(input: EnvelopeInputs): InboundMessage {
     isGroupMention: input.isGroupMention,
     messageId: input.messageId,
     ...(input.threadId ? { threadId: input.threadId } : {}),
+    recordOnly: input.recordOnly,
+    sentAt: input.sentAt,
     raw: input.raw,
   };
 }

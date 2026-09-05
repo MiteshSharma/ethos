@@ -420,11 +420,21 @@ export class ChatService {
    * sessions" maps roughly 1:1 to "tabs the user has touched lately,"
    * and the buffer's reap window (5min) keeps stale entries from
    * fanning to.
+   *
+   * Returns HOW MANY sessions it reached, because this is an ephemeral
+   * multicast and not a durable feed: with no tab open it writes to nothing
+   * and there is no record afterwards that the event existed. Most callers
+   * are fire-and-forget and ignore the count; a caller that treats the fan-out
+   * as a delivery it can consume state on (`notifyChannelDigest`) must not,
+   * and zero is its failure signal.
    */
-  broadcastAll(event: SseEvent): void {
+  broadcastAll(event: SseEvent): number {
+    let recipients = 0;
     for (const sessionId of this.opts.buffer.activeSessions()) {
       this.append(sessionId, event);
+      recipients += 1;
     }
+    return recipients;
   }
 
   /**

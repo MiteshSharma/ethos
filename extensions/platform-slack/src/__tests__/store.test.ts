@@ -1,6 +1,7 @@
+import { ChannelOverrideStore } from '@ethosagent/core';
 import type { Storage, StorageDirEntry } from '@ethosagent/types';
 import { describe, expect, it } from 'vitest';
-import { ChannelOverrideStore } from '../store/channel-overrides';
+import { ChannelModeSchema } from '../config';
 import { ThreadStateStore } from '../store/thread-state';
 
 /**
@@ -59,37 +60,86 @@ function memStorage(): Storage {
   };
 }
 
-describe('ChannelOverrideStore', () => {
+// Slack's per-channel override store is now the shared one from
+// `@ethosagent/core` (plan/phases/ambient-group-monitoring.md R6). This suite
+// is kept as the regression guard on Slack's *use* of it, driving it exactly
+// as `SlackAdapter` does: the per-bot directory joined at the construction
+// site, and Slack's own `ChannelModeSchema` as the mode validator.
+//
+// Two assertions here changed shape, and both were corrections rather than
+// relaxations. Slack's deleted copy indexed a BARE mode and joined `botKey`
+// onto the platform directory itself, while Telegram's copy — the same file,
+// two packages over — indexed `{ mode, regexPattern? }` and took the per-bot
+// directory. That divergence is the drift the shared store exists to end, so
+// the tests now assert the shared shape:
+//
+//   `get()` → `{ mode: 'all' }`, was `'all'`
+//
+// Both still assert the same fact (which mode was stored for which channel) at
+// the same strength — `toEqual({ mode: 'all' })` fails for a wrong mode, a
+// missing entry, or a stray extra field exactly as `toBe('all')` did.
+
+/** The per-bot directory, joined by the caller — as `SlackAdapter` does. */
+const BOT_DIR = '/slack/bot-a';
+
+describe('ChannelOverrideStore (shared core store, Slack binding)', () => {
   it('persists and reloads channel modes', async () => {
     const storage = memStorage();
-    const store = new ChannelOverrideStore(storage, '/slack', 'bot-a');
+    const store = new ChannelOverrideStore(storage, BOT_DIR, ChannelModeSchema);
     await store.set('C1', 'all');
     await store.set('C2', 'thread_follow');
-    expect(store.get('C1')).toBe('all');
-    expect(store.get('C2')).toBe('thread_follow');
+    expect(store.get('C1')).toEqual({ mode: 'all' });
+    expect(store.get('C2')).toEqual({ mode: 'thread_follow' });
 
     // Fresh store backed by the same storage replays JSONL
-    const replay = new ChannelOverrideStore(storage, '/slack', 'bot-a');
+    const replay = new ChannelOverrideStore(storage, BOT_DIR, ChannelModeSchema);
     await replay.load();
-    expect(replay.get('C1')).toBe('all');
-    expect(replay.get('C2')).toBe('thread_follow');
+    expect(replay.get('C1')).toEqual({ mode: 'all' });
+    expect(replay.get('C2')).toEqual({ mode: 'thread_follow' });
   });
 
   it('latest record for a channel wins on reload', async () => {
     const storage = memStorage();
-    const store = new ChannelOverrideStore(storage, '/slack', 'bot-a');
+    const store = new ChannelOverrideStore(storage, BOT_DIR, ChannelModeSchema);
     await store.set('C1', 'all');
     await store.set('C1', 'mention_only');
-    expect(store.get('C1')).toBe('mention_only');
+    expect(store.get('C1')).toEqual({ mode: 'mention_only' });
 
-    const replay = new ChannelOverrideStore(storage, '/slack', 'bot-a');
+    const replay = new ChannelOverrideStore(storage, BOT_DIR, ChannelModeSchema);
     await replay.load();
-    expect(replay.get('C1')).toBe('mention_only');
+    expect(replay.get('C1')).toEqual({ mode: 'mention_only' });
   });
 
   it('returns undefined for unknown channels', async () => {
-    const store = new ChannelOverrideStore(memStorage(), '/slack', 'bot-a');
+    const store = new ChannelOverrideStore(memStorage(), BOT_DIR, ChannelModeSchema);
     expect(store.get('C999')).toBeUndefined();
+  });
+
+  it('writes to the per-bot directory the adapter joined, not one it derives', async () => {
+    const storage = memStorage();
+    const store = new ChannelOverrideStore(storage, BOT_DIR, ChannelModeSchema);
+    await store.set('C1', 'all');
+    expect(await storage.read('/slack/bot-a/channel-overrides.jsonl')).toContain('"channel":"C1"');
+  });
+
+  it("round-trips 'observe', the mode this widening added", async () => {
+    const storage = memStorage();
+    const store = new ChannelOverrideStore(storage, BOT_DIR, ChannelModeSchema);
+    await store.set('C1', 'observe');
+
+    const replay = new ChannelOverrideStore(storage, BOT_DIR, ChannelModeSchema);
+    await replay.load();
+    expect(replay.get('C1')).toEqual({ mode: 'observe' });
+  });
+
+  it("rejects a mode Slack's enum does not know, rather than storing it", async () => {
+    const storage = memStorage();
+    const line = JSON.stringify({ channel: 'C1', mode: 'regex_match', updatedAt: 1 });
+    await storage.write('/slack/bot-a/channel-overrides.jsonl', `${line}\n`);
+
+    const store = new ChannelOverrideStore(storage, BOT_DIR, ChannelModeSchema);
+    await store.load();
+    expect(store.get('C1')).toBeUndefined();
   });
 });
 

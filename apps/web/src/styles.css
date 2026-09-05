@@ -3645,6 +3645,40 @@ textarea {
   padding: 24px 0;
 }
 
+/* Observed chats — the rooms a bot watches and never answers
+   (plan/phases/ambient-group-monitoring.md R12). The ROWS are `.activity-row`,
+   untouched: this section adds a bot header and a truncation note and nothing
+   else, because a second row language is what the feedback & activity contract
+   exists to prevent. No Card — a heading separates it from the tabs above
+   (DESIGN.md "Cards earn existence"). No new tokens either; every colour here
+   already carries a contrast assertion. */
+.observed-chats {
+  margin-top: 24px;
+}
+
+.observed-bot + .observed-bot {
+  margin-top: 12px;
+}
+
+/* Which bot is listening. Mono, because a botKey is a literal the operator
+   matches against config.yaml, not prose. */
+.observed-bot-header {
+  font-family: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 13px;
+  color: var(--text-secondary);
+  padding: 0 8px;
+  margin-bottom: 4px;
+}
+
+/* `showing 40 of 52 watched chats` — a reading line, so `--text-secondary`
+   rather than the numbers-only tertiary. */
+.observed-note {
+  font-family: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 13px;
+  color: var(--text-secondary);
+  padding: 6px 8px 0;
+}
+
 /* The chip shape Activity already established. Same tokens, same 12px/4px
    geometry — a filter chip that looked different on two tabs would be two
    things to learn. */

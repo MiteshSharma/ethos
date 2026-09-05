@@ -37,6 +37,29 @@ export interface InboundMessage {
    */
   isEdit?: boolean;
   /**
+   * Set to `true` by adapters when `evaluateChannelMode` returned
+   * `shouldRecord && !shouldReply` — the observe case. The message is being
+   * delivered so the gateway can record it to the channel transcript, NOT so
+   * a turn can run: the gateway records it and returns before the channel
+   * filter, no lane, session, reply or reaction. Silence is the whole point,
+   * so an adapter must also skip any receipt reaction it would normally send.
+   */
+  recordOnly?: boolean;
+  /**
+   * When the PLATFORM says the message was sent, in epoch milliseconds.
+   *
+   * Not receipt time: it comes from the platform's own field (Telegram
+   * `message.date * 1000`, Discord `createdTimestamp`, Slack `ts`, WhatsApp
+   * `messageTimestamp`), so a message delayed in transit, replayed after a
+   * reconnect, or redelivered by a webhook retry keeps the time it was
+   * actually sent. The channel transcript store orders by it, which is what
+   * makes an edit that arrives before its original still sort correctly.
+   *
+   * Optional: an adapter with no platform timestamp leaves it undefined and
+   * consumers fall back to their own clock.
+   */
+  sentAt?: number;
+  /**
    * Stable identifier of the bot this message arrived through, when the
    * adapter is bound to a specific bot via multi-bot routing. The Gateway
    * uses this as part of the lane key (`${platform}:${botKey}:${chatId}`)

@@ -1,11 +1,11 @@
 ---
 title: "Discord adapter"
-description: "Operate Ethos on Discord: bot token, intents, guild and DM routing, mention-only mode, allowlist, rate limits, multi-server, error catalog."
+description: "Operate Ethos on Discord: bot token, intents, guild and DM routing, channel modes, allowlist, rate limits, multi-server, error catalog."
 kind: how-to
 audience: shared
 slug: platform-discord
 time: "15 min"
-updated: 2026-08-14
+updated: 2026-09-05
 ---
 
 ## Task
@@ -28,7 +28,7 @@ The Discord adapter lags Slack and Telegram on several gateway-contract features
 
 - Token validation via `users/@me` (`extensions/platform-discord/src/validate.ts`).
 - `Guilds` / `GuildMessages` / `MessageContent` / `DirectMessages` intent setup.
-- Mention gate in guild channels (`mentionOnly: true` is the constructor default; pass `mentionOnly: false` to opt every message in — rarely what you want).
+- Channel modes in guild channels — `mention_only` (the default), `thread_follow`, `all`, `observe` — set server-wide with [`discord.defaultChannelMode`](../using/reference/config-yaml.md#discord-default-channel-mode). See [step 4a](#4a-set-the-default-channel-mode).
 - DM routing.
 - Outbound chunking to Discord's 2,000-char cap with edit-in-place streaming.
 - Clarify questions surface as buttons + modals, with the handler split across two modules — `extensions/platform-discord/src/clarify-blocks.ts` (component builders) and `extensions/platform-discord/src/clarify-interactions.ts` (button + modal callback handlers).
@@ -43,8 +43,7 @@ The Discord adapter lags Slack and Telegram on several gateway-contract features
 | `botKey` on `InboundMessage` | Stamped by the adapter; gateway routes by `${platform}:${botKey}:${chatId}`. | Not populated. Multi-bot Discord deployments collapse to one lane. See [Run multiple bots](../using/how-to/run-multiple-bots.md). |
 | Thread routing | Slack uses `thread_ts`; Telegram uses forum topics. Each gets a distinct `threadId`. | Discord threads are flattened into the parent channel; replies land in the parent, not the thread. |
 | Receipt reaction | Slack sets 👀 on inbound and clears it on first response; Telegram does the same with 👀. | Not implemented — users have no visual ack until the first streamed chunk lands. |
-| Channel modes | Slack supports `mention_only` / `thread_follow` / `all` per channel with persisted overrides. | Single static `mentionOnly` flag at adapter-construction time. |
-| Persistent store | Slack persists thread participation and per-channel mode overrides under `~/.ethos/slack/<botKey>/`. | No persistence — gateway restart loses every thread-follow decision. |
+| Per-channel mode command | Slack's `/ethos channel-mode <mode>` writes a per-channel override. | No writer. The mode is server-wide via `discord.defaultChannelMode`; `/ethos help` reads the effective mode but nothing sets it. See [step 4a](#4a-set-the-default-channel-mode). |
 | Approval surface | Slack renders the `before_ticket_complete` hook as an approval card. | Not implemented — Discord users can't participate in `kanban_complete` approvals. |
 
 The parity plan is shipping in nine independent moves; expect this matrix to shrink rather than grow. If you are operating a Discord-only deployment and one of the gaps blocks you, that's the gap to file against next.
@@ -106,12 +105,36 @@ If `✓ Discord online` prints but the bot ignores every mention, **Message Cont
 |---|---|---|---|---|
 | Server channel, bot is `@mentioned` | channel id | `false` | `true` | `discord:<channel-id>` |
 | Server thread, bot is `@mentioned` | parent channel id | `false` | `true` | `discord:<channel-id>` (collapses with the parent channel — `threadId` routing is on the [parity plan](#whats-shipped-vs-in-flight)) |
-| Server channel, no mention | channel id | `false` | `false` | dropped when `mentionOnly: true` (the default) |
+| Server channel, no mention | channel id | `false` | `false` | dropped under `mention_only` (the default mode) — see [step 4a](#4a-set-the-default-channel-mode) |
 | DM | DM channel id | `true` | `false` | `discord:<channel-id>` |
 
 The adapter strips the `<@botId>` prefix before passing text to the agent, so `@Ethos summarise the channel` arrives as `summarise the channel`.
 
-The `mentionOnly` flag is set at adapter-construction time in `apps/ethos/src/commands/gateway.ts` and defaults to `true`. To respond to every message a server channel produces, construct the adapter with `mentionOnly: false`. This is rarely what you want — Discord rate limits scale per channel, and Ethos has no per-[personality](../getting-started/glossary.md#personality) cost cap that limits guild-wide replies. There is no per-channel override today; that's the `channel modes` row on the [parity matrix](#whats-shipped-vs-in-flight).
+### 4a. Set the default channel mode
+
+What the bot does with a guild message nobody addressed to it is one key. Discord is single-bot — the token is the top-level `discordToken` — so the mode is top-level too, not an indexed roster entry the way Telegram's and Slack's are:
+
+```yaml
+# ~/.ethos/config.yaml
+discord.defaultChannelMode: observe
+```
+
+Four values, and they apply to every channel the bot can see:
+
+| Mode | Replies to | Records |
+|---|---|---|
+| `mention_only` (default) | messages that `@mention` the bot | those messages |
+| `thread_follow` | mentions, plus every message in a thread the bot has posted in | those messages |
+| `all` | every message in the channel | every message |
+| `observe` | nothing, not even an explicit `@mention` | every message |
+
+DMs are answered under every mode. An out-of-range value is a parse error — `ethos gateway` prints `discord: invalid defaultChannelMode '<value>'` and exits non-zero rather than falling back. Restart the gateway after editing; the key is read at startup.
+
+`all` is rarely what you want on a busy server: Discord rate limits scale per channel, and Ethos has no per-[personality](../getting-started/glossary.md#personality) cost cap that limits guild-wide replies.
+
+Nothing extra is needed on the Discord side. The **Message Content Intent** from [step 3](#3-confirm-intents) is what makes message text visible at all, and it covers unaddressed messages as much as mentions — unlike Slack, which needs a separate `message.channels` subscription, and Telegram, which needs Group Privacy off.
+
+**There is no per-channel command on Discord.** Slack's `/ethos channel-mode` has no Discord equivalent, so this key is the only way to set a mode today and it cannot be narrowed to one channel. `/ethos help` prints the channel's effective mode read-only. Field details are in [`discord.defaultChannelMode`](../using/reference/config-yaml.md#discord-default-channel-mode).
 
 ### 5. Restrict who can talk to the bot
 

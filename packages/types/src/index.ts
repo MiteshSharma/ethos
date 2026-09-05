@@ -6,6 +6,7 @@ export * from './agent-event';
 export * from './background-job';
 export * from './call-capture';
 export * from './channel-conformance';
+export * from './channel-transcript';
 export * from './clarify';
 export * from './command';
 export * from './constitution';

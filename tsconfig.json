@@ -35,6 +35,7 @@
       "@ethosagent/job-runner": ["./extensions/job-runner/src"],
       "@ethosagent/delivery-ledger": ["./extensions/delivery-ledger/src"],
       "@ethosagent/inbound-dedup": ["./extensions/inbound-dedup/src"],
+      "@ethosagent/channel-transcript-sqlite": ["./extensions/channel-transcript-sqlite/src"],
       "@ethosagent/session-cards": ["./extensions/session-cards/src"],
       "@ethosagent/call-log": ["./extensions/call-log/src"],
       "@ethosagent/kanban-store": ["./extensions/kanban-store/src"],
@@ -85,6 +86,7 @@
       "@ethosagent/platform-whatsapp/clarify-surface": [
         "./extensions/platform-whatsapp/src/clarify-surface"
       ],
+      "@ethosagent/platform-whatsapp/format": ["./extensions/platform-whatsapp/src/format"],
       "@ethosagent/openclaw-compat": ["./extensions/openclaw-compat/src"],
       "@ethosagent/skills": ["./extensions/skills/src"],
       "@ethosagent/tools-file": ["./extensions/tools-file/src"],

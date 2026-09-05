@@ -1,10 +1,11 @@
+import { ChannelOverrideStore } from '@ethosagent/core';
 import type { Storage, StorageDirEntry } from '@ethosagent/types';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { dispatch, parseSubcommand, type SlashContext } from '../commands';
 import type { KanbanReader } from '../commands/kanban';
 import { extractRecentEntries, type MemoryReader } from '../commands/memory';
 import type { PersonalityCardReader } from '../commands/personality';
-import { ChannelOverrideStore } from '../store/channel-overrides';
+import { ChannelModeSchema } from '../config';
 
 function memStorage(): Storage {
   const files = new Map<string, string>();
@@ -182,7 +183,7 @@ describe('dispatch — channel-mode', () => {
   });
 
   it('show reflects per-channel override after set', async () => {
-    const overrides = new ChannelOverrideStore(memStorage(), '/slack', 'bot-a');
+    const overrides = new ChannelOverrideStore(memStorage(), '/slack/bot-a', ChannelModeSchema);
     await dispatch(
       { ...basePayload, text: 'channel-mode all' },
       ctxFor({ channelOverrides: overrides }),
@@ -196,7 +197,7 @@ describe('dispatch — channel-mode', () => {
   });
 
   it('rejects invalid mode argument', async () => {
-    const overrides = new ChannelOverrideStore(memStorage(), '/slack', 'bot-a');
+    const overrides = new ChannelOverrideStore(memStorage(), '/slack/bot-a', ChannelModeSchema);
     const r = await dispatch(
       { ...basePayload, text: 'channel-mode unicorn' },
       ctxFor({ channelOverrides: overrides }),
@@ -311,5 +312,60 @@ describe('extractRecentEntries', () => {
     const entries = extractRecentEntries(body, 2);
     expect(entries.length).toBe(2);
     expect(entries[entries.length - 1]).toContain('four');
+  });
+});
+
+// `observe` (plan/phases/ambient-group-monitoring.md §2). `ChannelModeSchema`
+// gates what the command accepts, so widening the enum was enough to make
+// `/ethos channel-mode observe` land — but the usage and help text list the
+// modes by hand, and a mode the operator cannot discover is a mode they will
+// not use.
+describe('dispatch — channel-mode observe', () => {
+  const basePayload = {
+    command: '/ethos',
+    text: '',
+    channel_id: 'C1',
+    user_id: 'U1',
+    trigger_id: 'tg-1',
+  };
+
+  it('accepts and stores observe', async () => {
+    const overrides = new ChannelOverrideStore(memStorage(), '/slack/bot-a', ChannelModeSchema);
+    const r = await dispatch(
+      { ...basePayload, text: 'channel-mode observe' },
+      ctxFor({ channelOverrides: overrides }),
+    );
+
+    expect(r.text).not.toContain('Usage:');
+    expect(overrides.get('C1')).toEqual({ mode: 'observe' });
+  });
+
+  it('shows observe back as the effective mode', async () => {
+    const overrides = new ChannelOverrideStore(memStorage(), '/slack/bot-a', ChannelModeSchema);
+    await dispatch(
+      { ...basePayload, text: 'channel-mode observe' },
+      ctxFor({ channelOverrides: overrides }),
+    );
+    const show = await dispatch(
+      { ...basePayload, text: 'channel-mode show' },
+      ctxFor({ channelOverrides: overrides }),
+    );
+
+    expect(show.text).toContain('observe');
+    expect(show.text).toContain('per-channel override');
+  });
+
+  it('offers observe in the usage text for an unknown mode', async () => {
+    const r = await dispatch({ ...basePayload, text: 'channel-mode unicorn' }, ctxFor());
+
+    expect(r.text).toContain('Usage:');
+    expect(r.text).toContain('observe');
+  });
+
+  it('lists observe among the modes in /ethos help', async () => {
+    const r = await dispatch({ ...basePayload, text: 'help' }, ctxFor());
+
+    expect(r.text).toContain('channel-mode');
+    expect(r.text).toContain('observe');
   });
 });

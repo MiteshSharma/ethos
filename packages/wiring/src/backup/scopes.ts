@@ -63,8 +63,8 @@ export interface WalStoreRecord {
 }
 
 /**
- * Every WAL store in the repo. 19 pragma sites across 18 modules, resolving to
- * 14 distinct database files — `sessions.db` has FIVE tenants sharing one file
+ * Every WAL store in the repo. 20 pragma sites across 19 modules, resolving to
+ * 15 distinct database files — `sessions.db` has FIVE tenants sharing one file
  * and `pairing.db` is opened from two commands.
  *
  * Five, not four, and the difference is that tenants are not modules:
@@ -175,6 +175,18 @@ export const WAL_STORES: readonly WalStoreRecord[] = [
     database: 'calls.db',
     scope: 'state',
     reason: 'Telephony call history — a durable record, not a working set.',
+  },
+  {
+    source: 'extensions/channel-transcript-sqlite/src/index.ts',
+    sites: 1,
+    database: 'channel-transcript.db',
+    scope: 'state',
+    reason:
+      'Conversation content from watched group chats, in the same category as sessions.db and ' +
+      'as sensitive: verbatim third-party messages with sender ids. Nothing else can rebuild it ' +
+      '— the platforms will not redeliver — and the digest reads it as history, so a restored ' +
+      'machine that lost it silently loses up to a retention window of context. The short 30d ' +
+      'TTL bounds its size; it does not change what kind of data it is.',
   },
   {
     source: 'apps/ethos/src/commands/gateway.ts',

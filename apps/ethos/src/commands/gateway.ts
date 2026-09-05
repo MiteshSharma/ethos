@@ -1,8 +1,13 @@
 import { spawn } from 'node:child_process';
+// Storage-abstraction exception, same one `pairing-commands.ts` takes: the
+// presence check for a `@ethosagent/sqlite` database file, which opens raw
+// paths and manages WAL/SHM natively. See `openChannelTranscriptStore`.
+import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { StorageA2aAllowlist } from '@ethosagent/a2a';
 import { type CallLog, SQLiteCallLog } from '@ethosagent/call-log';
+import { SQLiteChannelTranscriptStore } from '@ethosagent/channel-transcript-sqlite';
 import {
   applyPlatformShim,
   type BotBinding,
@@ -11,6 +16,7 @@ import {
   type EthosConfig,
   ethosDir,
   loadConfigStrict,
+  observeModePlatforms,
   readRawConfig,
   type SlackAppConfig,
   type TelegramBotConfig,
@@ -42,6 +48,7 @@ import {
   type GatewayBotConfig,
   type GatewayConfig,
   relayToTargets,
+  summarizeChannelDigest,
 } from '@ethosagent/gateway';
 import { registerGoalNotifications } from '@ethosagent/goal-runner';
 import { type BusySource, IdleWatcherManager } from '@ethosagent/idle-watcher';
@@ -79,6 +86,7 @@ import { createA2aTools } from '@ethosagent/tools-a2a';
 // optionalDependencies of @ethosagent/cli. A failed install for any one of
 // them must not crash the CLI for users who don't run that platform.
 import {
+  type ChannelTranscriptStore,
   type ClarifyResponse,
   EthosError,
   type GatewayMessagePayload,
@@ -597,7 +605,17 @@ export async function runGatewayStart(opts: GatewayStartOptions = {}): Promise<v
       secrets,
       logger: new ConsoleLogger({}, logLevel),
     }),
-    systemTasks: { ...buildSystemTaskHandlers(config), ...watcherManager.systemTasks() },
+    systemTasks: {
+      ...buildSystemTaskHandlers(config),
+      ...watcherManager.systemTasks(),
+      // Contributed here rather than by `buildSystemTaskHandlers`: the digest
+      // needs the live Gateway (`sendVia`, the per-bot loops, the transcript
+      // store), which the shared handler table has no access to. Forward-
+      // referenced like `cronDeliverFn` above — the Gateway is built before
+      // `cronTriggers.local.start()`, so it is always set by the time this
+      // fires.
+      'channel-digest': channelDigestSystemTask(config, () => gatewayRef),
+    },
     onDecision: (job, d) => {
       try {
         getEthosObservability().recordHeartbeatDecision({
@@ -981,6 +999,12 @@ export async function runGatewayStart(opts: GatewayStartOptions = {}): Promise<v
   // convention and same unconditional construction as the ledger above.
   const inboundDedup = new SQLiteInboundDedupStore(join(ethosDir(), 'inbound-dedup.db'));
 
+  // Observe-mode transcript sink (plan/phases/ambient-group-monitoring.md R1).
+  // Deliberately NOT eager like the two stores above: this one is opened on
+  // first write, so `channel-transcript.db` appears only once a chat is
+  // actually being watched. See `openChannelTranscriptStore`.
+  const channelTranscript = openChannelTranscriptStore(join(ethosDir(), 'channel-transcript.db'));
+
   // Build adapter registry for send_message cross-platform routing.
   // Derive platform key from adapter.id prefix (e.g. 'telegram:bot-1' → 'telegram',
   // 'email' → 'email'). This is a stable identifier, unlike displayName which is UI text.
@@ -1071,6 +1095,7 @@ export async function runGatewayStart(opts: GatewayStartOptions = {}): Promise<v
     onUserTurn,
     streamingEdits,
     pairingDb,
+    channelTranscript,
     clarifyMessageCorrelator,
     personalityCardReader: telegramCardReader,
     greetingProvider: telegramGreetingProvider,
@@ -1255,7 +1280,7 @@ export async function runGatewayStart(opts: GatewayStartOptions = {}): Promise<v
   // and a feature switched off has its job removed instead of firing forever.
   // Only the jobs in that table are touched — watcher ticks are seeded per
   // watcher by the watcher manager and are left alone.
-  void seedAllSystemJobs(scheduler, config)
+  void seedAllSystemJobs(scheduler, config, 'gateway')
     .then((outcomes) => {
       for (const o of outcomes) {
         const problem = systemJobProblem(o);
@@ -3179,6 +3204,11 @@ export async function buildAdapters(
 ): Promise<PlatformAdapter[]> {
   config = applyPlatformShim(config).config;
   const adapters: PlatformAdapter[] = [];
+  // Adapter startup diagnostics. Both Telegram and Slack take an optional
+  // `logger` and go silent without one — Slack's "authenticated as @…" line
+  // and Telegram's observe-mode privacy-mode warning are only reachable
+  // because this is passed. Each adapter `child()`s it with its own tag.
+  const adapterLogger = new ConsoleLogger({}, config.logs?.level);
 
   if ((config.telegram?.bots.length ?? 0) > 0) {
     const mod = await loadAdapter<typeof import('@ethosagent/platform-telegram')>(
@@ -3236,6 +3266,20 @@ export async function buildAdapters(
             ...(botCfg.webhookUrl ? { webhookUrl: botCfg.webhookUrl } : {}),
             ...(botCfg.webhookSecretToken ? { webhookSecretToken: botCfg.webhookSecretToken } : {}),
             ...(identity ? { identity } : {}),
+            // Backs the `channelModes: true` the adapter advertises: without a
+            // Storage there is no per-chat override store, so `/ethos
+            // channel-mode` has nowhere to write and every chat is stuck on
+            // the default below. The adapter appends the botKey itself, but
+            // its own fallback is the RELATIVE `'telegram'` — under FsStorage,
+            // which takes absolute paths, that resolves against the process
+            // CWD. Same shape the WhatsApp site passes.
+            storage,
+            telegramDir: join(ethosDir(), 'telegram'),
+            ...(botCfg.defaultChannelMode ? { defaultChannelMode: botCfg.defaultChannelMode } : {}),
+            // Reaches `warnIfPrivacyModeHidesObserved`, which is the only
+            // thing that tells an operator their observe-mode bot is watching
+            // rooms BotFather's privacy setting stops it from hearing.
+            logger: adapterLogger,
             // Operator override for the inbound-attachment ceiling. Absent
             // leaves each adapter on its own platform default — the platforms
             // themselves disagree about what is deliverable.
@@ -3312,6 +3356,10 @@ export async function buildAdapters(
               recordSafetyBlock: (opts) => getEthosObservability().recordSafetyBlock(opts),
             },
             storage: slackStorage,
+            // `SlackAdapterConfig.logger` defaults to a NoopLogger, so until
+            // this was passed the adapter's own startup diagnostics went
+            // nowhere.
+            logger: adapterLogger,
             personalityCard,
             personalityUnfurl,
             session,
@@ -3360,6 +3408,17 @@ export async function buildAdapters(
           },
           ...(config.gateway?.maxInboundMediaBytes !== undefined
             ? { maxInboundMediaBytes: config.gateway.maxInboundMediaBytes }
+            : {}),
+          // Backs the `channelModes: true` the adapter advertises, and the
+          // `threadState` / `backfillState` stores it only builds when a
+          // Storage arrives. The adapter's own directory fallback is the
+          // RELATIVE `'discord'` — under FsStorage, which takes absolute
+          // paths, that resolves against the process CWD. Same shape the
+          // Telegram, Slack and WhatsApp sites pass.
+          storage: getStorage(),
+          discordDir: join(ethosDir(), 'discord'),
+          ...(config.discord?.defaultChannelMode
+            ? { defaultChannelMode: config.discord.defaultChannelMode }
             : {}),
           ...(config.discord?.missedMessageBackfill
             ? { missedMessageBackfill: config.discord.missedMessageBackfill }
@@ -3432,6 +3491,11 @@ export async function buildAdapters(
             botKey: whatsAppBotKey(waCfg),
             sessionDir: waCfg.session_dir ?? join(ethosDir(), 'whatsapp'),
             defaultMode: waCfg.default_mode ?? 'mention_only',
+            // Backs the `channelModes: true` the adapter advertises: without a
+            // Storage there is no per-chat override store, and every chat is
+            // stuck on `defaultMode`.
+            storage: getStorage(),
+            whatsappDir: join(ethosDir(), 'whatsapp'),
             allowedJids: waCfg.allowed_numbers,
             cache: waCache,
             onQr: onQrCb ? (qr) => onQrCb(waCfg.id ?? 'default', qr) : undefined,
@@ -3948,9 +4012,108 @@ export interface BuildGatewayOptions {
   onUserTurn: GatewayConfig['onUserTurn'];
   streamingEdits: GatewayConfig['streamingEdits'];
   pairingDb: GatewayConfig['pairingDb'];
+  /** Observe-mode transcript sink. Build it with `openChannelTranscriptStore`. */
+  channelTranscript: GatewayConfig['channelTranscript'];
+  /**
+   * The channel digest's in-app feed. Optional because only `ethos boot` has
+   * one — see `channelDigestFeed` in `./boot` and the field's doc on
+   * `GatewayConfig`.
+   */
+  channelDigestFeed?: GatewayConfig['channelDigestFeed'];
   clarifyMessageCorrelator: GatewayConfig['clarifyMessageCorrelator'];
   personalityCardReader: GatewayConfig['personalityCardReader'];
   greetingProvider: GatewayConfig['greetingProvider'];
+}
+
+/**
+ * The `channel-digest` system cron task (plan/phases/ambient-group-monitoring.md
+ * R3/R9/R10), shared by `ethos gateway start` and `ethos boot`.
+ *
+ * NOT in `buildSystemTaskHandlers`: every input the digest needs — the
+ * transcript store, the per-bot loops, the botKey-keyed adapters, the owner in
+ * `channel_filter` — is private to the live Gateway, which that shared table
+ * has no handle on. `ethos serve` has no adapters and therefore no digest, and
+ * `systemJobSpecs` omits the job from serve's roster rather than listing it
+ * disabled: a disabled spec is REMOVED, so serve would otherwise delete the job
+ * the gateway seeded, on every restart, forever.
+ *
+ * `getGateway` is a getter rather than the Gateway itself because the cron
+ * scheduler is constructed before the Gateway exists. By the time a job can
+ * fire (`cronTriggers.local.start()` runs after `buildGateway`) it is set.
+ */
+export function channelDigestSystemTask(
+  config: EthosConfig,
+  getGateway: () => Gateway | null,
+  opts: { inAppSink?: boolean } = {},
+): () => Promise<{ output: string }> {
+  // `deliverTo: 'inApp'` makes the in-app feed the digest's ENTIRE delivery.
+  // Only `ethos boot` has a feed to give the Gateway (`channelDigestFeed`);
+  // under `ethos gateway` there is no in-process web API, so every digest
+  // would be summarised — a paid LLM pass over a watched room — and dropped.
+  // Refuse at startup, where an operator sees it, rather than discarding
+  // nightly. `enabled` is checked too: a `deliverTo` left in the config of a
+  // digest nobody turned on is not a reason to refuse to start.
+  if (config.channelDigest?.enabled === true && config.channelDigest.deliverTo === 'inApp') {
+    if (opts.inAppSink !== true) {
+      throw new EthosError({
+        code: 'CONFIG_INVALID',
+        cause:
+          "channelDigest.deliverTo is 'inApp', but this command has no in-app notifications feed — every digest would be generated and discarded.",
+        action:
+          'Run `ethos boot`, which serves the web UI, or set `channelDigest.deliverTo: owner` in ~/.ethos/config.yaml.',
+      });
+    }
+  }
+  return async () => {
+    const gateway = getGateway();
+    if (!gateway) return { output: 'Channel digest skipped — the gateway is not running' };
+    const cd = config.channelDigest ?? {};
+    const report = await gateway.runChannelDigest({
+      ...(cd.deliverTo ? { deliverTo: cd.deliverTo } : {}),
+      ...(cd.maxMessagesPerLane !== undefined ? { maxMessagesPerLane: cd.maxMessagesPerLane } : {}),
+      ...(cd.costWarnUsdPerLane !== undefined ? { costWarnUsdPerLane: cd.costWarnUsdPerLane } : {}),
+    });
+    return { output: summarizeChannelDigest(report) };
+  };
+}
+
+/**
+ * The observe-mode transcript sink, opened on FIRST WRITE.
+ *
+ * `new SQLiteChannelTranscriptStore(path)` creates the file and runs the
+ * migration in its constructor, so building one at startup would drop a
+ * `channel-transcript.db` into `~/.ethos/` on every machine — including the
+ * overwhelming majority that have never set a chat to observe. The file
+ * existing is the signal that something is being recorded, and it should mean
+ * that. So this is a thin deferral: nothing is opened until a message actually
+ * needs writing.
+ *
+ * The READS do not open it either. Enabling the channel digest on a deployment
+ * that has observed nothing would otherwise create and migrate the database on
+ * the digest's first `listLanes` — the same file, appearing for the same wrong
+ * reason, one caller later. A read against a database that does not exist has
+ * an honest answer, and it is "nothing", so that is what they return. Once a
+ * write has opened the connection the reads go through it as before.
+ *
+ * `close()` closes only what was opened — a process that never recorded has
+ * nothing to close.
+ */
+export function openChannelTranscriptStore(dbPath: string): ChannelTranscriptStore {
+  let store: SQLiteChannelTranscriptStore | undefined;
+  const open = (): SQLiteChannelTranscriptStore => {
+    store ??= new SQLiteChannelTranscriptStore(dbPath);
+    return store;
+  };
+  /** The live connection, or undefined while there is nothing to read. */
+  const opened = (): SQLiteChannelTranscriptStore | undefined =>
+    store ?? (existsSync(dbPath) ? open() : undefined);
+  return {
+    record: (entry) => open().record(entry),
+    readSince: async (laneKey, since, options) =>
+      (await opened()?.readSince(laneKey, since, options)) ?? { messages: [], omittedCount: 0 },
+    listLanes: async (options) => (await opened()?.listLanes(options)) ?? [],
+    close: () => store?.close(),
+  };
 }
 
 export function buildGateway(opts: BuildGatewayOptions): Gateway {
@@ -3981,10 +4144,17 @@ export function buildGateway(opts: BuildGatewayOptions): Gateway {
     onUserTurn,
     streamingEdits,
     pairingDb,
+    channelTranscript,
+    channelDigestFeed,
     clarifyMessageCorrelator,
     personalityCardReader: telegramCardReader,
     greetingProvider: telegramGreetingProvider,
   } = opts;
+  // Observe mode records nothing without `channelTranscript`. Both branches
+  // below wire one, so this stays silent here — it is the light for a
+  // deployment that assembles its own Gateway and forgets the sink. See
+  // `GatewayConfig.observeModePlatforms`.
+  const observedPlatforms = observeModePlatforms(config);
   return bots.length === 0
     ? // No platform configured — idle gateway. Every configured platform
       // (including Discord/Email) now registers a bot in `buildGatewayBots`,
@@ -4032,6 +4202,9 @@ export function buildGateway(opts: BuildGatewayOptions): Gateway {
         ...(config.channelToolsets ? { channelToolsets: config.channelToolsets } : {}),
         ...(config.channelFilter ? { channelFilter: config.channelFilter } : {}),
         ...(pairingDb ? { pairingDb } : {}),
+        channelTranscript,
+        ...(channelDigestFeed ? { channelDigestFeed } : {}),
+        observeModePlatforms: observedPlatforms,
       })
     : new Gateway({
         bots,
@@ -4040,6 +4213,13 @@ export function buildGateway(opts: BuildGatewayOptions): Gateway {
         // Reading cached attachment bytes: an inbound voice note is
         // transcribed from the audio itself, not from a path.
         storage,
+        // Where gateway-owned state files go — today the channel digest's
+        // per-lane watermarks and the run lock that brackets them. `Storage`
+        // does not root relative paths, so this is what keeps those files in
+        // `~/.ethos/` rather than in the cwd — which for a daemon is wherever
+        // it happened to be started, and would put two processes' locks in two
+        // different directories.
+        dataDir: ethosDir(),
         adapters: adapterMap,
         deliveryLedger,
         inboundDedup,
@@ -4083,5 +4263,8 @@ export function buildGateway(opts: BuildGatewayOptions): Gateway {
         ...(telegramGreetingProvider ? { greetingProvider: telegramGreetingProvider } : {}),
         ...(config.channelFilter ? { channelFilter: config.channelFilter } : {}),
         ...(pairingDb ? { pairingDb } : {}),
+        channelTranscript,
+        ...(channelDigestFeed ? { channelDigestFeed } : {}),
+        observeModePlatforms: observedPlatforms,
       });
 }

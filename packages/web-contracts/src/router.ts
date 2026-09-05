@@ -107,6 +107,7 @@ import {
   TeamDetailSchema,
   TeamSummarySchema,
   TelegramBotEntrySchema,
+  WhatsAppChannelModeSchema,
   WhatsAppEntrySchema,
 } from './schemas';
 
@@ -2465,7 +2466,7 @@ const platforms = {
     .input(
       z.object({
         id: z.string().optional(),
-        defaultMode: z.enum(['all', 'mention_only']).optional(),
+        defaultMode: WhatsAppChannelModeSchema.optional(),
         allowedNumbers: z.array(z.string()).optional(),
         phoneNumber: z.string().optional(),
         bind: BotBindingSchema,
@@ -4076,6 +4077,75 @@ const deliveries = {
 };
 
 // ---------------------------------------------------------------------------
+// Observed chats — the rooms a bot WATCHES and never answers
+// (plan/phases/ambient-group-monitoring.md R12).
+//
+// Read-only, and deliberately thin: every field below is a field
+// `ChannelTranscriptStore.listLanes` actually returns. Nothing is derived, and
+// in particular NO MESSAGE TEXT crosses this wire. A room the agent is merely
+// present in is not a room the operator gets to read out of a settings page —
+// the transcript exists to be summarised by the digest turn, not browsed. The
+// privacy line is the plan's (§8, "Never the last message text") and this
+// schema is where it is actually enforced.
+// ---------------------------------------------------------------------------
+
+const ChannelObservedLaneSchema = z.object({
+  /** `platform:botKey:chatId[:threadId]`, URL-encoded per segment. The row key. */
+  laneKey: z.string(),
+  platform: z.string(),
+  /** Which configured bot watches this room. */
+  botKey: z.string(),
+  chatId: z.string(),
+  /** Null for the root chat — a thread is a distinct room, and a distinct lane. */
+  threadId: z.string().nullable(),
+  /**
+   * Messages whose `sentAt` falls inside the requested `since` window. Zero is
+   * a real answer, not an absence: a watched room that was quiet today is
+   * still watched, and dropping it would read as "we stopped listening".
+   */
+  count: z.number(),
+  /** Newest `sentAt` in the lane, epoch ms — ignores `since`. */
+  lastSentAt: z.number(),
+});
+
+const ChannelsObservedInput = z.object({
+  /**
+   * Window for `count`, epoch ms. The CALLER picks it, because "today" is a
+   * question about the reader's clock and the server does not know their
+   * timezone. Omitted means all time.
+   */
+  since: z.number().int().nonnegative().optional(),
+  /** Lanes to return, newest-active first. Defaults to the store's own 500. */
+  limit: z.number().int().min(1).max(500).optional(),
+});
+
+const ChannelsObservedOutput = z.object({
+  lanes: z.array(ChannelObservedLaneSchema),
+  /**
+   * Watched lanes beyond `limit`. Same meaning, and the same name, as
+   * `ChannelTranscriptPage.omittedCount`: the count that was dropped, said out
+   * loud. `0` means the list is complete. Never truncate in silence (feedback
+   * & activity contract §7, "nothing vanishes").
+   */
+  omittedCount: z.number(),
+  /**
+   * Why the transcript could not be read, when it could not be. NOT a thrown
+   * error: a failed read is a `✗ failed` ROW that stays on the page beside
+   * whatever else it says (contract §6), and a rejected RPC gives the client
+   * an exception to render as a disappearing toast instead. `null` on success.
+   *
+   * `lanes: [], omittedCount: 0, error: null` is the honest empty house — no
+   * bot has ever observed anything here.
+   */
+  error: z.string().nullable(),
+});
+
+/** @experimental */
+const channels = {
+  observed: oc.input(ChannelsObservedInput).output(ChannelsObservedOutput),
+};
+
+// ---------------------------------------------------------------------------
 // A2A peering (admin surface) — thin RPC wrappers over the wiring
 // `A2aPeeringService` + the runtime enable/disable control. Rides the same
 // cookie/bearer `/rpc` auth as the other management namespaces; NOT the public
@@ -4746,6 +4816,7 @@ export const contract = {
   digest,
   voice,
   deliveries,
+  channels,
   a2a,
   namedSecrets,
   keys,

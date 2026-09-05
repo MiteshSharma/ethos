@@ -37,3 +37,13 @@ extensions/platform-callcapture/native/vendor/
 src/**/*.js
 src/**/*.js.map
 .mcp.json
+
+# Adapter state accidentally written to the process CWD. The Telegram, Discord
+# and WhatsApp adapters fall back to a RELATIVE state directory
+# (`config.discordDir ?? 'discord'` and friends) and FsStorage is unrooted, so a
+# construction site — or a test — that does not qualify the path writes here
+# instead of under ~/.ethos. Root-anchored (leading `/`) so they match only the
+# repo root and cannot mask extensions/platform-discord/ or any real source path.
+/discord/
+/telegram/
+/whatsapp/

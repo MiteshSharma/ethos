@@ -1,7 +1,8 @@
+import { ChannelOverrideStore } from '@ethosagent/core';
 import { describe, expect, it } from 'vitest';
 import { isSlackDownloadUrl } from '../adapter';
+import { ChannelModeSchema } from '../config';
 import { BackfillStateStore } from '../store/backfill-state';
-import { ChannelOverrideStore } from '../store/channel-overrides';
 import { ThreadStateStore } from '../store/thread-state';
 
 // CHS-006 — `url_private_download` arrives on an event payload and the download
@@ -58,8 +59,8 @@ describe('JSONL stores survive a truncated line', () => {
   it('ChannelOverrideStore loads the intact records', async () => {
     const store = new ChannelOverrideStore(
       storageWith('{"channel":"C1","mode":"all"}\n{"channel":"C2","mo'),
-      '/slack',
-      'bot-a',
+      '/slack/bot-a',
+      ChannelModeSchema,
     );
     await expect(store.load()).resolves.toBeUndefined();
   });

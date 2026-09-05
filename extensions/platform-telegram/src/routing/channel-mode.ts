@@ -1,41 +1,20 @@
-// Pure decision: should the bot respond to this inbound?
+// SUPERSEDED — this file should be deleted.
 //
-// The matrix:
-//   DM                                   -> true
-//   channelMode === 'all'                -> true
-//   isGroupMention (bot @mentioned)      -> true
-//   channelMode === 'thread_follow' AND
-//     threadState.hasBotPosted(thread)?  -> true
-//   channelMode === 'regex_match' AND
-//     pattern matches messageText?       -> true
-//   otherwise                            -> false
+// The reply/record decision moved to `evaluateChannelMode` in
+// `@ethosagent/core`: Slack, Telegram, Discord and WhatsApp each carried a
+// copy of this matrix and they had already drifted. Telegram's copy was the
+// only one that knew `regex_match`, and none of them knew `observe`.
+//
+// One behaviour did NOT move with it. The shared evaluator takes
+// `matchesPattern` as a thunk and never compiles a pattern itself, so the
+// `try { new RegExp(p) } catch { return false }` that made a bad user-supplied
+// pattern a non-match rather than a thrown error now lives in the closure the
+// adapter passes (`index.ts`).
+//
+// The local `shouldRespond` is gone rather than left to rot. What remains is a
+// re-export, so anything still importing this path gets the one shared
+// decision instead of a second implementation of it. Removing the file is a
+// one-line follow-up; see plan/phases/ambient-group-monitoring.md R6.
 
-import type { ChannelMode } from '../config';
-
-export interface ChannelModeInputs {
-  isDm: boolean;
-  isGroupMention: boolean;
-  channelMode: ChannelMode;
-  hasBotPosted: boolean;
-  /** Message text, used for regex_match mode. */
-  messageText?: string;
-  /** Regex pattern from the channel override, used for regex_match mode. */
-  regexPattern?: string;
-}
-
-export function shouldRespond(inputs: ChannelModeInputs): boolean {
-  if (inputs.isDm) return true;
-  if (inputs.channelMode === 'all') return true;
-  if (inputs.isGroupMention) return true;
-  if (inputs.channelMode === 'thread_follow' && inputs.hasBotPosted) return true;
-  if (inputs.channelMode === 'regex_match') {
-    const pattern = inputs.regexPattern;
-    if (!pattern) return false;
-    try {
-      return new RegExp(pattern).test(inputs.messageText ?? '');
-    } catch {
-      return false; // invalid regex stored — treat as no match
-    }
-  }
-  return false;
-}
+export type { ChannelModeDecision, ChannelModeInputs } from '@ethosagent/core';
+export { evaluateChannelMode } from '@ethosagent/core';

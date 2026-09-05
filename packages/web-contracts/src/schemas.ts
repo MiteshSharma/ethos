@@ -578,9 +578,23 @@ export type SlackAppEntry = z.infer<typeof SlackAppEntrySchema>;
 // holds saved credentials. Saving a bot requires a `bind` (see the
 // botsAddWhatsApp router input), but `bind` is optional on the entry so that
 // listing a legacy bind-less config doesn't throw.
+/**
+ * Every mode the WhatsApp adapter's own enum accepts
+ * (`extensions/platform-whatsapp/src/config.ts`). `observe` records the room
+ * and never replies in it, not even to an @mention.
+ *
+ * It is spelled out here, and matched against the adapter's list by a test,
+ * because the previous two-value version did not fail — it DISPLAYED. An
+ * observe-configured bot came back over the wire as `mention_only` and the
+ * Platforms table drew a bot that answers mentions, which is the opposite of
+ * what the operator configured.
+ */
+export const WhatsAppChannelModeSchema = z.enum(['all', 'mention_only', 'observe']);
+export type WhatsAppChannelMode = z.infer<typeof WhatsAppChannelModeSchema>;
+
 export const WhatsAppEntrySchema = z.object({
   botKey: z.string(),
-  defaultMode: z.enum(['all', 'mention_only']),
+  defaultMode: WhatsAppChannelModeSchema,
   allowedNumbers: z.array(z.string()),
   /** Phone number this bot links via pairing code, when configured. Absent for
    *  QR-linked bots. Lets the UI show which number is being paired. */

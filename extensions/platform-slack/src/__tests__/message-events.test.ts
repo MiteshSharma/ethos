@@ -173,3 +173,77 @@ describe('registerMessageEvents — thread backfill (SP-B1)', () => {
     expect(priorContext).not.toContain('unknown bot said this');
   });
 });
+
+// ---------------------------------------------------------------------------
+// Observe mode through the real event registration
+// (plan/phases/ambient-group-monitoring.md §2, R11).
+//
+// The triage suite proves the decision. This proves the WIRING: that both
+// Slack inbound handlers — `message` and `app_mention` — hand the stamped
+// envelope on rather than dropping it, which is the half a pure-function test
+// cannot see.
+// ---------------------------------------------------------------------------
+
+describe('registerMessageEvents — observe mode', () => {
+  const channelPost = {
+    message: {
+      channel: 'C_SITE_7',
+      channel_type: 'channel',
+      user: 'U0STRANGER',
+      text: 'concrete pour slipped to thursday',
+      ts: '1699000000.123456',
+    },
+  };
+
+  const mentionEvent = {
+    channel: 'C_SITE_7',
+    user: 'U0STRANGER',
+    text: '<@U0BOT99> are we on track?',
+    ts: '1699000000.123456',
+  };
+
+  async function runMessage(triage: TriageContext) {
+    const app = fakeApp();
+    const { envelopes, onEnvelope } = capture();
+    registerMessageEvents(app as never, triage, { onEnvelope });
+    await app.handlers.get('message')?.(channelPost);
+    return envelopes;
+  }
+
+  async function runMention(triage: TriageContext) {
+    const app = fakeApp();
+    const { envelopes, onEnvelope } = capture();
+    registerMessageEvents(app as never, triage, { onEnvelope });
+    await app.handlers.get('event:app_mention')?.({ event: mentionEvent });
+    return envelopes;
+  }
+
+  it('hands an unmentioned channel post on as a record-only envelope', async () => {
+    const envelopes = await runMessage({ ...baseTriage, defaultChannelMode: 'observe' });
+
+    expect(envelopes).toHaveLength(1);
+    expect(envelopes[0]?.recordOnly).toBe(true);
+    expect(envelopes[0]?.chatId).toBe('C_SITE_7');
+    expect(envelopes[0]?.sentAt).toBe(1_699_000_000_123);
+  });
+
+  it('drops the same post entirely in mention_only', async () => {
+    expect(await runMessage(baseTriage)).toHaveLength(0);
+  });
+
+  it('hands an @mention on as record-only rather than swallowing it', async () => {
+    const envelopes = await runMention({ ...baseTriage, defaultChannelMode: 'observe' });
+
+    expect(envelopes).toHaveLength(1);
+    expect(envelopes[0]?.isGroupMention).toBe(true);
+    expect(envelopes[0]?.recordOnly).toBe(true);
+  });
+
+  it('still delivers an answerable @mention in every other mode', async () => {
+    for (const mode of ['mention_only', 'all', 'thread_follow'] as const) {
+      const envelopes = await runMention({ ...baseTriage, defaultChannelMode: mode });
+      expect(envelopes, mode).toHaveLength(1);
+      expect(envelopes[0]?.recordOnly, mode).toBe(false);
+    }
+  });
+});

@@ -36,7 +36,53 @@ export interface RawWhatsAppMessage {
       fileLength?: number;
     };
   };
-  messageTimestamp?: number;
+  /** Seconds since the epoch. protobufjs decodes this 64-bit field as a
+   *  `Long` whenever the runtime has long.js available, so both shapes arrive
+   *  in practice — `resolveSentAt` normalises them. */
+  messageTimestamp?: number | { toNumber(): number } | null;
+}
+
+/**
+ * The bot's own number as WhatsApp writes it in a JID: `<number>[:<device>]@<server>`.
+ */
+function botNumberOf(botJid: string): string {
+  return botJid.split('@')[0].split(':')[0];
+}
+
+/**
+ * Was the bot mentioned in this message?
+ *
+ * The ONE mention test for the adapter. The inbound gate used to carry its own
+ * crude copy — a substring check over `conversation`/`extendedTextMessage`
+ * only — which disagreed with this one twice: it never saw an image or video
+ * CAPTION (so a captioned "@bot do X" was dropped before the parser ran), and
+ * it never saw `contextInfo.mentionedJid` (so a mention chip with no literal
+ * `@<number>` in the body was dropped too). Both call sites now share this
+ * function so they cannot disagree again.
+ *
+ * Group-ness is the caller's business: this answers only "was I mentioned".
+ */
+export function isBotMentioned(msg: RawWhatsAppMessage, botJid: string): boolean {
+  const botNumber = botNumberOf(botJid);
+  const mentionedJids = msg.message?.extendedTextMessage?.contextInfo?.mentionedJid;
+  return (
+    mentionedJids?.some((j) => botNumberOf(j) === botNumber) ||
+    extractText(msg).includes(`@${botNumber}`)
+  );
+}
+
+/**
+ * Platform send time in MILLISECONDS, or `undefined` when WhatsApp sent none.
+ *
+ * WhatsApp reports `messageTimestamp` in seconds — as a plain number, or as a
+ * protobufjs `Long` for the same field on the same connection. `Number(long)`
+ * is `NaN`, so the Long branch goes through `toNumber()` rather than a cast.
+ */
+export function resolveSentAt(ts: RawWhatsAppMessage['messageTimestamp']): number | undefined {
+  if (ts === undefined || ts === null) return undefined;
+  const seconds = typeof ts === 'number' ? ts : ts.toNumber();
+  if (!Number.isFinite(seconds) || seconds <= 0) return undefined;
+  return Math.round(seconds * 1000);
 }
 
 export function parseInboundMessage(
@@ -50,12 +96,7 @@ export function parseInboundMessage(
   const jid = msg.key.remoteJid ?? '';
   const isDm = !jid.endsWith('@g.us');
   const text = extractText(msg);
-  const botNumber = botJid.split('@')[0].split(':')[0];
-  const mentionedJids = msg.message?.extendedTextMessage?.contextInfo?.mentionedJid;
-  const isGroupMention =
-    !isDm &&
-    (mentionedJids?.some((j) => j.split('@')[0].split(':')[0] === botNumber) ||
-      text.includes(`@${botNumber}`));
+  const isGroupMention = !isDm && isBotMentioned(msg, botJid);
 
   const contextInfo = msg.message?.extendedTextMessage?.contextInfo;
 
@@ -70,6 +111,7 @@ export function parseInboundMessage(
     isDm,
     isGroupMention,
     messageId: msg.key.id ?? undefined,
+    sentAt: resolveSentAt(msg.messageTimestamp),
     botKey,
     raw: msg,
   };

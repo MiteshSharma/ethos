@@ -195,7 +195,9 @@ describe('webhook delivery relay — end-to-end through the real relay and ledge
 describe('runGatewayStart wiring (source)', () => {
   it('passes the relay into createWebhookServer', async () => {
     const src = await read('apps/ethos/src/commands/gateway.ts');
-    expect(src).toContain("relayToTargets,\n} from '@ethosagent/gateway';");
+    // The import, not its position in the list: Biome sorts that block, so a
+    // later symbol landing after `relayToTargets` is correct, not a regression.
+    expect(src).toMatch(/\n {2}relayToTargets,\n[\s\S]{0,200}?\} from '@ethosagent\/gateway';/);
     expect(src).toMatch(/const relayWebhookTargets: DeliveryRelay =/);
     // Positional, right after the prefilter runner. Not anchored to the end of
     // the argument list any more — Phase 4 appended a trailing options object

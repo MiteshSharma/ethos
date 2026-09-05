@@ -2,19 +2,19 @@
 // decides whether it reaches the agent. All Slack-specific decisions
 // (channel-mode, thread isolation, mention extraction) live here.
 
+import type { ChannelOverrideStore } from '@ethosagent/core';
+import { evaluateChannelMode } from '@ethosagent/core';
 import type { InboundMessage } from '@ethosagent/types';
 import { type ChannelMode, DEFAULT_CHANNEL_MODE } from '../config';
 import type { BackfillStateStore } from '../store/backfill-state';
-import type { ChannelOverrideStore } from '../store/channel-overrides';
 import type { ThreadStateStore } from '../store/thread-state';
-import { shouldRespond } from './channel-mode';
 import type { UsernameResolver } from './usernames';
 
 /** What the adapter knows about itself + its persistent state. */
 export interface TriageContext {
   botKey: string;
   defaultChannelMode: ChannelMode;
-  channelOverrides?: ChannelOverrideStore;
+  channelOverrides?: ChannelOverrideStore<ChannelMode>;
   threadState?: ThreadStateStore;
   backfillState?: BackfillStateStore;
   /** Slack `bot_id`s whose messages are allowed to reach the agent. Absent or
@@ -105,16 +105,21 @@ export async function triageMessage(
   const hasBotPosted =
     threadTs && ctx.threadState ? ctx.threadState.hasBotPosted(msg.channel, threadTs) : false;
 
-  // app_mention has its own handler; the message handler is mention-blind.
-  // shouldRespond gets isGroupMention=false here on purpose.
-  const responds = shouldRespond({
+  // The one shared decision (`@ethosagent/core`), not a Slack-local matrix.
+  // Note what it can now answer that a boolean could not: `observe` says do
+  // NOT reply but DO record.
+  //
+  // app_mention has its own handler; the message handler is mention-blind, so
+  // `isGroupMention` is false here on purpose.
+  const decision = evaluateChannelMode({
     isDm,
     isGroupMention: false,
     channelMode,
     hasBotPosted,
   });
 
-  if (!responds) return { drop: 'channel_mode', effectiveMode: channelMode };
+  // Only a message that is neither answered nor recorded is dropped here.
+  if (!decision.shouldRecord) return { drop: 'channel_mode', effectiveMode: channelMode };
 
   return {
     envelope: buildEnvelope({
@@ -131,6 +136,9 @@ export async function triageMessage(
       parentUserId: msg.parent_user_id,
       isDm,
       isGroupMention: false,
+      // Recorded, not answered. The gateway reads this flag, writes the
+      // transcript row and returns before the channel filter ever runs.
+      recordOnly: !decision.shouldReply,
       raw: msg,
     }),
     effectiveMode: channelMode,
@@ -142,10 +150,22 @@ export async function triageMention(
   ctx: TriageContext,
 ): Promise<TriageResult> {
   const channelMode = resolveChannelMode(evt.channel, ctx);
-  // @mentions always reach the agent regardless of mode — the user is
-  // explicitly addressing the bot.
   const text = stripMentions(evt.text).trim();
   if (!text) return { drop: 'no_text', effectiveMode: channelMode };
+
+  // An @mention reaches the agent under every mode EXCEPT `observe` — the user
+  // is explicitly addressing the bot, and the mode only decides whether the
+  // bot is allowed to answer out loud. There is deliberately no drop branch
+  // here: with `isGroupMention: true` the shared evaluator engages for every
+  // mode it knows and for every mode it does not, and observes for `observe`,
+  // so `shouldRecord` is true in all of them. What the mode changes is
+  // `recordOnly` — silence in an observed channel must not be conditional on
+  // what a third party types.
+  const decision = evaluateChannelMode({
+    isDm: false,
+    isGroupMention: true,
+    channelMode,
+  });
 
   return {
     envelope: buildEnvelope({
@@ -159,6 +179,7 @@ export async function triageMention(
       parentUserId: evt.parent_user_id,
       isDm: false,
       isGroupMention: true,
+      recordOnly: !decision.shouldReply,
       raw: evt,
     }),
     effectiveMode: channelMode,
@@ -184,8 +205,10 @@ async function resolveSenderName(
 }
 
 export function resolveChannelMode(channel: string, ctx: TriageContext): ChannelMode {
+  // `.mode` — the shared store indexes `{ mode, regexPattern? }`, where
+  // Slack's own copy indexed a bare mode.
   const override = ctx.channelOverrides?.get(channel);
-  return override ?? ctx.defaultChannelMode ?? DEFAULT_CHANNEL_MODE;
+  return override?.mode ?? ctx.defaultChannelMode ?? DEFAULT_CHANNEL_MODE;
 }
 
 interface EnvelopeInputs {
@@ -199,10 +222,30 @@ interface EnvelopeInputs {
   parentUserId: string | undefined;
   isDm: boolean;
   isGroupMention: boolean;
+  recordOnly: boolean;
   raw: unknown;
 }
 
+/**
+ * Slack's `ts` is the message's send time as a string of SECONDS with a
+ * fractional part (`'1699000000.123456'`) — it doubles as the message id, so
+ * the fraction is a uniquifier rather than sub-millisecond precision. Scale to
+ * the epoch-milliseconds `InboundMessage.sentAt` is specified in and round;
+ * `1699000000.123456 * 1000` is `1699000000123.456`, and the transcript orders
+ * by whole milliseconds.
+ *
+ * Absent or unparseable `ts` leaves `sentAt` unset, which the contract says
+ * means "this adapter has no platform timestamp" — better than a NaN or a
+ * clock reading dressed up as a platform time.
+ */
+export function tsToSentAt(ts: string | undefined): number | undefined {
+  if (!ts) return undefined;
+  const seconds = Number(ts);
+  return Number.isFinite(seconds) ? Math.round(seconds * 1000) : undefined;
+}
+
 function buildEnvelope(input: EnvelopeInputs): InboundMessage {
+  const sentAt = tsToSentAt(input.ts);
   // Top-level channel posts deliberately leave `threadId` undefined — the
   // gateway then routes to the unthreaded `${platform}:${botKey}:${chatId}`
   // lane. Threaded posts set `threadId = thread_ts` for per-thread isolation.
@@ -227,6 +270,10 @@ function buildEnvelope(input: EnvelopeInputs): InboundMessage {
     replyToUserId: input.parentUserId,
     messageId: input.ts,
     ...(input.threadTs ? { threadId: input.threadTs } : {}),
+    recordOnly: input.recordOnly,
+    // Slack's own send time, not the time we received it: a message delayed in
+    // transit still orders by when it was sent.
+    ...(sentAt !== undefined ? { sentAt } : {}),
     raw: input.raw,
   };
 }

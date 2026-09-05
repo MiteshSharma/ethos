@@ -16,12 +16,13 @@
 // for an allowlisted one (the fix must not over-block). The default-deny cases
 // live in their own block at the bottom.
 
+import type { ChannelOverrideStore } from '@ethosagent/core';
 import { describe, expect, it, vi } from 'vitest';
 import { dispatch, type SlashContext } from '../commands';
 import type { MemoryReader } from '../commands/memory';
 import type { PersonalityCardReader } from '../commands/personality';
+import type { ChannelMode } from '../config';
 import { registerHomeEvents } from '../home/handlers';
-import type { ChannelOverrideStore } from '../store/channel-overrides';
 
 const ALLOWED = 'U-owner';
 const INTRUDER = 'U-intruder';
@@ -61,9 +62,15 @@ function cardReader(): PersonalityCardReader & { read: ReturnType<typeof vi.fn> 
 }
 
 /** Minimal stand-in for the real store — only `get`/`set` are exercised. */
-function overrideStore(): { store: ChannelOverrideStore; set: ReturnType<typeof vi.fn> } {
+function overrideStore(): {
+  store: ChannelOverrideStore<ChannelMode>;
+  set: ReturnType<typeof vi.fn>;
+} {
   const set = vi.fn(async () => {});
-  return { store: { get: () => undefined, set } as unknown as ChannelOverrideStore, set };
+  return {
+    store: { get: () => undefined, set } as unknown as ChannelOverrideStore<ChannelMode>,
+    set,
+  };
 }
 
 function ctxFor(overrides: Partial<SlashContext> = {}): SlashContext {
@@ -204,7 +211,9 @@ function homeDeps(allowedUsers: string[] | undefined) {
   const deps = {
     binding: { type: 'team' as const, name: 'eng' },
     displayName: 'Eng',
-    channelOverrides: { entries: () => [['C-private-ops', 'all']] as Array<[string, 'all']> },
+    channelOverrides: {
+      entries: () => [['C-private-ops', { mode: 'all' }]] as Array<[string, { mode: 'all' }]>,
+    },
     session: {
       recentSessions: async () => [
         { id: 's1', label: '#board-leak', lastActivity: new Date('2026-05-10T10:00:00Z') },

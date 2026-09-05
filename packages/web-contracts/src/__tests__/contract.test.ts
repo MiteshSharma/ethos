@@ -281,6 +281,7 @@ describe('contract router', () => {
       'apiKeys',
       'backup',
       'batch',
+      'channels',
       'chat',
       'clarify',
       'config',

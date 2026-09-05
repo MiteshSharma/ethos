@@ -324,7 +324,12 @@ describe('home/handlers — registerHomeEvents', () => {
     // gathering and publishing, so they run as allowlisted viewers. The gate
     // itself is covered in `slash-authz.test.ts`.
     allowedUsers: ['U123', 'U999'],
-    channelOverrides: { entries: () => [['C1', 'all']] as Array<[string, 'all']> },
+    // The shared store (`@ethosagent/core`) indexes `{ mode, regexPattern? }`,
+    // where Slack's own copy indexed a bare mode. The home view still renders
+    // channel → mode; the stub follows the store.
+    channelOverrides: {
+      entries: () => [['C1', { mode: 'all' }]] as Array<[string, { mode: 'all' }]>,
+    },
     session: {
       recentSessions: async () => [
         { id: 's1', label: '#general', lastActivity: new Date('2026-05-10T10:00:00Z') },

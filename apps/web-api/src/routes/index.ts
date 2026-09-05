@@ -136,6 +136,8 @@ export interface ServiceContainer {
   /** Read-only telephony call history. Absent when this deployment has no
    *  call log. */
   calls?: import('../services/calls.service').CallsService;
+  /** Read-only lane summaries for the rooms bots observe. */
+  observedChats: import('../services/observed-chats.service').ObservedChatsService;
   /** Read / replace the wake-phrase → personality table. */
   wakeRoutes: import('../services/wake-routes.service').WakeRoutesService;
   toolRegistry?: import('@ethosagent/types').ToolRegistry;

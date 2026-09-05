@@ -21,7 +21,7 @@ export function helpBlocks(input: {
         '`/ethos memory show` — last 5 memory entries',
         '`/ethos memory add <text>` — append a memory entry',
         '`/ethos kanban list` — open kanban tickets (team bots only)',
-        '`/ethos channel-mode show|all|thread_follow|mention_only` — per-channel reply mode',
+        '`/ethos channel-mode show|all|thread_follow|mention_only|observe` — per-channel reply mode',
         '`/ethos help` — this message',
       ].join('\n'),
     ),
@@ -31,7 +31,8 @@ export function helpBlocks(input: {
     context([
       'Modes: `mention_only` (default) responds to DMs and @mentions; ' +
         '`thread_follow` also responds in threads the bot has posted in; ' +
-        '`all` responds to every message.',
+        '`all` responds to every message; ' +
+        '`observe` records every message and never replies, not even to an @mention.',
     ]),
   ];
 }

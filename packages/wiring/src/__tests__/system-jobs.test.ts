@@ -51,7 +51,7 @@ async function jobIds(s: CronScheduler): Promise<string[]> {
 
 describe('systemJobSpecs', () => {
   it('enables observability-prune and backup by default, and nothing else', () => {
-    const specs = systemJobSpecs(makeConfig());
+    const specs = systemJobSpecs(makeConfig(), 'serve');
     expect(
       specs
         .filter((s) => s.enabled)
@@ -69,13 +69,16 @@ describe('systemJobSpecs', () => {
         .replace(/[^a-z0-9]+/g, '-')
         .replace(/^-|-$/g, '')
         .slice(0, 64);
-    for (const spec of systemJobSpecs(makeConfig())) {
+    for (const spec of systemJobSpecs(makeConfig(), 'gateway')) {
       expect(spec.id, `id for "${spec.name}"`).toBe(slugify(spec.name));
     }
   });
 
   it('honours the backup schedule and toggle from config', () => {
-    const specs = systemJobSpecs(makeConfig({ backup: { enabled: false, cron: '15 1 * * *' } }));
+    const specs = systemJobSpecs(
+      makeConfig({ backup: { enabled: false, cron: '15 1 * * *' } }),
+      'serve',
+    );
     const backup = specs.find((s) => s.systemTask === 'backup');
     expect(backup).toEqual({
       id: 'backup',
@@ -90,7 +93,7 @@ describe('systemJobSpecs', () => {
 describe('seedAllSystemJobs', () => {
   it('creates the jobs the config asks for and no others', async () => {
     const s = makeScheduler();
-    const outcomes = await seedAllSystemJobs(s, makeConfig());
+    const outcomes = await seedAllSystemJobs(s, makeConfig(), 'serve');
     expect(outcomes.every((o) => o.action !== 'failed')).toBe(true);
     expect(await jobIds(s)).toEqual(['backup', 'observability-prune']);
   });
@@ -98,10 +101,10 @@ describe('seedAllSystemJobs', () => {
   it('is idempotent — the second run reports every job unchanged and writes nothing', async () => {
     const s = makeScheduler();
     const config = makeConfig({ nightlyPass: { enabled: true } });
-    await seedAllSystemJobs(s, config);
+    await seedAllSystemJobs(s, config, 'serve');
     const before = await s.listJobs();
 
-    const outcomes = await seedAllSystemJobs(s, config);
+    const outcomes = await seedAllSystemJobs(s, config, 'serve');
     expect(outcomes.map((o) => o.action)).toEqual([
       'unchanged',
       'unchanged',
@@ -114,12 +117,17 @@ describe('seedAllSystemJobs', () => {
 
   it('patches a schedule that changed in config.yaml', async () => {
     const s = makeScheduler();
-    await seedAllSystemJobs(s, makeConfig({ nightlyPass: { enabled: true, cron: '0 3 * * *' } }));
+    await seedAllSystemJobs(
+      s,
+      makeConfig({ nightlyPass: { enabled: true, cron: '0 3 * * *' } }),
+      'serve',
+    );
     expect((await s.getJob('nightly-pass'))?.schedule).toBe('0 3 * * *');
 
     const outcomes = await seedAllSystemJobs(
       s,
       makeConfig({ nightlyPass: { enabled: true, cron: '45 2 * * *' } }),
+      'serve',
     );
     expect(outcomes.find((o) => o.name === 'Nightly Pass')?.action).toBe('patched');
     expect((await s.getJob('nightly-pass'))?.schedule).toBe('45 2 * * *');
@@ -127,20 +135,24 @@ describe('seedAllSystemJobs', () => {
 
   it('removes a job whose config flag went off', async () => {
     const s = makeScheduler();
-    await seedAllSystemJobs(s, makeConfig({ weeklyDigest: { enabled: true } }));
+    await seedAllSystemJobs(s, makeConfig({ weeklyDigest: { enabled: true } }), 'serve');
     expect(await s.getJob('weekly-digest')).not.toBeNull();
 
-    const outcomes = await seedAllSystemJobs(s, makeConfig({ weeklyDigest: { enabled: false } }));
+    const outcomes = await seedAllSystemJobs(
+      s,
+      makeConfig({ weeklyDigest: { enabled: false } }),
+      'serve',
+    );
     expect(outcomes.find((o) => o.name === 'Weekly Digest')?.action).toBe('removed');
     expect(await s.getJob('weekly-digest')).toBeNull();
   });
 
   it('removes the backup job when backup.enabled is false', async () => {
     const s = makeScheduler();
-    await seedAllSystemJobs(s, makeConfig());
+    await seedAllSystemJobs(s, makeConfig(), 'serve');
     expect(await s.getJob('backup')).not.toBeNull();
 
-    await seedAllSystemJobs(s, makeConfig({ backup: { enabled: false } }));
+    await seedAllSystemJobs(s, makeConfig({ backup: { enabled: false } }), 'serve');
     expect(await s.getJob('backup')).toBeNull();
   });
 
@@ -152,7 +164,7 @@ describe('seedAllSystemJobs', () => {
       systemTask: 'watcher-tick',
     });
 
-    await seedAllSystemJobs(s, makeConfig({ backup: { enabled: false } }));
+    await seedAllSystemJobs(s, makeConfig({ backup: { enabled: false } }), 'serve');
     expect(await s.getJob('watcher-tick-inbox')).not.toBeNull();
   });
 
@@ -167,7 +179,7 @@ describe('seedAllSystemJobs', () => {
     });
     // Exactly what serve/gateway/boot wrote before `seedAllSystemJobs` existed:
     // `seedSystemJob`, whose id is `slugify(name)`.
-    for (const spec of systemJobSpecs(config)) {
+    for (const spec of systemJobSpecs(config, 'serve')) {
       await s.seedSystemJob({
         name: spec.name,
         schedule: spec.schedule,
@@ -177,7 +189,7 @@ describe('seedAllSystemJobs', () => {
     const before = await jobIds(s);
     expect(before.length).toBe(5);
 
-    const outcomes = await seedAllSystemJobs(s, config);
+    const outcomes = await seedAllSystemJobs(s, config, 'serve');
     expect(outcomes.map((o) => o.action)).toEqual([
       'unchanged',
       'unchanged',
@@ -191,14 +203,14 @@ describe('seedAllSystemJobs', () => {
   it('patches a renamed spec onto the existing job rather than forking one', async () => {
     const s = makeScheduler();
     const config = makeConfig();
-    await seedAllSystemJobs(s, config);
+    await seedAllSystemJobs(s, config, 'serve');
     const backup = await s.getJob('backup');
     expect(backup?.name).toBe('Backup');
 
     // Simulate the rename by patching the display name behind the reconciler's
     // back, then reconciling: config wins, and the id does not move.
     await s.updateJob('backup', { name: 'Nightly backup' });
-    const outcomes = await seedAllSystemJobs(s, config);
+    const outcomes = await seedAllSystemJobs(s, config, 'serve');
     expect(outcomes.find((o) => o.id === 'backup')?.action).toBe('patched');
     expect((await s.getJob('backup'))?.name).toBe('Backup');
     expect(await jobIds(s)).toEqual(['backup', 'observability-prune']);
@@ -216,7 +228,7 @@ describe('seedAllSystemJobs', () => {
       missedRunPolicy: 'skip',
     });
 
-    const outcomes = await seedAllSystemJobs(s, makeConfig());
+    const outcomes = await seedAllSystemJobs(s, makeConfig(), 'serve');
     const backup = outcomes.find((o) => o.id === 'backup');
     if (!backup) throw new Error('no outcome for the backup spec');
     expect(backup.action).toBe('conflict');
@@ -239,11 +251,83 @@ describe('seedAllSystemJobs', () => {
     const outcomes = await seedAllSystemJobs(
       s,
       makeConfig({ nightlyPass: { enabled: true, cron: 'not-a-cron' } }),
+      'serve',
     );
     const failed = outcomes.find((o) => o.action === 'failed');
     expect(failed?.name).toBe('Nightly Pass');
     expect(failed?.error).toMatch(/schedule/i);
     // The four others still reconciled.
     expect(await jobIds(s)).toEqual(['backup', 'observability-prune']);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Per-surface rosters (ambient-group-monitoring R3)
+// ---------------------------------------------------------------------------
+//
+// `channel-digest` runs only where there are channel adapters — `ethos gateway`
+// and `ethos boot`. The tempting way to express that is to list the spec in
+// every roster and set `enabled: false` for serve. It is also the bug: this
+// function REMOVES a disabled spec, so a serve process would delete the job the
+// gateway process just seeded, on every restart of either, forever.
+describe('system job rosters differ by surface', () => {
+  it('omits the channel digest from serve entirely — it is absent, not disabled', () => {
+    const config = makeConfig({ channelDigest: { enabled: true } });
+    expect(systemJobSpecs(config, 'serve').map((sp) => sp.id)).not.toContain('channel-digest');
+    for (const surface of ['gateway', 'boot'] as const) {
+      const spec = systemJobSpecs(config, surface).find((sp) => sp.id === 'channel-digest');
+      expect(spec, `channel-digest missing from the ${surface} roster`).toBeDefined();
+      expect(spec?.enabled).toBe(true);
+      expect(spec?.systemTask).toBe('channel-digest');
+    }
+  });
+
+  it('defaults the digest schedule to 08:00 daily and honours channelDigest.cron', () => {
+    const byDefault = systemJobSpecs(makeConfig({ channelDigest: { enabled: true } }), 'gateway');
+    expect(byDefault.find((sp) => sp.id === 'channel-digest')?.schedule).toBe('0 8 * * *');
+    const custom = systemJobSpecs(
+      makeConfig({ channelDigest: { enabled: true, cron: '30 6 * * *' } }),
+      'gateway',
+    );
+    expect(custom.find((sp) => sp.id === 'channel-digest')?.schedule).toBe('30 6 * * *');
+  });
+
+  it('leaves the digest job alone when channelDigest is off — it is never created', async () => {
+    const s = makeScheduler();
+    await seedAllSystemJobs(s, makeConfig(), 'gateway');
+    expect(await s.getJob('channel-digest')).toBeNull();
+  });
+
+  it('removes the digest job when the gateway turns channelDigest off', async () => {
+    const s = makeScheduler();
+    await seedAllSystemJobs(s, makeConfig({ channelDigest: { enabled: true } }), 'gateway');
+    expect(await s.getJob('channel-digest')).not.toBeNull();
+
+    const outcomes = await seedAllSystemJobs(s, makeConfig(), 'gateway');
+    expect(outcomes.find((o) => o.id === 'channel-digest')?.action).toBe('removed');
+    expect(await s.getJob('channel-digest')).toBeNull();
+  });
+
+  // THE regression this parameter exists for. Revert `systemJobSpecs` to a
+  // single unconditional table and this fails: serve reconciles a spec whose
+  // `enabled` is false for it and deletes the gateway's job.
+  it('serve does NOT delete the digest job a gateway process seeded', async () => {
+    const s = makeScheduler();
+    const config = makeConfig({ channelDigest: { enabled: true } });
+
+    // `ethos gateway start` comes up and seeds the roster it owns.
+    await seedAllSystemJobs(s, config, 'gateway');
+    const seeded = await s.getJob('channel-digest');
+    expect(seeded).not.toBeNull();
+
+    // `ethos serve` comes up against the SAME cron directory.
+    const outcomes = await seedAllSystemJobs(s, config, 'serve');
+    expect(outcomes.map((o) => o.id)).not.toContain('channel-digest');
+    expect(await s.getJob('channel-digest')).toEqual(seeded);
+
+    // ...and restarting either one does not start the fight again.
+    await seedAllSystemJobs(s, config, 'gateway');
+    await seedAllSystemJobs(s, config, 'serve');
+    expect(await s.getJob('channel-digest')).toEqual(seeded);
   });
 });

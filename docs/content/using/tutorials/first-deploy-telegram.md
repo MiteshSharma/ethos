@@ -5,7 +5,7 @@ kind: tutorial
 audience: user
 slug: first-deploy-telegram
 time: "30 min"
-updated: 2026-07-17
+updated: 2026-09-05
 ---
 
 Your [personality](../../getting-started/glossary.md#personality) runs locally in `ethos chat`. This tutorial puts it in front of real users on Telegram. The path is: create a bot, paste its token, foreground-test the gateway, then wrap it in a service manager that survives reboots.
@@ -41,7 +41,7 @@ Telegram bots are created through a conversation with `@BotFather` inside Telegr
 
 While you are still in BotFather, two settings are worth confirming for a personal bot:
 
-- `/setprivacy` for your bot, then **Enable**. Privacy mode means the bot only sees messages addressed to it directly or sent as a reply. This is what you want for a personal bot; you can turn it off later for group-wide listening.
+- `/setprivacy` for your bot, then **Enable**. Privacy mode means the bot only sees messages addressed to it directly or sent as a reply. This is what you want for a personal bot. If you later want the bot to read a group's ordinary chatter, disabling it here is not enough on its own — Telegram fixes the setting per group when the bot joins, so you also remove and re-add the bot to that group. [Platform prerequisites for group messages](../../platforms/telegram.md#3b-platform-prerequisites-for-group-messages) has the full sequence and the `getMe` check that confirms it took.
 - `/setdescription` and `/setabouttext` are cosmetic but appear in Telegram's bot card — set them to something honest.
 
 You can regenerate the token any time with `/token` in BotFather; the old token is invalidated immediately, so do this if you ever leak the value.

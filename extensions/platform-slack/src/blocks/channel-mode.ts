@@ -13,8 +13,9 @@ export function channelModeShowBlocks(input: {
     section(`<#${channel}> currently uses *${mode}* (${source}).`),
     context([
       `Set with: \`/ethos channel-mode all\`, ` +
-        `\`/ethos channel-mode thread_follow\`, or ` +
-        `\`/ethos channel-mode mention_only\`.`,
+        `\`/ethos channel-mode thread_follow\`, ` +
+        `\`/ethos channel-mode mention_only\`, or ` +
+        `\`/ethos channel-mode observe\` (records every message, never replies).`,
     ]),
   ];
 }
@@ -29,7 +30,8 @@ export function channelModeUsageBlocks(): SlackBlock[] {
       'Usage: `/ethos channel-mode show` ' +
         '· `/ethos channel-mode all` ' +
         '· `/ethos channel-mode thread_follow` ' +
-        '· `/ethos channel-mode mention_only`',
+        '· `/ethos channel-mode mention_only` ' +
+        '· `/ethos channel-mode observe`',
     ),
   ];
 }

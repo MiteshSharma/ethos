@@ -18,6 +18,7 @@ import { adminRouter } from './admin';
 import { apiKeysRouter } from './api-keys';
 import { backupRouter } from './backup';
 import { batchRouter } from './batch';
+import { channelsRouter } from './channels';
 import { clarifyRouter } from './clarify';
 import { configRouter } from './config';
 import { contextRouter, filesRouter } from './context-resolve';
@@ -107,6 +108,7 @@ export const apiRouter = {
   digest: digestRouter,
   voice: voiceRouter,
   deliveries: deliveriesRouter,
+  channels: channelsRouter,
   a2a: a2aRouter,
   namedSecrets: namedSecretsRouter,
   keys: keysRouter,

@@ -37,9 +37,12 @@ export interface SessionReader {
   recentSessions(): Promise<SessionSummary[]>;
 }
 
-/** Read-only slice of `ChannelOverrideStore` the home view needs. */
+/** Read-only slice of `ChannelOverrideStore` the home view needs. The shared
+ *  store (`@ethosagent/core`) indexes `{ mode, regexPattern? }`, where Slack's
+ *  own copy indexed a bare mode; the home view still wants channel→mode, so
+ *  the shape is narrowed once here rather than in the view. */
 interface ChannelModeSource {
-  entries(): Array<[string, ChannelMode]>;
+  entries(): Array<[string, { mode: ChannelMode }]>;
 }
 
 export interface HomeEventDeps {
@@ -93,7 +96,11 @@ export function registerHomeEvents(app: App, deps: HomeEventDeps): void {
       sessions,
       kanbanTickets,
       memorySnippets,
-      channelModes: authorized ? (deps.channelOverrides?.entries() ?? []) : [],
+      channelModes: authorized
+        ? (deps.channelOverrides
+            ?.entries()
+            .map(([channel, { mode }]) => [channel, mode] as const) ?? [])
+        : [],
       pendingClarifies,
       webUiBaseUrl: deps.webUiBaseUrl,
       restricted: !authorized,

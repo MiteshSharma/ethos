@@ -6,6 +6,7 @@
 
 import type { RequestListener } from 'node:http';
 import { join } from 'node:path';
+import { ChannelOverrideStore } from '@ethosagent/core';
 import { noopLogger } from '@ethosagent/logger';
 import type {
   AdapterCapabilities,
@@ -46,7 +47,7 @@ import {
   type SlashCommandPayload,
 } from './commands';
 import type { Binding, ChannelMode } from './config';
-import { DEFAULT_CHANNEL_MODE } from './config';
+import { ChannelModeSchema, DEFAULT_CHANNEL_MODE } from './config';
 import {
   type KanbanUnfurlReader,
   type PersonalityUnfurlReader,
@@ -69,7 +70,6 @@ import {
 import { type RawSlackFile, resolveChannelMode } from './routing/triage';
 import { createUsernameResolver, type UsernameResolver } from './routing/usernames';
 import { BackfillStateStore } from './store/backfill-state';
-import { ChannelOverrideStore } from './store/channel-overrides';
 import { ThreadStateStore } from './store/thread-state';
 
 const { App, HTTPReceiver } = boltPkg;
@@ -394,7 +394,7 @@ export class SlackAdapter implements PlatformAdapter, ApprovalCapableAdapter, Vo
   private readonly httpRoute: string | undefined;
   private readonly client: App['client'];
   private readonly backfillState: BackfillStateStore | undefined;
-  private readonly channelOverrides: ChannelOverrideStore | undefined;
+  private readonly channelOverrides: ChannelOverrideStore<ChannelMode> | undefined;
   private readonly threadState: ThreadStateStore | undefined;
   private readonly memory: MemoryReader | undefined;
   private readonly kanban: KanbanReader | undefined;
@@ -539,7 +539,14 @@ export class SlackAdapter implements PlatformAdapter, ApprovalCapableAdapter, Vo
     if (config.storage) {
       const slackDir = config.slackDir ?? join(homeEthosDir(), 'slack');
       this.backfillState = new BackfillStateStore(config.storage, slackDir, this.botKey);
-      this.channelOverrides = new ChannelOverrideStore(config.storage, slackDir, this.botKey);
+      // The shared store (`@ethosagent/core`) takes the PER-BOT directory and
+      // the adapter's own mode enum; Slack's deleted copy took the platform
+      // dir plus a botKey and joined them itself.
+      this.channelOverrides = new ChannelOverrideStore(
+        config.storage,
+        join(slackDir, this.botKey),
+        ChannelModeSchema,
+      );
       this.threadState = new ThreadStateStore(config.storage, slackDir, this.botKey);
     }
   }
@@ -1145,6 +1152,12 @@ export class SlackAdapter implements PlatformAdapter, ApprovalCapableAdapter, Vo
   }
 
   private addReceiptReaction(msg: InboundMessage): void {
+    // An observed channel is one the operator told the agent to be silent in,
+    // and a 👀 landing on every message in it is the bot answering — visibly,
+    // to everyone in the channel, several hundred times a day. Silent means
+    // silent (R11). The guard sits inside the method rather than at its one
+    // call site so a second caller cannot reintroduce the noise.
+    if (msg.recordOnly) return;
     const ts = msg.messageId;
     if (!ts) return;
     const lane = this.reactionLaneKey(msg.chatId, msg.threadId);
@@ -1403,7 +1416,13 @@ export class SlackAdapter implements PlatformAdapter, ApprovalCapableAdapter, Vo
     envelope: InboundMessage,
     files: RawSlackFile[],
   ): Promise<InboundMessage> {
-    if (!this.cache || files.length === 0) return envelope;
+    // `recordOnly` returns before the first fetch: the gateway's transcript
+    // row is TEXT, so the bytes would be downloaded and cached only to be
+    // thrown away — and a third party's file would sit in the attachment cache
+    // under a lifetime the transcript's retention never touches. The guard is
+    // HERE rather than at the `start()` call site because this is the method a
+    // test can reach; `envelope.text` already carries the caption.
+    if (!this.cache || files.length === 0 || envelope.recordOnly) return envelope;
 
     const attachments: Attachment[] = [];
     const sessionKey = `slack:${this.botKey}:${envelope.chatId}`;

@@ -26,6 +26,7 @@ import type {
   TeamManifest,
   ToolRegistry,
 } from '@ethosagent/types';
+import { RETENTION_DEFAULTS } from '@ethosagent/types';
 import {
   type CreateAgentLoopResult,
   EthosObservability,
@@ -178,11 +179,22 @@ export function buildSystemTaskHandlers(
 ): Record<string, (job: CronJob) => Promise<{ output: string }>> {
   return {
     'observability-prune': async () => {
-      const { pruneObservabilityByPath } = await import('@ethosagent/observability-sqlite');
+      const { parseDuration, pruneObservabilityByPath } = await import(
+        '@ethosagent/observability-sqlite'
+      );
       const dir = ethosDir();
       const obsDbPath = join(dir, 'observability.db');
       const sessDbPath = join(dir, 'sessions.db');
       pruneObservabilityByPath(obsDbPath, config.retention ?? {}, { sessDbPath });
+      // Observe-mode transcripts prune here rather than from the digest task
+      // (R4): this handler is unconditional, so a deployment that records
+      // group chats but has never run a digest — or has observability off —
+      // still ages them out. A no-op when the store was never created.
+      const { pruneChannelTranscript } = await import('@ethosagent/channel-transcript-sqlite');
+      pruneChannelTranscript(
+        join(dir, 'channel-transcript.db'),
+        parseDuration(config.retention?.channelTranscript ?? RETENTION_DEFAULTS.channelTranscript),
+      );
       return { output: 'Observability prune completed' };
     },
     'nightly-pass': async () => {

@@ -1,3 +1,5 @@
+import { join } from 'node:path';
+import { ChannelOverrideStore, evaluateChannelMode } from '@ethosagent/core';
 import type {
   AdapterCapabilities,
   AdapterVoiceCaps,
@@ -7,10 +9,17 @@ import type {
   OutboundMessage,
   PlatformAdapter,
   SendVoiceNoteOptions,
+  Storage,
   VoiceOutboundAdapter,
 } from '@ethosagent/types';
+import { type ChannelMode, ChannelModeSchema, DEFAULT_CHANNEL_MODE } from './config';
 import { downloadMedia } from './media';
-import { hasMedia, parseInboundMessage, type RawWhatsAppMessage } from './message-parser';
+import {
+  hasMedia,
+  isBotMentioned,
+  parseInboundMessage,
+  type RawWhatsAppMessage,
+} from './message-parser';
 import { resolveSessionDir } from './session-store';
 
 export interface WhatsAppAdapterConfig {
@@ -19,7 +28,16 @@ export interface WhatsAppAdapterConfig {
    *  matches the `GatewayBotConfig` it routes to. Wins over `id` when set. */
   botKey?: string;
   sessionDir: string;
-  defaultMode?: 'all' | 'mention_only';
+  /** Mode for every group chat without a stored override. Absent = `all`
+   *  (`DEFAULT_CHANNEL_MODE`), which is what absence has always meant here. */
+  defaultMode?: ChannelMode;
+  /** Where per-chat mode overrides live. Absent = no override store, and every
+   *  chat uses `defaultMode` — which is why the adapter's advertised
+   *  `channelModes: true` needs this wired to be true. */
+  storage?: Storage;
+  /** Base directory for adapter state. Default `'whatsapp'`; the override file
+   *  is `<whatsappDir>/<botKey>/channel-overrides.jsonl`. */
+  whatsappDir?: string;
   allowedJids?: string[];
   /** Reject messages from JIDs not in allowedJids. Default true.
    *  Set to false to allow all senders (open mode — not recommended for production). */
@@ -81,6 +99,8 @@ export class WhatsAppAdapter implements PlatformAdapter, VoiceOutboundAdapter {
   private botJid = '';
   private readonly config: WhatsAppAdapterConfig;
   private readonly pendingReactions = new Map<string, string>();
+  private readonly defaultChannelMode: ChannelMode;
+  private readonly channelOverrides?: ChannelOverrideStore<ChannelMode>;
 
   constructor(config: WhatsAppAdapterConfig) {
     this.config = config;
@@ -89,6 +109,17 @@ export class WhatsAppAdapter implements PlatformAdapter, VoiceOutboundAdapter {
       config.id ??
       `wa-${config.sessionDir.replace(/[^a-zA-Z0-9]/g, '').slice(-16)}`;
     this.id = `whatsapp:${this.botKey}`;
+    this.defaultChannelMode = config.defaultMode ?? DEFAULT_CHANNEL_MODE;
+
+    // Same shape as Discord's: the shared store takes the PER-BOT directory
+    // and the adapter's own mode enum, so callers join.
+    if (config.storage) {
+      this.channelOverrides = new ChannelOverrideStore(
+        config.storage,
+        join(config.whatsappDir ?? 'whatsapp', this.botKey),
+        ChannelModeSchema,
+      );
+    }
 
     const denyUnknown = config.denyUnknown ?? true;
     if (denyUnknown && (!config.allowedJids || config.allowedJids.length === 0)) {
@@ -103,6 +134,8 @@ export class WhatsAppAdapter implements PlatformAdapter, VoiceOutboundAdapter {
   async start(): Promise<void> {
     if (this.reconnecting) return;
     this.stopped = false;
+
+    await this.channelOverrides?.load();
 
     const sessionDir = resolveSessionDir({
       sessionDir: this.config.sessionDir,
@@ -223,14 +256,25 @@ export class WhatsAppAdapter implements PlatformAdapter, VoiceOutboundAdapter {
           }
         }
 
-        if (!isDm && this.config.defaultMode === 'mention_only') {
-          const text = msg.message?.conversation ?? msg.message?.extendedTextMessage?.text ?? '';
-          const botNumber = this.botJid.split('@')[0].split(':')[0];
-          if (!text.includes(`@${botNumber}`)) continue;
-        }
+        // The channel-mode decision comes BEFORE the media block on purpose: a
+        // message this mode drops must not cost a download. `isBotMentioned` is
+        // the parser's own test, so the gate and the envelope can no longer
+        // disagree about what counts as a mention.
+        const decision = evaluateChannelMode({
+          isDm,
+          isGroupMention: !isDm && isBotMentioned(msg, this.botJid),
+          channelMode: this.channelOverrides?.get(jid)?.mode ?? this.defaultChannelMode,
+        });
+        if (!decision.shouldRecord) continue;
+        const recordOnly = !decision.shouldReply;
 
+        // Recorded, not answered — and the gateway's transcript row is TEXT.
+        // Downloading here would spend the bandwidth to throw the bytes away,
+        // and leave a third party's media in the attachment cache under a
+        // lifetime the transcript's retention never touches. A caption is not
+        // lost by skipping: `extractText` reads it off the media node itself.
         let attachments: import('@ethosagent/types').Attachment[] | undefined;
-        if (hasMedia(msg) && this.config.cache) {
+        if (hasMedia(msg) && this.config.cache && !recordOnly) {
           const sessionKey = `whatsapp:${this.botKey}:${jid}`;
           try {
             const att = await downloadMedia(
@@ -252,19 +296,26 @@ export class WhatsAppAdapter implements PlatformAdapter, VoiceOutboundAdapter {
 
         const parsed = parseInboundMessage(msg, this.botJid, this.botKey, attachments);
         if (!parsed) continue;
+        // Recorded, not answered: the gateway writes the transcript row and
+        // returns before the channel filter runs.
+        parsed.recordOnly = recordOnly;
 
-        // Receipt reaction
-        try {
-          await (
-            sock as {
-              sendMessage: (jid: string, content: unknown) => Promise<unknown>;
-            }
-          ).sendMessage(jid, {
-            react: { text: '\u{1F440}', key: msg.key },
-          });
-          this.pendingReactions.set(jid, msg.key.id ?? '');
-        } catch {
-          // best-effort reaction
+        // Receipt reaction — skipped when the message is only being recorded.
+        // A reaction is a visible reply, and an observed room is a room the
+        // operator told the agent to be silent in.
+        if (decision.shouldReply) {
+          try {
+            await (
+              sock as {
+                sendMessage: (jid: string, content: unknown) => Promise<unknown>;
+              }
+            ).sendMessage(jid, {
+              react: { text: '\u{1F440}', key: msg.key },
+            });
+            this.pendingReactions.set(jid, msg.key.id ?? '');
+          } catch {
+            // best-effort reaction
+          }
         }
 
         this.messageHandler(parsed);

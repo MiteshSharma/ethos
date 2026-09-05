@@ -657,6 +657,16 @@ tiers:
     tier: 2
     assigned: 2026-08-20
 
+  # Observe-mode transcript store. Holds group-chat text the agent watched but
+  # never answered — third-party content, and sensitive for that reason, but it
+  # makes no enforcement decision of its own: the gateway decides what reaches
+  # it, and the digest turn that reads it runs with an empty toolset. Same
+  # standing as the other SQLite stores (call-log, session-cards, job-store).
+  extensions/channel-transcript-sqlite:
+    package: "@ethosagent/channel-transcript-sqlite"
+    tier: 2
+    assigned: 2026-09-05
+
   extensions/claw-migrate:
     package: "@ethosagent/claw-migrate"
     tier: 2

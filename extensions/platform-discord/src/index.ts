@@ -1,3 +1,5 @@
+import { join } from 'node:path';
+import { ChannelOverrideStore } from '@ethosagent/core';
 import type {
   AdapterCapabilities,
   AdapterVoiceCaps,
@@ -26,12 +28,11 @@ import type { clarifyModalPayload } from './clarify-blocks';
 import type { CommandContext, CommandPayload } from './commands';
 import { COMMAND_DEFINITIONS, dispatch } from './commands';
 import type { Binding, ChannelMode } from './config';
-import { DEFAULT_CHANNEL_MODE } from './config';
+import { ChannelModeSchema, DEFAULT_CHANNEL_MODE } from './config';
 import { buildModal, registerInteractionHandler, toActionRowBuilder } from './events/interactions';
 import { registerEditHandler, registerMessageHandler } from './events/messages';
 import { toNativeMarkdown } from './format';
 import { BackfillStateStore } from './store/backfill-state';
-import { ChannelOverrideStore } from './store/channel-overrides';
 import { ThreadStateStore } from './store/thread-state';
 import type { DiscordClarifyInteraction } from './types';
 
@@ -179,7 +180,7 @@ export class DiscordAdapter
   private readonly missedMessageBackfill: DiscordAdapterConfig['missedMessageBackfill'];
 
   private readonly threadState?: ThreadStateStore;
-  private readonly channelOverrides?: ChannelOverrideStore;
+  private readonly channelOverrides?: ChannelOverrideStore<ChannelMode>;
   private readonly backfillState?: BackfillStateStore;
 
   private messageHandler?: (message: InboundMessage) => void;
@@ -226,7 +227,14 @@ export class DiscordAdapter
     if (config.storage) {
       const dir = config.discordDir ?? 'discord';
       this.threadState = new ThreadStateStore(config.storage, dir, this.botKey);
-      this.channelOverrides = new ChannelOverrideStore(config.storage, dir, this.botKey);
+      // The shared store (`@ethosagent/core`) takes the PER-BOT directory and
+      // the adapter's own mode enum; Discord's deleted copy took the platform
+      // dir plus a botKey and joined them itself.
+      this.channelOverrides = new ChannelOverrideStore(
+        config.storage,
+        join(dir, this.botKey),
+        ChannelModeSchema,
+      );
       this.backfillState = new BackfillStateStore(config.storage, dir, this.botKey);
     }
 

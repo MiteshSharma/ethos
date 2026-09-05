@@ -292,6 +292,9 @@ importers:
       '@ethosagent/cas-fs':
         specifier: workspace:*
         version: link:../../extensions/cas-fs
+      '@ethosagent/channel-transcript-sqlite':
+        specifier: workspace:*
+        version: link:../../extensions/channel-transcript-sqlite
       '@ethosagent/config':
         specifier: workspace:*
         version: link:../../packages/config
@@ -595,6 +598,9 @@ importers:
       '@ethosagent/cas-fs':
         specifier: workspace:*
         version: link:../../extensions/cas-fs
+      '@ethosagent/channel-transcript-sqlite':
+        specifier: workspace:*
+        version: link:../../extensions/channel-transcript-sqlite
       '@ethosagent/config':
         specifier: workspace:*
         version: link:../../packages/config
@@ -930,6 +936,21 @@ importers:
       '@ethosagent/storage-fs':
         specifier: workspace:*
         version: link:../../packages/storage-fs
+
+  extensions/channel-transcript-sqlite:
+    dependencies:
+      '@ethosagent/core':
+        specifier: workspace:*
+        version: link:../../packages/core
+      '@ethosagent/safety-redact':
+        specifier: workspace:*
+        version: link:../../packages/safety/redact
+      '@ethosagent/sqlite':
+        specifier: workspace:*
+        version: link:../../packages/sqlite
+      '@ethosagent/types':
+        specifier: workspace:*
+        version: link:../../packages/types
 
   extensions/claw-migrate:
     dependencies:
@@ -2669,6 +2690,9 @@ importers:
       '@ethosagent/platform-voice':
         specifier: workspace:*
         version: link:../../extensions/platform-voice
+      '@ethosagent/platform-whatsapp':
+        specifier: workspace:*
+        version: link:../../extensions/platform-whatsapp
       '@ethosagent/plugin-contract':
         specifier: workspace:*
         version: link:../plugin-contract

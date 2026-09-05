@@ -1,26 +1,15 @@
-// Pure decision: should the bot respond to this inbound?
+// SUPERSEDED — this file should be deleted.
 //
-// The matrix:
-//   DM                                   → true
-//   channelMode === 'all'                → true
-//   isGroupMention (bot @mentioned)      → true
-//   channelMode === 'thread_follow' AND
-//     threadState.hasBotPosted(thread)?  → true
-//   otherwise                            → false
+// The reply/record decision moved to `evaluateChannelMode` in
+// `@ethosagent/core`: Slack, Telegram, Discord and WhatsApp each carried a
+// copy of this matrix and they had already drifted. Slack's copy knew nothing
+// about `observe`, so a channel set to observe would have been answered on
+// every @mention.
+//
+// The local `shouldRespond` is gone rather than left to rot. What remains is a
+// re-export, so anything still importing this path gets the one shared
+// decision instead of a second implementation of it. Removing the file is a
+// one-line follow-up; see plan/phases/ambient-group-monitoring.md R6.
 
-import type { ChannelMode } from '../config';
-
-export interface ChannelModeInputs {
-  isDm: boolean;
-  isGroupMention: boolean;
-  channelMode: ChannelMode;
-  hasBotPosted: boolean;
-}
-
-export function shouldRespond(inputs: ChannelModeInputs): boolean {
-  if (inputs.isDm) return true;
-  if (inputs.channelMode === 'all') return true;
-  if (inputs.isGroupMention) return true;
-  if (inputs.channelMode === 'thread_follow' && inputs.hasBotPosted) return true;
-  return false;
-}
+export type { ChannelModeDecision, ChannelModeInputs } from '@ethosagent/core';
+export { evaluateChannelMode } from '@ethosagent/core';

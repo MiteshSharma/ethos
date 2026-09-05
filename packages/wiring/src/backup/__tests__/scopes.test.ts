@@ -108,10 +108,10 @@ describe('backup scopes: WAL store drift gate', () => {
     }
   });
 
-  it('resolves the 19 sites to 14 distinct database files', () => {
+  it('resolves the 20 sites to 15 distinct database files', () => {
     const files = new Set(WAL_STORES.map((s) => s.database));
-    expect(WAL_STORES.reduce((n, s) => n + s.sites, 0)).toBe(19);
-    expect(files.size).toBe(14);
+    expect(WAL_STORES.reduce((n, s) => n + s.sites, 0)).toBe(20);
+    expect(files.size).toBe(15);
   });
 });
 

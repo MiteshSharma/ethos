@@ -131,6 +131,7 @@ Multi-bot list shape. When set, the gateway creates one `TelegramAdapter` and on
 | `telegram.bots.<i>.bind.type` | `personality` \| `team` | — | Required. `personality` routes to a named personality. `team` routes to the team's coordinator personality and auto-starts the team supervisor. |
 | `telegram.bots.<i>.bind.name` | string | — | Required. Personality id (for `personality`) or team name (for `team`). |
 | `telegram.bots.<i>.bind.allowSlashSwitch` | boolean | `false` | Allow per-chat `/personality` switching. Disabled by default for identity-bound bots. |
+| `telegram.bots.<i>.defaultChannelMode` | `mention_only` \| `thread_follow` \| `all` \| `regex_match` \| `observe` | `mention_only` | Reply-and-record behaviour in group chats that have no per-chat override. Five values — one more than Slack's four; see the mode list below. Every value except `mention_only` acts on group messages nobody addressed to the bot, and Telegram delivers those only when BotFather's Group Privacy is off — see [Platform prerequisites for group messages](../../platforms/telegram.md#3b-platform-prerequisites-for-group-messages). An out-of-range value is a parse error, not a silent fallback. |
 | `telegram.bots.<i>.useWebhook` | boolean | `false` | Receive updates over an inbound webhook instead of long-polling. Requires `webhookUrl` and `webhookSecretToken` — the adapter throws at startup without either. See [Receive Slack and Telegram events over webhooks](../how-to/run-channels-over-webhooks.md). |
 | `telegram.bots.<i>.webhookUrl` | string | — | Required when `useWebhook` is `true`. The full public URL Telegram POSTs updates to, **including** the `/telegram/webhook/<botKey>` path — the host routes on that path, so a URL without it reaches no handler. Registered for you by `setWebhook()` at startup. |
 | `telegram.bots.<i>.webhookSecretToken` | string | — | Required when `useWebhook` is `true`. Echoed by Telegram in `X-Telegram-Bot-Api-Secret-Token` and compared by grammy before the update is processed. A credential: externalized to the secret vault exactly like `token`, so write it as `${secrets:<ref>}`. |
@@ -150,6 +151,14 @@ telegram.bots.1.bind.name: engineer
 
 Notes:
 
+- `defaultChannelMode` values, as `evaluateChannelMode()` in [`packages/core/src/channel-mode.ts`](https://github.com/ethosagent/ethos/blob/main/packages/core/src/channel-mode.ts) resolves them:
+  - `mention_only` — reply only when the message contains the bot's `@username` (default). Also the fallback for any value the evaluator does not recognise.
+  - `thread_follow` — `mention_only`, plus every message in a forum topic the bot has already posted in.
+  - `all` — reply to every message in the chat.
+  - `regex_match` — `mention_only`, plus messages matching a per-chat stored pattern. **No effect as a global default:** the pattern is read from a per-chat override, and Telegram has no way to write one yet (see the bullet below), so a message that is not a mention never matches.
+  - `observe` — record every message to the channel transcript and reply to none of them, not even an explicit `@mention`. Direct messages to the bot are answered under every mode, `observe` included.
+- **Per-chat overrides cannot be set on Telegram yet.** The adapter reads a per-chat override store (`ChannelOverrideStore`, JSONL under the bot's `telegram/<botKey>/` directory) and a stored entry wins over this key, but no command or API writes one — Slack's `/ethos channel-mode` has no Telegram equivalent. This key is the only way to put a Telegram chat into `observe` today, and it applies to every group the bot is in.
+- A bot whose resolved mode is `observe` while BotFather's Group Privacy is still on records nothing at all. The adapter checks `getMe` at startup and logs `Telegram privacy mode is ON for @<username> — chats set to observe will record nothing.` rather than leaving an empty transcript to explain itself.
 - Session key format in multi-bot mode: `telegram:<botKey>:<chatId>`. This differs from single-bot mode (`telegram:<chatId>`).
 - `deriveBotKey()` in [`packages/config/src/index.ts`](https://github.com/ethosagent/ethos/blob/main/packages/config/src/index.ts) computes the sha256-derived default when `id` is omitted.
 - See [Run multiple Telegram bots from one process](../how-to/run-multi-bot-telegram.md) for a full walkthrough.
@@ -180,7 +189,7 @@ Multi-app list shape for Slack. Each entry creates one Slack adapter bound to a 
 | `slack.apps.<i>.bind.type` | `personality` \| `team` | — | Required. Same semantics as the Telegram equivalent. |
 | `slack.apps.<i>.bind.name` | string | — | Required. Personality id or team name. |
 | `slack.apps.<i>.bind.allowSlashSwitch` | boolean | `false` | Allow per-channel `/personality` switching. |
-| `slack.apps.<i>.defaultChannelMode` | `mention_only` \| `thread_follow` \| `all` | `mention_only` | When the agent replies in a channel with no per-channel override. `thread_follow` also answers follow-ups in threads it has already posted in; `all` answers every message. |
+| `slack.apps.<i>.defaultChannelMode` | `mention_only` \| `thread_follow` \| `all` \| `observe` | `mention_only` | Reply-and-record behaviour in channels that have no per-channel override. Four values, not Telegram's five — the Slack adapter has no `regex_match`. `thread_follow` also answers follow-ups in threads the bot has already posted in; `all` answers every message; `observe` records every message and replies to none, not even an explicit `@mention`. DMs are answered under every mode. Anything but `mention_only` needs the `message.channels` / `message.groups` event subscriptions — see [Platform prerequisites for unaddressed channel messages](../../platforms/slack.md#1a-platform-prerequisites-for-unaddressed-channel-messages). `/ethos channel-mode <mode>` overrides it per channel. An out-of-range value is a parse error, not a silent fallback. |
 | `slack.apps.<i>.receiptReaction` | string | `eyes` | Emoji name (no colons) reacted onto an inbound message on arrival and removed once the reply lands. Needs the `reactions:write` scope; without it the reaction is skipped silently. |
 | `slack.apps.<i>.allowedSlashUsers` | string list | unset | Comma-separated Slack user ids allowed to run `/ethos` and to see the App Home tab's memory, session, kanban, and channel sections. Narrows `channel_filter.slack` (`ownerUserId` + `recipientAllowlist`) — an id listed here that is not on that allowlist stays denied. Absent or empty means the `channel_filter.slack` allowlist alone. Both empty means nobody: the gate is default-closed. |
 | `slack.apps.<i>.allowedBotIds` | string list | unset | Comma-separated Slack `bot_id`s whose messages reach the agent, in new posts, edits, and thread backfill alike. Absent or empty drops every bot- and workflow-authored message — the gate is default-closed. Read a bot's id from the `bot_id` field of any message it has posted. |
@@ -226,6 +235,28 @@ Type: string · Default: unset
 
 Bot token for the Discord gateway.
 
+## discord.defaultChannelMode {#discord-default-channel-mode}
+
+Type: `mention_only` | `thread_follow` | `all` | `observe` · Default: `mention_only`
+
+Reply-and-record behaviour in every guild channel that has no per-channel override. Discord is single-bot — its credential is the top-level [`discordToken`](#discord-token) scalar, with no `discord.bots` roster — so this is a **top-level** key, not an indexed entry like [`telegram.bots.<i>.defaultChannelMode`](#telegram-bots) or [`slack.apps.<i>.defaultChannelMode`](#slack-apps).
+
+- `mention_only` — reply only when the message `@mentions` the bot (default). Also the fallback for any value the evaluator does not recognise.
+- `thread_follow` — `mention_only`, plus every message in a thread the bot has already posted in.
+- `all` — reply to every message in the channel.
+- `observe` — record every message to the channel transcript and reply to none of them, not even an explicit `@mention`.
+
+```yaml
+discord.defaultChannelMode: observe
+```
+
+Notes:
+
+- Four values, not Telegram's five — the Discord adapter has no `regex_match`. DMs are answered under every mode, `observe` included. An out-of-range value is a parse error, not a silent fallback: `ethos gateway` and `ethos boot` print `discord: invalid defaultChannelMode '<value>'` and exit non-zero.
+- Read once at gateway startup. Restart the gateway after editing.
+- Unlike Slack and Telegram, Discord needs no extra platform-side switch for messages nobody addressed to the bot. The **Message Content Intent** the adapter already requires for mentions covers them too — see [Confirm intents](../../platforms/discord.md#3-confirm-intents).
+- **Per-channel overrides cannot be set on Discord.** The adapter reads a per-channel override store (`ChannelOverrideStore`, JSONL under `~/.ethos/discord/<botKey>/`) and a stored entry wins over this key, but no command or API writes one — Slack's `/ethos channel-mode` has no Discord equivalent. This key is the only way to put a Discord channel into `observe` today, and it applies to every channel the bot can see. `/ethos help` prints the channel's effective mode.
+
 ## slackBotToken {#slack-bot-token}
 
 Type: string · Default: unset
@@ -249,6 +280,27 @@ Type: string · Default: unset
 Type: string · Default: unset
 
 Slack request signing secret. Verifies inbound webhooks when running Slack in HTTP mode.
+
+## whatsapp.\<i\>.default_mode {#whatsapp-default-mode}
+
+Type: `all` | `mention_only` | `observe` · Default: `mention_only`
+
+Reply-and-record behaviour in the group chats of the WhatsApp account at index `<i>` that have no per-chat override. Note the key name: `default_mode`, snake_case — not `defaultChannelMode`. The whole `whatsapp.<i>.*` block is snake_case (`session_dir`, `allowed_numbers`, `phone_number`), and this key follows its own block rather than the other three platforms. It is the real key, not a typo.
+
+- `all` — reply to every message in the group.
+- `mention_only` — reply only when the message mentions the bot (default).
+- `observe` — record every message to the channel transcript and reply to none of them, not even an explicit mention.
+
+```yaml
+whatsapp.0.default_mode: observe
+```
+
+Notes:
+
+- Three values — the smallest of the four adapters' sets. WhatsApp has no threads, so no `thread_follow`, and no `regex_match`. Direct chats are answered under every mode, `observe` included. An out-of-range value is a parse error, not a silent fallback: `ethos gateway` and `ethos boot` print `whatsapp[<i>]: invalid default_mode '<value>'` and exit non-zero.
+- Read once at gateway startup. Restart the gateway after editing.
+- **The adapter's own fallback is `all`, not `mention_only`.** `DEFAULT_CHANNEL_MODE` in [`extensions/platform-whatsapp/src/config.ts`](https://github.com/ethosagent/ethos/blob/main/extensions/platform-whatsapp/src/config.ts) is `all`, because an unset mode has always meant "answer every group message" for code that constructs `WhatsAppAdapter` directly and flipping it would silence a working embedder on upgrade. The gateway never leaves it unset — it passes `default_mode ?? 'mention_only'` — so an `ethos gateway` deployment gets `mention_only` like every other platform. The `all` fallback is reachable only by embedding the adapter yourself.
+- **Per-chat overrides cannot be set on WhatsApp.** The adapter reads a per-chat override store (`ChannelOverrideStore`, JSONL under `~/.ethos/whatsapp/<botKey>/`) and a stored entry wins over this key, but no command or API writes one — Slack's `/ethos channel-mode` has no WhatsApp equivalent. This key is the only way to put a WhatsApp group into `observe` today, and it applies to every group that account is in.
 
 ## emailImapHost {#email-imap-host}
 

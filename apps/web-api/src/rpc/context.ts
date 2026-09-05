@@ -24,6 +24,7 @@ import type { McpService } from '../services/mcp.service';
 import type { MemoryService } from '../services/memory.service';
 import type { MeshService } from '../services/mesh.service';
 import type { NamedSecretsService } from '../services/named-secrets.service';
+import type { ObservedChatsService } from '../services/observed-chats.service';
 import type { OnboardingService } from '../services/onboarding.service';
 import type { PersonalitiesService } from '../services/personalities.service';
 import type { PlatformsService } from '../services/platforms.service';
@@ -102,6 +103,10 @@ export interface RpcContext {
    *  `voice.calls.*` then reports an empty list, which the UI renders as an
    *  empty state rather than an error. */
   calls?: CallsService;
+  /** Read-only lane summaries for the rooms bots observe. Not optional: it
+   *  reports an empty house — never a throw — when no gateway has ever
+   *  recorded one, which is what the Communications empty state renders. */
+  observedChats: ObservedChatsService;
   /** Read / replace the wake-phrase → personality table. Not optional: the
    *  editor must render (empty) even where no satellite lane is mounted. */
   wakeRoutes: WakeRoutesService;

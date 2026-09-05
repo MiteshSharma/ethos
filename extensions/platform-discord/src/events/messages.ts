@@ -1,3 +1,4 @@
+import type { ChannelOverrideStore } from '@ethosagent/core';
 import type {
   Attachment,
   AttachmentCache,
@@ -9,7 +10,6 @@ import type { ChannelMode } from '../config';
 import type { TriageContext } from '../routing/triage';
 import { triageMessage } from '../routing/triage';
 import type { BackfillStateStore } from '../store/backfill-state';
-import type { ChannelOverrideStore } from '../store/channel-overrides';
 import type { ThreadStateStore } from '../store/thread-state';
 
 /** Default inbound-attachment ceiling. Overridable per deployment via
@@ -56,7 +56,7 @@ interface MessageContext {
   defaultChannelMode: ChannelMode;
   receiptReaction: string;
   cache?: AttachmentCache;
-  channelOverrides?: ChannelOverrideStore;
+  channelOverrides?: ChannelOverrideStore<ChannelMode>;
   threadState?: ThreadStateStore;
   backfillState?: BackfillStateStore;
   /** Inbound-attachment ceiling in bytes. Absent = {@link MAX_FILE_SIZE}. */
@@ -94,13 +94,22 @@ export function registerMessageHandler(ctx: MessageContext): void {
       }
     }
 
-    // Receipt reaction (best-effort, non-blocking)
-    if (ctx.receiptReaction) {
+    // Receipt reaction (best-effort, non-blocking).
+    //
+    // NOT on an observed message. A room set to `observe` is a room the
+    // operator told the agent to be silent in, and a 👀 landing on every
+    // message in it is the bot answering — visibly, to everyone in the room —
+    // several hundred times a day. Silent means silent (R11).
+    if (ctx.receiptReaction && !envelope.recordOnly) {
       message.react(ctx.receiptReaction).catch(() => {});
       ctx.onReceipt(message.channelId, message.id);
     }
 
-    if (message.attachments.size === 0 || !ctx.cache) {
+    // `recordOnly` skips the download: the gateway's transcript row is TEXT,
+    // so the bytes would be fetched and cached only to be thrown away — and a
+    // third party's media would sit in the attachment cache under a lifetime
+    // the transcript's retention never touches.
+    if (message.attachments.size === 0 || !ctx.cache || envelope.recordOnly) {
       ctx.onMessage(envelope);
       return;
     }
@@ -208,6 +217,9 @@ async function buildMessageEnvelope(
         messageId: message.reference?.messageId ?? undefined,
         userId: message.mentions.repliedUser?.id ?? undefined,
       },
+      // Platform send time, not our clock — an observed room's transcript is
+      // ordered by when people spoke.
+      sentAt: message.createdTimestamp,
       raw: message,
     },
     triageCtx,

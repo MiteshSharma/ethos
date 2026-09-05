@@ -35,6 +35,7 @@ import type {
   AttachmentCache,
   BackgroundJob,
   ChannelContext,
+  ChannelTranscriptStore,
   ClarifyResponse,
   ClarifySurfaceType,
   DeliveryResult,
@@ -64,6 +65,13 @@ import {
   truncateAtSentenceBoundary,
   type VoiceMode,
 } from '@ethosagent/voice-text';
+import {
+  CHANNEL_DIGEST_LOCK_FILE,
+  CHANNEL_DIGEST_WATERMARK_FILE,
+  type ChannelDigestReport,
+  type ChannelDigestSettings,
+  runChannelDigest,
+} from './channel-digest';
 import { MessageDedupCache } from './dedup';
 import { beginDelivery, confirmDelivery, type DeliveryBinding } from './delivery';
 import {
@@ -81,6 +89,16 @@ import {
 } from './voice-pipeline';
 
 export { SessionLane } from '@ethosagent/session-lane';
+export {
+  buildDigestPrompt,
+  type ChannelDigestBot,
+  type ChannelDigestDeps,
+  type ChannelDigestReport,
+  type ChannelDigestSettings,
+  formatDigest,
+  runChannelDigest,
+  summarizeChannelDigest,
+} from './channel-digest';
 export { MessageDedupCache } from './dedup';
 export { beginDelivery, confirmDelivery, type DeliveryBinding } from './delivery';
 export { DreamExecutor } from './dream-executor';
@@ -130,6 +148,18 @@ const noopLogger: Logger = {
  * any adapter exposing this method shape (e.g. wiring's GatewayObservability)
  * is a fit.
  */
+/**
+ * What an in-app notifications feed answers when handed a digest.
+ *
+ * One field, and it is a COUNT rather than a boolean, because the honest
+ * answer to "did this land" for a fan-out sink is "with how many". The digest
+ * treats `0` as an undelivered digest and leaves its cursor where it was.
+ */
+export interface ChannelDigestFeedResult {
+  /** Live listeners this digest was actually written to. Zero means nobody. */
+  recipients: number;
+}
+
 export interface GatewayObservability {
   recordSafetyBlock(opts: {
     code?: string;
@@ -259,6 +289,30 @@ function botKeyOfAdapterId(id: string): string {
 function botKeyOfLaneKey(laneKey: string): string {
   const segment = laneKey.split(':')[1];
   return segment === undefined ? '' : decodeURIComponent(segment);
+}
+
+/**
+ * A millisecond timestamp fit for the channel transcript's STRICT columns, or
+ * `undefined` when the value cannot be one.
+ *
+ * DEFENCE IN DEPTH, deliberately placed at the gateway/store boundary rather
+ * than in an adapter. `ChannelTranscriptRecord.sentAt` lands in a STRICT
+ * `INTEGER NOT NULL` column, and a bad number there does not degrade — it
+ * ABORTS the insert, and the observed message is gone with only a
+ * `channel.observed_failed` event behind it. `NaN` is the case that actually
+ * shipped: it is not nullish, so `message.sentAt ?? Date.now()` handed it
+ * straight through. That was fixed once in the Telegram adapter and three
+ * adapters now sanitize, but Discord still forwards `createdTimestamp`
+ * verbatim and every future adapter is one `new Date(x).getTime()` away from
+ * reintroducing it. This is the one place all of their output converges, so
+ * this is where the invariant belongs.
+ *
+ * `Number.isSafeInteger` rejects `NaN`, both infinities, and any fractional
+ * value; the explicit floor rejects a negative, which is a safe integer and
+ * would otherwise record a message as sent before 1970.
+ */
+export function transcriptTimestamp(value: number | undefined): number | undefined {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
 }
 
 /** Reply sent when a lane is rejected under saturation (typed busy result). */
@@ -455,6 +509,19 @@ export interface GatewayConfig {
    */
   channelFilter?: ChannelFilterConfig;
   /**
+   * Platforms this deployment has put into observe mode, for the startup check
+   * below. Build it with `observeModePlatforms(config)` from
+   * `@ethosagent/config`; leaving it unset disables the check, never the gate.
+   *
+   * It exists because observe mode fails SILENTLY without
+   * {@link channelTranscript}: `handleMessage`'s observe gate returns whether
+   * or not a store is wired, so a deployment that turns on observe mode and
+   * forgets the sink discards every watched message while the audit trail
+   * still says `channel.observed`. The gate's degrade-to-drop is deliberate —
+   * this is only the light that says it is happening.
+   */
+  observeModePlatforms?: readonly string[];
+  /**
    * Context-economy Phase 1 — static per-channel toolset narrowing. Keys are
    * platform identifiers (e.g. 'whatsapp'), values the tool names allowed on
    * that channel. Passed as `RunOptions.toolsetNarrow` on lane turns, so it
@@ -475,6 +542,48 @@ export interface GatewayConfig {
    * Optional observability adapter for audit events (drops, blocks, context strips).
    */
   observability?: GatewayObservability;
+  /**
+   * Where observe-mode messages are written. An adapter that stamps
+   * `InboundMessage.recordOnly` has already decided this message gets no
+   * reply; the gateway's only job is to record it and stop.
+   *
+   * Absent (tests, standalone, any deployment with no observed chats) → a
+   * `recordOnly` message is simply dropped, which is exactly what happened
+   * before observe mode existed. Never a crash: the whole feature degrades to
+   * today's behaviour by leaving this out.
+   */
+  channelTranscript?: ChannelTranscriptStore;
+  /**
+   * The in-app notifications feed the channel digest posts to (R10/R12).
+   *
+   * A DIRECT sink rather than a `notificationRouter.route()` call, because the
+   * router cannot answer the only question that matters here — whether the
+   * digest actually landed. `DefaultNotificationRouter.route` returns silently
+   * when no adapter is registered for the key, web-api registers adapters only
+   * for chat session keys, and a lane key such as `telegram:bot-a:-100` is
+   * never one of those. Routing a digest through it therefore reached nothing,
+   * indistinguishably from succeeding — and under `deliverTo: 'inApp'` that
+   * silence marked the lane consumed and delivered the digest nowhere.
+   *
+   * Absent (`ethos gateway` standalone, tests) means there is no feed, and
+   * `deliverTo: 'inApp'` is refused rather than silently discarded. `ethos
+   * boot` supplies `CreateWebApiResult.notifyChannelDigest`.
+   *
+   * It returns a RECIPIENT COUNT rather than `void`, and that is the whole
+   * point of the seam. The feed that actually shipped is an ephemeral
+   * multicast to browser sessions connected at that instant, so a nightly
+   * digest generated with no tab open reached nobody — while a `void` return
+   * read as delivery, advanced the consumption watermark, and discarded the
+   * digest permanently. Zero recipients is a FAILURE here; see
+   * `Gateway.runChannelDigest`.
+   */
+  channelDigestFeed?(entry: {
+    laneKey: string;
+    platform: string;
+    chatId: string;
+    botKey: string;
+    text: string;
+  }): ChannelDigestFeedResult | Promise<ChannelDigestFeedResult>;
   /**
    * Optional hook fired after a turn completes with a delivered reply (not
    * aborted, not errored, non-empty response). The caller decides what to do
@@ -571,11 +680,19 @@ export interface GatewayConfig {
   attachmentCache?: AttachmentCache;
   /**
    * Storage used to read cached attachment bytes — today only for transcribing
-   * inbound voice notes, which need the audio itself and not just its path.
+   * inbound voice notes, which need the audio itself and not just its path —
+   * and, with `dataDir`, to persist the channel digest's per-lane watermarks.
    * Absent (with `attachmentCache` present) means audio attachments still land
    * as `(voice message)`; they are simply not transcribed.
    */
   storage?: Storage;
+  /**
+   * Absolute `~/.ethos/`. Needed with `storage` to place gateway-owned state
+   * files — today only the channel digest's watermarks. `Storage` does not root
+   * relative paths, so without this the digest keeps no watermark and falls
+   * back to its fixed look-back window.
+   */
+  dataDir?: string;
   /** STT provider registry for resolving voice transcription providers by name. */
   sttProviderRegistry?: SttProviderRegistry;
   /** Name of the STT provider to use (from auxiliary.asr.provider in config). */
@@ -853,6 +970,8 @@ export class Gateway {
   private readonly pairingDb: Database.Database | undefined;
   /** Observability adapter for audit events. */
   private readonly observability: GatewayObservability | undefined;
+  private readonly channelTranscript: ChannelTranscriptStore | undefined;
+  private readonly channelDigestFeed: GatewayConfig['channelDigestFeed'];
   /** Hook fired after a turn completes with a delivered reply. */
   private readonly onTurnComplete: ((info: { platform: string }) => void) | undefined;
   /** Hook fired at turn start with the resolved personality (activity signal). */
@@ -877,6 +996,8 @@ export class Gateway {
   private readonly attachmentCache: AttachmentCache | undefined;
   /** Optional storage for reading cached attachment bytes (voice-note STT). */
   private readonly storage: Storage | undefined;
+  /** Absolute `~/.ethos/`, for gateway-owned state files. See GatewayConfig. */
+  private readonly dataDir: string | undefined;
   /** STT provider registry for resolving voice transcription providers by name. */
   private readonly sttProviderRegistry: SttProviderRegistry | undefined;
   /** Name of the STT provider to use (from auxiliary.asr.provider in config). */
@@ -1025,6 +1146,8 @@ export class Gateway {
     this.channelToolsets = config.channelToolsets;
     this.pairingDb = config.pairingDb;
     this.observability = config.observability;
+    this.channelTranscript = config.channelTranscript;
+    this.channelDigestFeed = config.channelDigestFeed;
     this.onTurnComplete = config.onTurnComplete;
     this.onUserTurn = config.onUserTurn;
     // Global turn budget. Unset / non-positive => Infinity permits (unbounded,
@@ -1064,6 +1187,7 @@ export class Gateway {
     this.personalityDirectory = config.personalityDirectory;
     this.attachmentCache = config.attachmentCache;
     this.storage = config.storage;
+    this.dataDir = config.dataDir;
     this.sttProviderRegistry = config.sttProviderRegistry;
     this.sttProviderName = config.sttProviderName;
     this.ttsProviderRegistry = config.ttsProviderRegistry;
@@ -1199,6 +1323,24 @@ export class Gateway {
           }
         }
       }
+    }
+
+    // Observe mode with nowhere to record to. The gate in `handleMessage`
+    // returns unconditionally, so this deployment is dropping every watched
+    // message AND writing `channel.observed` for each one — the audit trail
+    // says the opposite of what is happening, which is why silence here is
+    // worse than the misconfiguration. Reported once, at construction, through
+    // the same observability seam the gate itself uses: this package has no
+    // console, and an audit record is what an operator can actually go and
+    // find. It changes no behaviour.
+    if (!config.channelTranscript && (config.observeModePlatforms?.length ?? 0) > 0) {
+      this.observability?.recordSafetyBlock({
+        code: 'channel.observe_without_store',
+        cause:
+          'observe mode is configured but no channel transcript store is wired — ' +
+          'observed messages are being recorded nowhere and are lost',
+        details: { platforms: [...(config.observeModePlatforms ?? [])] },
+      });
     }
   }
 
@@ -1728,6 +1870,83 @@ export class Gateway {
           return;
         }
       }
+    }
+
+    // --- Observe mode: record and stop (plan R1/R2) ---
+    // The adapter has already run `evaluateChannelMode` and told us this room
+    // is watched, not answered. Recording is the whole of the work.
+    //
+    // WHERE THIS SITS IS THE DECISION:
+    //
+    //  * AFTER dedup, so a platform re-delivery does not re-audit the same
+    //    message. (The store upserts on `(lane_key, message_id)`, so the row
+    //    itself would survive a double write — the audit event would not.)
+    //
+    //  * BEFORE `checkMessage`. R2: observe mode records EVERY message the
+    //    platform delivers, allowlisted sender or not. That is not a hole in
+    //    the sender allowlist — recording runs no turn, calls no tool and
+    //    sends nothing, so there is no capability for a stranger to reach.
+    //    The allowlist exists to stop strangers from *driving the agent*; the
+    //    boundary for this data moves downstream to the digest turn, which
+    //    reads the transcript with an empty toolset (R9). Filtering here
+    //    instead would produce a transcript of a group conversation with
+    //    every non-owner's half missing — a digest of nothing.
+    //
+    // Returns unconditionally: with no store wired, a `recordOnly` message is
+    // dropped, which is what happened before observe mode existed.
+    if (message.recordOnly) {
+      // This process's own clock, so it needs no guard — and it is also the
+      // fallback the adapter-supplied `sentAt` falls back TO, which is why it
+      // is read once rather than twice.
+      const recordedAt = Date.now();
+      try {
+        await this.channelTranscript?.record({
+          platform: message.platform,
+          botKey: dedupBotKey,
+          chatId: message.chatId,
+          ...(message.threadId ? { threadId: message.threadId } : {}),
+          senderId: message.userId ?? '',
+          ...(message.username ? { senderName: message.username } : {}),
+          text: message.text,
+          ...(message.messageId ? { messageId: message.messageId } : {}),
+          // The substitution is HERE, at the call site, and not hidden behind a
+          // default in the store: `sentAt` is optional on the wire, and a row
+          // whose timestamp is our clock reading must be a visible choice.
+          //
+          // `??` alone was not enough, and the gap cost a message. `NaN` is
+          // not nullish, so an adapter forwarding a platform field that parsed
+          // badly — `new Date(undefined).getTime()`, a missing
+          // `createdTimestamp` — passed straight through into a STRICT
+          // `INTEGER NOT NULL` column and ABORTED the insert. The observed
+          // message was then gone, with only a `channel.observed_failed`
+          // event to show for it. See `transcriptTimestamp`.
+          sentAt: transcriptTimestamp(message.sentAt) ?? recordedAt,
+          recordedAt,
+        });
+        this.observability?.recordSafetyBlock({
+          code: 'channel.observed',
+          details: {
+            platform: message.platform,
+            chatId: message.chatId,
+            userId: message.userId,
+          },
+        });
+      } catch (err: unknown) {
+        // A full disk or a locked database must not take the inbound path
+        // down — and must not fall through to a turn either. The message is
+        // lost; the event is how the operator finds out (the UI turns this
+        // into a persistent "recording stopped" row).
+        this.observability?.recordSafetyBlock({
+          code: 'channel.observed_failed',
+          cause: 'channel transcript write failed',
+          details: {
+            platform: message.platform,
+            chatId: message.chatId,
+            error: err instanceof Error ? err.message : String(err),
+          },
+        });
+      }
+      return;
     }
 
     // --- Chapter 1: before_inbound channel safety filter ---
@@ -4039,6 +4258,106 @@ export class Gateway {
   // ---------------------------------------------------------------------------
   // Public API — agent-initiated outbound sends (send_message tool)
   // ---------------------------------------------------------------------------
+
+  /**
+   * Send from ONE NAMED BOT, resolved by botKey.
+   *
+   * `sendTo` resolves by PLATFORM, and `adapterRegistry` holds the first
+   * adapter registered per platform — so on a multi-bot deployment every
+   * cross-platform send leaves through whichever bot happened to start first.
+   * For a channel digest that is the wrong answer twice over: the summary of a
+   * room bot B watches would arrive from bot A, in bot A's DM, to whoever bot A
+   * answers to. This resolves through `botAdapters`, the authoritative
+   * botKey-keyed registry, so the bot that watched is the bot that reports.
+   *
+   * No outbound dedup and no delivery ledger, deliberately. A digest is
+   * scheduled, self-contained and regenerated on the next run; a `pending`
+   * obligation redelivering yesterday's summary tomorrow is worse than the
+   * gap. The caller is told whether the platform confirmed and decides.
+   */
+  async sendVia(
+    botKey: string,
+    chatId: string,
+    body: string,
+  ): Promise<{ ok: boolean; error?: string }> {
+    const adapter = this.botAdapters.get(botKey);
+    if (!adapter) return { ok: false, error: `No adapter registered for bot "${botKey}"` };
+    try {
+      const result = await adapter.send(chatId, { text: body });
+      if (!result.ok) return { ok: false, error: result.error ?? 'Adapter send failed' };
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
+  }
+
+  /**
+   * Run the ambient channel digest over every watched lane this process serves
+   * (plan R9/R10). The `channel-digest` system cron task's whole body.
+   *
+   * It lives on the Gateway because every input it needs is gateway-private:
+   * the transcript store, the per-bot loops, the botKey-keyed adapters and the
+   * owner declared in `channel_filter`. The job itself is a pure function in
+   * `./channel-digest` — this is the wiring, not the logic.
+   */
+  async runChannelDigest(settings: ChannelDigestSettings = {}): Promise<ChannelDigestReport> {
+    return runChannelDigest(
+      {
+        transcript: this.channelTranscript,
+        bots: [...this.bots.values()].map((b) => ({ botKey: b.botKey, loop: b.loop })),
+        ownerChatId: (platform) => this.channelFilter?.[platform]?.ownerUserId,
+        sendVia: (botKey, chatId, text) => this.sendVia(botKey, chatId, text),
+        // Where the per-lane watermarks live. Without both halves the digest
+        // falls back to a fixed look-back and re-reads what it already sent.
+        ...(this.storage && this.dataDir
+          ? {
+              watermarks: {
+                storage: this.storage,
+                path: `${this.dataDir}/${CHANNEL_DIGEST_WATERMARK_FILE}`,
+              },
+            }
+          : {}),
+        // The run lock. Keyed on `dataDir` ALONE, not on `storage` as well:
+        // two processes sharing a `~/.ethos` must serialise even if one of
+        // them has no watermark file to protect, because both still deliver.
+        ...(this.dataDir ? { lock: { path: `${this.dataDir}/${CHANNEL_DIGEST_LOCK_FILE}` } } : {}),
+        // `channelDigestFeed`, not `notificationRouter` — see the field's doc
+        // on GatewayConfig. The sink answers with a RECIPIENT COUNT, and only a
+        // non-zero one is delivery: "the call returned" is what the router
+        // already said for a digest that reached nothing, and an in-app feed
+        // with no browser session connected says exactly the same thing. Under
+        // `deliverTo: 'inApp'` that answer is what the consumption cursor
+        // advances on, so a zero here has to leave it alone.
+        ...(this.channelDigestFeed
+          ? {
+              notify: async (entry: {
+                laneKey: string;
+                platform: string;
+                chatId: string;
+                botKey: string;
+                text: string;
+              }): Promise<{ ok: boolean; error?: string }> => {
+                try {
+                  const result = await this.channelDigestFeed?.(entry);
+                  const recipients = result?.recipients ?? 0;
+                  if (recipients > 0) return { ok: true };
+                  return {
+                    ok: false,
+                    error:
+                      'the in-app notifications feed reached 0 listeners — no session was ' +
+                      'connected when the digest ran',
+                  };
+                } catch (err) {
+                  return { ok: false, error: err instanceof Error ? err.message : String(err) };
+                }
+              },
+            }
+          : {}),
+        ...(this.observability ? { observability: this.observability } : {}),
+      },
+      settings,
+    );
+  }
 
   async sendTo(
     platform: string,

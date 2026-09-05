@@ -230,3 +230,123 @@ describe('botKey stamping', () => {
     expect(captured?.botKey).toBe('ctx-supplied-key');
   });
 });
+
+// ---------------------------------------------------------------------------
+// Observe mode: recordOnly / sentAt on the envelope
+// ---------------------------------------------------------------------------
+
+describe('observe-mode envelope fields', () => {
+  it('an adapter can stamp recordOnly and sentAt', () => {
+    let captured: InboundMessage | undefined;
+    // A message the adapter decided to record but not reply to: the gateway
+    // records it and returns before the channel filter, so no lane, session or
+    // reply is created and the adapter sends no receipt reaction.
+    const platformSentAt = 1_700_000_000_000;
+
+    const adapter = makeAdapter({
+      onMessage: vi.fn((handler: (msg: InboundMessage) => void) => {
+        handler({
+          platform: 'mock',
+          chatId: 'group-1',
+          text: 'site update: pour finished',
+          isDm: false,
+          isGroupMention: false,
+          recordOnly: true,
+          sentAt: platformSentAt,
+          raw: {},
+        });
+      }),
+    });
+
+    adapter.onMessage((msg) => {
+      captured = msg;
+    });
+
+    expect(captured?.recordOnly).toBe(true);
+    // The PLATFORM's send time, not the receipt clock. A redelivered or
+    // delayed message keeps the time it was actually sent, which is what lets
+    // the transcript store order by it.
+    expect(captured?.sentAt).toBe(platformSentAt);
+    expect(captured?.sentAt).not.toBe(Date.now());
+  });
+
+  it('both fields are optional — an adapter that sets neither is conformant', () => {
+    const msg: InboundMessage = {
+      platform: 'mock',
+      chatId: 'chat-1',
+      text: 'hi',
+      isDm: true,
+      isGroupMention: false,
+      raw: {},
+    };
+    expect(msg.recordOnly).toBeUndefined();
+    expect(msg.sentAt).toBeUndefined();
+  });
+
+  it('recordOnly is absent on a message the adapter will reply to', () => {
+    const msg: InboundMessage = {
+      platform: 'mock',
+      chatId: 'group-1',
+      text: '@bot hello',
+      isDm: false,
+      isGroupMention: true,
+      sentAt: 1_700_000_000_000,
+      raw: {},
+    };
+    // `recordOnly` means shouldRecord && !shouldReply; a reply-bound message
+    // must never carry it, or the gateway would swallow the turn.
+    expect(msg.recordOnly).toBeUndefined();
+  });
+
+  // The counterintuitive shape, and the one three of the four real bugs hit:
+  // being ADDRESSED does not entitle the room to a response. In an observed
+  // channel an explicit @mention is still recorded and still not answered —
+  // not even with a receipt reaction, which is a visible answer. An adapter
+  // that reads `isGroupMention` as "must acknowledge" breaks the contract
+  // while type-checking perfectly.
+  it('an @mention can be record-only — addressed is not the same as answered', () => {
+    const msg: InboundMessage = {
+      platform: 'mock',
+      chatId: 'group-1',
+      text: '@bot are we on track?',
+      isDm: false,
+      isGroupMention: true,
+      recordOnly: true,
+      sentAt: 1_700_000_000_000,
+      raw: {},
+    };
+    expect(msg.isGroupMention).toBe(true);
+    expect(msg.recordOnly).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Observe-mode silence: what this layer can and cannot prove
+// ---------------------------------------------------------------------------
+
+// `recordOnly` is only half a contract. The other half — the adapter that
+// stamped it put NOTHING visible in the room on the way — is re-implemented
+// independently in every adapter, and during
+// plan/phases/ambient-group-monitoring.md it was broken and fixed four separate
+// times: Telegram's reaction, Slack's `reactions.add`, WhatsApp's 👀 and
+// Discord's 👀.
+//
+// None of the cases above would have caught any of those four, and neither
+// would any case that could be written here. `packages/types` is the bottom of
+// the layer model (ARCHITECTURE.md §II: types <- core <- extensions <- apps);
+// importing an adapter to watch what it does would invert the dependency
+// direction, so nothing at this layer can observe adapter behaviour at all.
+// Everything above is about the SHAPE of the envelope. That is the honest
+// limit, and it is worth being explicit about rather than papering over with a
+// gate that looks like protection.
+//
+// The gate that DOES prove it is
+// apps/ethos/src/__tests__/observe-silence-conformance.test.ts — the `apps`
+// layer being the only one allowed to import every adapter. It drives all four
+// real adapters in observe mode against a recording platform client and
+// asserts the log of visible calls is empty, with an answering control pinning
+// the exact call each one suppresses. Its `enrollment` case discovers every
+// adapter stamping `recordOnly` from disk, so a fifth cannot join this contract
+// without a case there proving it stays silent.
+//
+// If you are adding an adapter: that is the file to edit, not this one.

@@ -9,8 +9,10 @@ import type {
   PlatformStatus,
   SlackAppEntry,
   TelegramBotEntry,
+  WhatsAppChannelMode,
   WhatsAppEntry,
 } from '@ethosagent/web-contracts';
+import { WhatsAppChannelModeSchema } from '@ethosagent/web-contracts';
 import type { ConfigRepository, RawConfig } from './config.repository';
 
 // Per-platform connection inventory + setup over the same
@@ -28,6 +30,26 @@ import type { ConfigRepository, RawConfig } from './config.repository';
 // Sensitive values never leave this layer — the repository only emits
 // PlatformStatus { configured, fields: { name → bool } } and never
 // returns raw token values to callers.
+
+/**
+ * The stored `default_mode` string, narrowed to the modes the adapter and the
+ * wire schema BOTH accept.
+ *
+ * Parsed against the schema rather than compared against a hand-written pair.
+ * The two-value version of this line (`=== 'all' ? 'all' : 'mention_only'`)
+ * type-checked forever while quietly rewriting every `observe` bot into a
+ * `mention_only` one on the way to the Platforms table — a display that
+ * contradicted the config file it claimed to be showing. Widening the enum in
+ * `@ethosagent/web-contracts` now widens this too, because there is one list.
+ *
+ * An unrecognised value falls back to `mention_only`: the config validator
+ * rejects those at startup, so anything reaching here is hand-edited garbage,
+ * and the quiet mode is the safe guess for garbage.
+ */
+function whatsAppMode(raw: string | undefined): WhatsAppChannelMode {
+  const parsed = WhatsAppChannelModeSchema.safeParse(raw);
+  return parsed.success ? parsed.data : 'mention_only';
+}
 
 interface PlatformDefinition {
   /** Form field names the UI uses. */
@@ -560,7 +582,7 @@ export class PlatformsRepository {
           : undefined;
       result.push({
         botKey,
-        defaultMode: fields.default_mode === 'all' ? 'all' : 'mention_only',
+        defaultMode: whatsAppMode(fields.default_mode),
         allowedNumbers: allowedRaw
           ? allowedRaw
               .split(',')
@@ -577,7 +599,7 @@ export class PlatformsRepository {
 
   async addWhatsApp(input: {
     id?: string;
-    defaultMode?: 'all' | 'mention_only';
+    defaultMode?: WhatsAppChannelMode;
     allowedNumbers?: string[];
     phoneNumber?: string;
     bind: BotBinding;

@@ -56,6 +56,10 @@ export type { CapabilityBackends, CapabilityScopeIds } from './capability-resolv
 export { resolveCapabilities } from './capability-resolver';
 export type { CapabilityValidationError } from './capability-validator';
 export { validateRegistration } from './capability-validator';
+export type { ChannelModeDecision, ChannelModeInputs } from './channel-mode';
+export { evaluateChannelMode } from './channel-mode';
+export type { ChannelModeParser, ChannelOverrideEntry } from './channel-overrides';
+export { ChannelOverrideStore } from './channel-overrides';
 export {
   ClarifyBridge,
   type ClarifyBridgeOptions,

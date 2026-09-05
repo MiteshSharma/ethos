@@ -1,6 +1,6 @@
+import type { ChannelOverrideStore } from '@ethosagent/core';
 import type { DiscordEmbed } from '../blocks/shared';
 import type { Binding, ChannelMode } from '../config';
-import type { ChannelOverrideStore } from '../store/channel-overrides';
 import { handleAsk } from './ask';
 import { handleHelp } from './help';
 import { handleKanban } from './kanban';
@@ -21,7 +21,7 @@ export interface CommandPayload {
 export interface CommandContext {
   binding: Binding;
   defaultChannelMode: ChannelMode;
-  channelOverrides?: ChannelOverrideStore;
+  channelOverrides?: ChannelOverrideStore<ChannelMode>;
   memory?: MemoryReader;
   kanban?: KanbanReader;
   personalityCard?: PersonalityCardReader;
