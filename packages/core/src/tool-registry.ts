@@ -478,15 +478,23 @@ export class DefaultToolRegistry implements ToolRegistry {
         const result = reducer
           ? safeReduce(reducer, rawResult, { args: call.args, turnCount: ctx.currentTurn ?? 0 })
           : rawResult;
-        // Post-trim result to budget
+        // Post-trim result to budget. Spread, don't re-list: the fields beside
+        // `value` describe the CALL, not the text, so a cut to the text must
+        // not erase them. `structured` is the tool's own evidence of what it
+        // did (`write_file` → path/bytes/sha256, `terminal` → exitCode/command)
+        // and the grounding auditor reads it — dropping it turns a verbose but
+        // correct call into an unsupported claim. `cost_usd` is billed into the
+        // turn budget by stages/tool-processing.ts — dropping it makes the
+        // priciest calls (the verbose ones) free. A hand-listed rebuild also
+        // silently drops whatever the success variant gains next.
         if (result.ok && result.value.length > cappedBudget) {
           return {
             toolCallId: call.toolCallId,
             name: call.name,
             result: {
-              ok: true,
+              ...result,
               value: `${result.value.slice(0, cappedBudget)}\n[truncated — ${result.value.length} chars total]`,
-            } as ToolResult,
+            },
           };
         }
         // v2: cache the result if applicable

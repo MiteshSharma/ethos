@@ -646,3 +646,108 @@ describe('Phase 4.3 — cross-plan: MCP server gate catches skill+MCP mismatch',
     });
   });
 });
+
+describe('DefaultToolRegistry — budget trim preserves call evidence', () => {
+  const EVIDENCE = { path: '/tmp/out.txt', bytes: 500, sha256: 'abc123' };
+
+  // maxResultChars caps the per-call budget below ctx.resultBudgetChars, so the
+  // trim fires on a small value instead of a 10k-char fixture.
+  const makeBigTool = (extra: Partial<Extract<ToolResult, { ok: true }>>): Tool => ({
+    name: 'big',
+    description: 'Returns more than its budget',
+    schema: { type: 'object' },
+    capabilities: {},
+    maxResultChars: 100,
+    execute: async () => ({ ok: true, value: 'A'.repeat(500), ...extra }),
+  });
+
+  const runBig = async (tool: Tool) => {
+    const reg = new DefaultToolRegistry();
+    reg.register(tool);
+    const results = await reg.executeParallel(
+      [{ toolCallId: 'c1', name: 'big', args: {} }],
+      makeCtx(),
+    );
+    return results[0]?.result;
+  };
+
+  it('keeps structured evidence when an over-budget value is trimmed', async () => {
+    const result = await runBig(makeBigTool({ structured: EVIDENCE }));
+
+    expect(result?.ok).toBe(true);
+    if (!result?.ok) return;
+    // The text is cut and marked...
+    expect(result.value).toBe(`${'A'.repeat(100)}\n[truncated — 500 chars total]`);
+    // ...but the evidence of what the call actually did survives it. Without
+    // this the grounding auditor sees a true claim with no supporting record.
+    expect(result.structured).toEqual(EVIDENCE);
+  });
+
+  it('keeps cost_usd when an over-budget value is trimmed', async () => {
+    const result = await runBig(makeBigTool({ cost_usd: 0.042 }));
+
+    expect(result?.ok).toBe(true);
+    if (!result?.ok) return;
+    expect(result.value).toContain('[truncated — 500 chars total]');
+    // tool-processing bills this into the turn budget; dropping it at the trim
+    // would make the most verbose (and priciest) calls free.
+    expect(result.cost_usd).toBe(0.042);
+  });
+
+  it('does not add truncation keys to the tool-authored structured payload', async () => {
+    const result = await runBig(makeBigTool({ structured: EVIDENCE }));
+
+    expect(result?.ok).toBe(true);
+    if (!result?.ok) return;
+    // `structured` is the TOOL's namespace and the ledger's guarantee is that
+    // it is exactly what the tool said. The cut happened to `value`, and the
+    // `[truncated — N chars total]` marker there is where it stays visible.
+    expect(Object.keys(result.structured ?? {}).sort()).toEqual(['bytes', 'path', 'sha256']);
+  });
+
+  it('returns an under-budget result unchanged, by identity', async () => {
+    const emitted: ToolResult = { ok: true, value: 'short', structured: EVIDENCE, cost_usd: 0.01 };
+    const reg = new DefaultToolRegistry();
+    reg.register({
+      name: 'small',
+      description: 'Fits in budget',
+      schema: { type: 'object' },
+      capabilities: {},
+      maxResultChars: 100,
+      execute: async () => emitted,
+    });
+
+    const results = await reg.executeParallel(
+      [{ toolCallId: 'c1', name: 'small', args: {} }],
+      makeCtx(),
+    );
+    expect(results[0]?.result).toBe(emitted);
+  });
+
+  it('leaves an over-budget error result untouched, siblings included', async () => {
+    const emitted: ToolResult = {
+      ok: false,
+      code: 'input_invalid',
+      error: 'E'.repeat(500),
+      field: 'path',
+    };
+    const reg = new DefaultToolRegistry();
+    reg.register({
+      name: 'bad',
+      description: 'Fails verbosely',
+      schema: { type: 'object' },
+      capabilities: {},
+      maxResultChars: 100,
+      execute: async () => emitted,
+    });
+
+    const results = await reg.executeParallel(
+      [{ toolCallId: 'c1', name: 'bad', args: {} }],
+      makeCtx(),
+    );
+    // The trim is success-only by contract — `error` is capped at ingestion
+    // instead (agent-loop/ingestion-cap.ts). Nothing here is rebuilt, so
+    // `field` and the rest survive.
+    expect(results[0]?.result).toBe(emitted);
+  });
+});

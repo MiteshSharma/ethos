@@ -1,4 +1,5 @@
 import type { ToolReducerContext, ToolResult, ToolResultReducer } from '@ethosagent/types';
+import { preserveExitSuffix } from '../exit-code';
 import { preserveSpillPath } from '../spill';
 
 function extractCommand(args: unknown): string {
@@ -121,7 +122,15 @@ export const bashReducer: ToolResultReducer = {
     // never is, since `spill.ts` puts it at 60% of the inline body. Without
     // this the pointer to the spill file dies here, on exactly the oversized
     // output it was written for.
-    const value = preserveSpillPath(result.value, reduced.value);
-    return value === reduced.value ? reduced : { ok: true, value };
+    const withPath = preserveSpillPath(result.value, reduced.value);
+    // Same hazard for the `(exit 0)` suffix, and for `structured`: a rewritten
+    // result is a fresh object, so without this the only two places the turn's
+    // exit-code evidence lives both die here — on every reduced terminal call.
+    const value = preserveExitSuffix(result.value, withPath);
+    // A true pass-through (`reduceGeneric` under the threshold) hands back the
+    // same object, evidence intact. Anything else is a fresh object, so carry
+    // `structured` across by hand or the turn loses the exit code entirely.
+    if (reduced === result) return reduced;
+    return { ok: true, value, ...(result.structured ? { structured: result.structured } : {}) };
   },
 };

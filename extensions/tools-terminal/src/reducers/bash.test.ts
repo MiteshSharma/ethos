@@ -206,3 +206,42 @@ describe('bashReducer — spill pointer', () => {
     expect(bashReducer.reduce(result, makeCtxWithCmd('some-long-command'))).toBe(result);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Ground-truth evidence (plan `ground-truth-verification`, R6)
+// ---------------------------------------------------------------------------
+
+describe('bashReducer — exit-code evidence', () => {
+  it('keeps the suffix and structured across a summarizing rewrite', () => {
+    const result: ToolResult = {
+      ok: true,
+      value: ' M src/foo.ts\n?? new.ts\n(exit 0)',
+      structured: { exitCode: 0, command: 'git status --short' },
+    };
+    const reduced = bashReducer.reduce(result, makeCtxWithCmd('git status --short'));
+    expect(reduced.ok).toBe(true);
+    if (!reduced.ok) return;
+    // git status is summarized: the value is replaced outright, which is
+    // exactly where both halves of the evidence used to die.
+    expect(reduced.value).toContain('git status:');
+    expect(reduced.value.endsWith('\n(exit 0)')).toBe(true);
+    expect(reduced.structured).toEqual({ exitCode: 0, command: 'git status --short' });
+  });
+
+  it('does not double the suffix when the rewrite kept it', () => {
+    const result: ToolResult = {
+      ok: true,
+      value: 'Test Files 1 passed\n(exit 0)',
+      structured: { exitCode: 0, command: 'pnpm test' },
+    };
+    const reduced = bashReducer.reduce(result, makeCtxWithCmd('pnpm test'));
+    expect(reduced.ok).toBe(true);
+    if (!reduced.ok) return;
+    expect(reduced.value.match(/\(exit 0\)/g)).toHaveLength(1);
+  });
+
+  it('leaves a failed result untouched', () => {
+    const result: ToolResult = { ok: false, error: 'boom', code: 'execution_failed' };
+    expect(bashReducer.reduce(result, makeCtxWithCmd('git status'))).toBe(result);
+  });
+});
