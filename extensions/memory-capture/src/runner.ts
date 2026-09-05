@@ -28,6 +28,7 @@ import {
   type CaptureJob,
   type CaptureNotice,
   DEFAULT_CAPTURE_CONFIG,
+  type GroundingConsult,
   type ProposeFn,
   type TombstoneChecker,
 } from './types';
@@ -67,6 +68,12 @@ export interface MemoryCaptureRunnerOptions {
    * rejected even after approval is later disabled.
    */
   tombstones?: TombstoneChecker;
+  /**
+   * Ground-truth consult (R8). Omitted → capture behaves exactly as it did
+   * before the seam existed; see `GroundingConsult` for why it is a port and
+   * not an import.
+   */
+  grounding?: GroundingConsult;
   /** Stamped into the MemoryContext; routing ignores it, kept for contract shape. */
   platform?: string;
   workingDir?: string;
@@ -100,15 +107,44 @@ export class MemoryCaptureRunner {
   registerHook(hooks: HookRegistry): () => void {
     return hooks.registerVoid('agent_done', async (payload: AgentDonePayload) => {
       if (!payload.personalityId) return;
-      this.enqueue({
+      const job: CaptureJob = {
         sessionId: payload.sessionId,
         personalityId: payload.personalityId,
         text: payload.text,
         initialPrompt: payload.initialPrompt ?? '',
         // The frozen payload carries no dry-run flag; wiring cannot observe it.
         isDryRun: false,
-      });
+      };
+      if (await this.contradicted(job)) {
+        // R8: memory must not quietly record "I did a good job" from a turn
+        // whose own tools say otherwise. Skip, or mark and keep.
+        if (!this.opts.grounding?.tag) return;
+        job.unverified = true;
+      }
+      this.enqueue(job);
     });
+  }
+
+  /**
+   * Ask the grounding seam whether this turn contradicted its own evidence.
+   *
+   * Fail OPEN, like every other guard in this module (§0 void-hook model): a
+   * consult that throws must not silently switch memory off. The cost of the
+   * wrong answer here is one possibly-wrong fact, which consolidation can
+   * distill later; the cost of the other direction is a user who stops being
+   * remembered and is never told why.
+   */
+  private async contradicted(job: CaptureJob): Promise<boolean> {
+    const grounding = this.opts.grounding;
+    if (!grounding) return false;
+    try {
+      return await grounding.contradicted(job);
+    } catch (err) {
+      this.opts.logger.warn('memory-capture: grounding consult failed', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return false;
+    }
   }
 
   /** Subscribe to capture notices (§3.3). Returns an unsubscribe fn. */
@@ -198,15 +234,16 @@ export class MemoryCaptureRunner {
       const fresh = await this.dedup(scopeId, facts);
       if (fresh.length === 0) return;
 
+      const unverified = job.unverified === true;
       if (this.opts.propose) {
         // L2: the approval gate is active — park each fact instead of writing.
         // No durable write, no history entry, no "remembered" notice: nothing
         // was remembered yet. Approval replays it through the history path.
-        await this.propose(ctx, fresh);
+        await this.propose(ctx, fresh, unverified);
         return;
       }
 
-      await this.write(ctx, fresh);
+      await this.write(ctx, fresh, unverified);
       await this.maybeConsolidate(ctx);
     } finally {
       this.inFlight.delete(scopeId);
@@ -252,12 +289,16 @@ export class MemoryCaptureRunner {
    * queue entry carries the EXACT `hashFact(fact.text)` — the tombstone key used
    * on reject. One proposal per fact keeps the hash 1:1 with the parked update.
    */
-  private async propose(ctx: MemoryContext, facts: CaptureFact[]): Promise<void> {
+  private async propose(
+    ctx: MemoryContext,
+    facts: CaptureFact[],
+    unverified: boolean,
+  ): Promise<void> {
     const proposeFn = this.opts.propose;
     if (!proposeFn) return;
     for (const fact of facts) {
       const key = fact.store === 'memory' ? 'MEMORY.md' : 'USER.md';
-      const content = `\n- ${this.opts.sanitize(fact.text)}`;
+      const content = `\n${this.line(fact, unverified)}`;
       await proposeFn({
         scopeId: ctx.scopeId,
         update: { action: 'add', key, content },
@@ -269,8 +310,26 @@ export class MemoryCaptureRunner {
     }
   }
 
+  /**
+   * The durable line for one fact.
+   *
+   * A tagged capture carries the marker INLINE, because the memory file is the
+   * only place a later reader — human or model — will ever look; a boolean on
+   * a queue object nobody reads back would be the decoration this feature
+   * exists to avoid. The fact TEXT is unchanged, so `hashFact` still sees the
+   * same string and dedup, tombstones and re-capture are untouched by tagging.
+   */
+  private line(fact: CaptureFact, unverified: boolean): string {
+    const text = this.opts.sanitize(fact.text);
+    return unverified ? `- ${text} (unverified)` : `- ${text}`;
+  }
+
   /** Add-only write, one history entry per key with hint + capture hashes. */
-  private async write(ctx: MemoryContext, facts: CaptureFact[]): Promise<void> {
+  private async write(
+    ctx: MemoryContext,
+    facts: CaptureFact[],
+    unverified: boolean,
+  ): Promise<void> {
     const byStore = new Map<'memory' | 'user', CaptureFact[]>();
     for (const f of facts) {
       const list = byStore.get(f.store) ?? [];
@@ -280,7 +339,7 @@ export class MemoryCaptureRunner {
 
     for (const [store, group] of byStore) {
       const key = store === 'memory' ? 'MEMORY.md' : 'USER.md';
-      const appendText = group.map((f) => `- ${this.opts.sanitize(f.text)}`).join('\n');
+      const appendText = group.map((f) => this.line(f, unverified)).join('\n');
       const content = `\n${appendText}`;
 
       const before = (await this.opts.provider.read(key, ctx))?.content ?? '';

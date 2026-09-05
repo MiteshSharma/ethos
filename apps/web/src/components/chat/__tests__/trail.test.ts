@@ -74,10 +74,25 @@ describe('Trail footer — the count', () => {
     expect(html).toContain('—');
   });
 
-  it('draws NO footer at all when the turn took no actions', () => {
+  it('draws NO footer at all when the turn did nothing and found nothing', () => {
     expect(markup([])).toBe('');
-    // A finding with no action behind it is still not an account of work.
-    expect(markup([{ kind: 'finding', id: 'f1', claim: 'x' }])).toBe('');
+  });
+
+  it('draws a footer for a turn with findings and NO actions', () => {
+    // The `no_tools_at_all` finding — the agent claimed work it never did — has
+    // zero actions BY DEFINITION, so the older "zero actions → no footer" rule
+    // silenced the exact case the whole feature exists to surface. The rule it
+    // replaces is unchanged for a turn with neither (the test above).
+    const html = markup([
+      { kind: 'finding', id: 'f1', claim: 'I ran the tests', evidence: 'no tool ran this turn' },
+    ]);
+    expect(text(html)).toContain('⚠ 1 unverified');
+    // No count and no duration: `0 actions · —` is two pieces of noise around
+    // the one thing worth reading.
+    expect(html).not.toContain('actions');
+    expect(html).not.toContain('—');
+    // And still no assurance glyph — a finding is the opposite of a tick.
+    expect(html).not.toContain('✓');
   });
 
   it('never claims "verified" — zero findings means nothing was checked', () => {
@@ -190,6 +205,24 @@ describe('Trail — expansion', () => {
     expect(states).toEqual(['✓ ok', '✗ failed']);
   });
 
+  it('draws the claim quoted and the evidence beside it', () => {
+    render([
+      action({ toolCallId: 'tc9', toolName: 'bash' }),
+      {
+        kind: 'finding',
+        id: 'f1',
+        claim: 'tests pass',
+        evidence: 'run_tests exited 1',
+        citesToolCallId: 'tc9',
+      },
+    ]);
+    act(() => footer().click());
+    const finding = container.querySelector('.activity-row-unverified');
+    expect(finding?.textContent).toContain('⚠ unverified');
+    expect(finding?.textContent).toContain('"tests pass"');
+    expect(finding?.textContent).toContain('run_tests exited 1');
+  });
+
   it('a finding row moves focus to the action row it cites', () => {
     render([
       action({ toolCallId: 'tc9', toolName: 'bash' }),
@@ -211,6 +244,18 @@ describe('Trail — expansion', () => {
 
     act(() => finding?.click());
     expect(document.activeElement).toBe(cited);
+  });
+
+  it('a finding citing nothing is an inert row — clicking it moves no focus', () => {
+    // History replay drops the cited call: the finding still has to render,
+    // and the row must not steal focus to somewhere arbitrary.
+    render([{ kind: 'finding', id: 'f1', claim: 'tests pass', evidence: 'no test command ran' }]);
+    act(() => footer().click());
+    const finding = container.querySelector<HTMLButtonElement>('.activity-row-unverified');
+    expect(finding).not.toBeNull();
+    const before = document.activeElement;
+    act(() => finding?.click());
+    expect(document.activeElement).toBe(before);
   });
 
   it('shows the args and the result once a row is opened', () => {

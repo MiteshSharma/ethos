@@ -57,6 +57,28 @@ async function drainExec(
   return { stdout, stderr, exitCode };
 }
 
+/**
+ * Exit-code evidence on the success path (plan `ground-truth-verification`,
+ * R6). The failure paths already name the code; the success paths did not, so
+ * a model reporting "the tests passed, exit 0" was reporting something it
+ * could not see — `ToolResult.structured` never reaches the LLM, which gets
+ * `result.ok ? result.value : result.error` and nothing else.
+ *
+ * The suffix goes last, so it must survive the budget trim:
+ * `ToolRegistry.executeParallel` trims an over-budget success value by slicing
+ * its HEAD and appending its own marker, which would cut exactly this. Trim
+ * here instead, leaving room for both the marker and the suffix.
+ */
+function withExitCode(body: string, budgetChars: number): string {
+  const suffix = '\n(exit 0)';
+  const room = budgetChars - suffix.length;
+  if (!Number.isFinite(room) || room <= 0 || body.length <= room) return `${body}${suffix}`;
+  const notice = `\n[truncated \u2014 ${body.length} chars total]`;
+  const keep = room - notice.length;
+  if (keep <= 0) return body.slice(0, budgetChars);
+  return `${body.slice(0, keep)}${notice}${suffix}`;
+}
+
 // ---------------------------------------------------------------------------
 // run_code
 // ---------------------------------------------------------------------------
@@ -199,7 +221,17 @@ function createRunCodeTool(
             code: 'execution_failed',
           };
         }
-        return { ok: true, value: output || '(no output)' };
+        // run_code pipes a script to an interpreter, so there is no named
+        // command to record — only the exit code is evidence here. The value
+        // stays the script's own output (R6 scopes the `(exit 0)` suffix to
+        // the command tools, whose value IS shell output).
+        //
+        // UNKNOWN IS NOT ZERO: a null exit code (older backend) keeps its
+        // success return, but carries no `structured` at all — there is no
+        // outcome to report, and this tool has no command identity to keep.
+        return exitCode === 0
+          ? { ok: true, value: output || '(no output)', structured: { exitCode: 0 } }
+          : { ok: true, value: output || '(no output)' };
       } catch (err) {
         // A bridge-driven abort (watcher pause/terminate) killed the container:
         // surface the watcher's reason, not the raw abort error.
@@ -290,7 +322,18 @@ function makeCommandTool(
               code: 'execution_failed',
             };
           }
-          return { ok: true, value: out || opts.emptySuccess };
+          // UNKNOWN IS NOT ZERO: a null exit code (older backend that emits
+          // no exit chunk) keeps its success return, but the result must not
+          // assert a code nobody observed — no `(exit 0)` suffix and no
+          // `structured.exitCode`. `command` stays: identity, not outcome.
+          const body = out || opts.emptySuccess;
+          return exitCode === 0
+            ? {
+                ok: true,
+                value: withExitCode(body, ctx.resultBudgetChars),
+                structured: { exitCode: 0, command },
+              }
+            : { ok: true, value: body, structured: { command } };
         } catch (err) {
           return {
             ok: false,
@@ -337,7 +380,11 @@ function makeCommandTool(
             code: 'execution_failed',
           };
         }
-        return { ok: true, value: out || opts.emptySuccess };
+        return {
+          ok: true,
+          value: withExitCode(out || opts.emptySuccess, ctx.resultBudgetChars),
+          structured: { exitCode: 0, command },
+        };
       } catch (err) {
         return {
           ok: false,

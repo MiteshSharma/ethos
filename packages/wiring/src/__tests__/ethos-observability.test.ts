@@ -87,6 +87,7 @@ describe('EthosObservability', () => {
       expect(ETHOS_EVENT_CATEGORIES).toContain('funnel.setup_completed');
       expect(ETHOS_EVENT_CATEGORIES).toContain('funnel.first_reply');
       expect(ETHOS_EVENT_CATEGORIES).toContain('funnel.channel_first_reply');
+      expect(ETHOS_EVENT_CATEGORIES).toContain('grounding.finding');
     });
 
     it('ETHOS_TRACE_KINDS enumerates ethos trace kinds', () => {
@@ -182,6 +183,43 @@ describe('EthosObservability', () => {
           trigger: 'pairing.approve',
         },
       });
+    });
+
+    it('recordGroundingFinding carries the verdict, the auditor and the claim', () => {
+      const { writer, events } = makeFakeWriter();
+      const obs = new EthosObservability(writer);
+      obs.recordGroundingFinding({
+        traceId: 't1',
+        code: 'contradicted',
+        severity: 'warn',
+        cause: '"tests pass" — run_tests exited 1',
+        auditorId: 'grounding-claims',
+        claim: 'all tests pass',
+      });
+
+      expect(events).toHaveLength(1);
+      expect(events[0]).toMatchObject({
+        traceId: 't1',
+        category: 'grounding.finding',
+        severity: 'warn',
+        code: 'contradicted',
+        details: { auditorId: 'grounding-claims', claim: 'all tests pass' },
+      });
+    });
+
+    it('recordGroundingFinding keeps an info finding countable', () => {
+      const { writer, events } = makeFakeWriter();
+      const obs = new EthosObservability(writer);
+      // The gated `unsupported` verdict: never shown to anyone, so this is the
+      // only place it can be counted.
+      obs.recordGroundingFinding({
+        code: 'unsupported',
+        severity: 'info',
+        auditorId: 'grounding-claims',
+      });
+
+      expect(events[0]).toMatchObject({ category: 'grounding.finding', severity: 'info' });
+      expect(events[0]?.details).toEqual({ auditorId: 'grounding-claims' });
     });
 
     it('recordWatcherDecision picks severity by decision when not overridden', () => {

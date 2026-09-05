@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { homedir } from 'node:os';
 import { dirname, extname, isAbsolute, join, resolve } from 'node:path';
 import { sensitiveDenyPaths } from '@ethosagent/storage-fs';
@@ -41,6 +42,27 @@ function expandPath(p: string, cwd: string): string {
  */
 function canonicalizeForRead(path: string): string {
   return resolve(path);
+}
+
+/**
+ * Ground-truth evidence for a verified write (plan `ground-truth-verification`
+ * R6). Computed over the bytes the tool itself read back — never a second read
+ * of the file, which would be a fresh claim rather than evidence about the
+ * write that just happened.
+ *
+ * `bytes` is the UTF-8 byte length, not `String.length`: the latter counts
+ * UTF-16 code units, so "\u{1F600}" reported 2 where the file holds 4.
+ */
+function writeEvidence(
+  abs: string,
+  verified: string,
+): { path: string; bytes: number; sha256: string } {
+  const buf = Buffer.from(verified, 'utf8');
+  return {
+    path: abs,
+    bytes: buf.byteLength,
+    sha256: createHash('sha256').update(buf).digest('hex'),
+  };
 }
 
 export function isWriteBlocked(abs: string): boolean {
@@ -360,13 +382,17 @@ export const writeFileTool: Tool = {
         readBack = null;
       }
       if (readBack !== content) {
-        const got = readBack === null ? 'nothing (file missing)' : `${readBack.length} bytes`;
+        const got =
+          readBack === null
+            ? 'nothing (file missing)'
+            : `${Buffer.byteLength(readBack, 'utf8')} bytes`;
         return {
           ok: false,
-          error: `Write verification failed for ${abs}: wrote ${content.length} bytes, read back ${got}. The file on disk does not match what was written.`,
+          error: `Write verification failed for ${abs}: wrote ${Buffer.byteLength(content, 'utf8')} bytes, read back ${got}. The file on disk does not match what was written.`,
           code: 'execution_failed',
         };
       }
+      const evidence = writeEvidence(abs, readBack);
 
       // FW-28 — update the recorded mtime after a successful write so subsequent
       // writes in the same session don't false-positive against the pre-write record.
@@ -378,7 +404,11 @@ export const writeFileTool: Tool = {
           ctx.readMtimes.delete(abs);
         }
       }
-      return { ok: true, value: `Written ${content.length} bytes to ${abs}` };
+      return {
+        ok: true,
+        value: `Written ${evidence.bytes} bytes to ${abs}`,
+        structured: evidence,
+      };
     } catch (err) {
       if (isReachError(err)) return reachFailure('write', abs);
       return {
@@ -459,7 +489,11 @@ export const patchFileTool: Tool = {
         // for new_text would silently succeed when the agent patched the wrong
         // file and that file happens to contain the replacement text.
         if (new_text && content.includes(new_text)) {
-          return { ok: true, value: `No change: the patch is already applied at ${abs}.` };
+          return {
+            ok: true,
+            value: `No change: the patch is already applied at ${abs}.`,
+            structured: { ...writeEvidence(abs, content), changed: false },
+          };
         }
 
         const whitespace = diagnoseWhitespaceMismatch(content, old_text, abs);
@@ -482,6 +516,27 @@ export const patchFileTool: Tool = {
       const patched = content.replace(old_text, new_text);
       await fs.write(abs, patched);
 
+      // Self-recovery — same read-back-and-compare write_file does, for the
+      // same silent failure classes (partial write, boundary rewrite,
+      // encoding). Without it `Patched <path>` is a claim, not a fact.
+      let readBack: string | null;
+      try {
+        readBack = await fs.read(abs);
+      } catch {
+        readBack = null;
+      }
+      if (readBack !== patched) {
+        const got =
+          readBack === null
+            ? 'nothing (file missing)'
+            : `${Buffer.byteLength(readBack, 'utf8')} bytes`;
+        return {
+          ok: false,
+          error: `Patch verification failed for ${abs}: wrote ${Buffer.byteLength(patched, 'utf8')} bytes, read back ${got}. The file on disk does not match what was written.`,
+          code: 'execution_failed',
+        };
+      }
+
       // FW-28 — update the recorded mtime after a successful patch.
       if (ctx.readMtimes) {
         const patchedMtime = await fs.mtime(abs);
@@ -491,7 +546,11 @@ export const patchFileTool: Tool = {
           ctx.readMtimes.delete(abs);
         }
       }
-      return { ok: true, value: `Patched ${abs}` };
+      return {
+        ok: true,
+        value: `Patched ${abs}`,
+        structured: { ...writeEvidence(abs, readBack), changed: patched !== content },
+      };
     } catch (err) {
       if (isReachError(err)) return reachFailure('write', abs);
       throw err;

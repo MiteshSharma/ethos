@@ -68,6 +68,9 @@ export const ETHOS_EVENT_CATEGORIES = [
   // Model-visible ⟺ logged (plan/phases/model-visible-logged.md, Phase D) —
   // should never fire; see `packages/core/src/agent-loop/stages/context-drift.ts`.
   'context.drift',
+  // Ground-truth verification (R5) — a turn auditor's verdict on the final
+  // text. See `recordGroundingFinding` below.
+  'grounding.finding',
 ] as const;
 export type EthosEventCategory = (typeof ETHOS_EVENT_CATEGORIES)[number];
 
@@ -327,6 +330,27 @@ export class EthosObservability {
   ): void {
     this.emit(opts.mode === 'invoked' ? 'skill.invoked' : 'skill.exposed', 'info', opts, {
       skill: opts.skill,
+    });
+  }
+
+  /**
+   * Ground-truth verification (R5) — a turn auditor found a claim in the final
+   * text that the turn's tool evidence does not support.
+   *
+   * Recorded for EVERY finding, `info` ones included: the gated `unsupported`
+   * verdicts are never shown to anyone, so observability is the only place
+   * they can be counted, and a finding rate you cannot see is a precision
+   * floor you cannot defend. `severity` carries which tier it was, `code` the
+   * verdict; `auditorId` and the quoted `claim` ride `details` the way
+   * `recordSkillInvocation`'s `skill` does, so the events table needs no new
+   * column.
+   */
+  recordGroundingFinding(
+    opts: EventBase & { auditorId: string; claim?: string; severity?: EventSeverity },
+  ): void {
+    this.emit('grounding.finding', 'warn', opts, {
+      auditorId: opts.auditorId,
+      ...(opts.claim !== undefined ? { claim: opts.claim } : {}),
     });
   }
 

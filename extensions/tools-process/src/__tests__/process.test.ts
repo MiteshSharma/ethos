@@ -183,6 +183,24 @@ describe('process_start', () => {
     process.kill(data.pid, 'SIGKILL');
   });
 
+  it('carries structured { id, pid } matching the value (R6 evidence)', async () => {
+    const start = getTool(tools, 'process_start');
+    const result = await start.execute({ command: 'sleep 30' }, makeCtx(workDir));
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const data = JSON.parse(result.value) as { id: string; pid: number };
+    expect(result.structured).toEqual({ id: data.id, pid: data.pid });
+
+    process.kill(data.pid, 'SIGKILL');
+  });
+
+  it('carries no structured when the command is missing (ok:false IS the evidence)', async () => {
+    const start = getTool(tools, 'process_start');
+    const result = await start.execute({}, makeCtx(workDir));
+    expect(result.ok).toBe(false);
+    expect('structured' in result).toBe(false);
+  });
+
   it('uses ctx.workingDir as default cwd', async () => {
     const start = getTool(tools, 'process_start');
     const result = await start.execute({ command: 'sleep 30' }, makeCtx(workDir));

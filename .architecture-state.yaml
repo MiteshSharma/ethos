@@ -27,7 +27,7 @@ version: 1
 # The path inventory behind ARCHITECTURE.md §II's layer model. Order matches
 # §IX: a layer may depend on any layer beneath it and none above it.
 #
-# `security-kernel` covers six packages under packages/safety/ plus the named
+# `security-kernel` covers seven packages under packages/safety/ plus the named
 # enforcement files inside packages/core and packages/wiring. §II names the
 # layer and §IX carries its rules, so this entry is the path inventory behind a
 # constitutional layer rather than the record-of-fact-without-policy it was
@@ -49,6 +49,7 @@ layers:
   - name: security-kernel
     paths:
       - packages/safety/channel
+      - packages/safety/groundtruth
       - packages/safety/injection
       - packages/safety/network
       - packages/safety/redact
@@ -255,8 +256,8 @@ register_anchors:
     - { path: packages/safety/injection/src/classifier.ts, line: 60, contains: "export function createLLMClassifier" }
     - { path: packages/safety/injection/src/downgrade.ts, line: 23, contains: "export function resolveDowngradedTools" }
     - { path: packages/core/src/agent-loop/stages/context-assembly.ts, line: 422, contains: "deps.safety.injection.prelude" }
-    - { path: packages/core/src/agent-loop.ts, line: 648, contains: "resolveDowngradedTools(dgConfig?.tools)" }
-    - { path: packages/core/src/agent-loop/stages/tool-processing.ts, line: 724, contains: "await handleUntrustedResult(" }
+    - { path: packages/core/src/agent-loop.ts, line: 658, contains: "resolveDowngradedTools(dgConfig?.tools)" }
+    - { path: packages/core/src/agent-loop/stages/tool-processing.ts, line: 751, contains: "await handleUntrustedResult(" }
     - { path: packages/core/src/agent-loop/result-defense.ts, line: 26, contains: "export async function handleUntrustedResult" }
 
   G-SEC:
@@ -371,6 +372,11 @@ tiers:
     package: "@ethosagent/safety-channel"
     tier: 0
     assigned: 2026-08-12
+
+  packages/safety/groundtruth:
+    package: "@ethosagent/safety-groundtruth"
+    tier: 0
+    assigned: 2026-09-05
 
   packages/safety/injection:
     package: "@ethosagent/safety-injection"

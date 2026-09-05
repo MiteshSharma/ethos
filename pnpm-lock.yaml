@@ -2035,6 +2035,12 @@ importers:
       '@ethosagent/kanban-store':
         specifier: workspace:*
         version: link:../kanban-store
+      '@ethosagent/safety-groundtruth':
+        specifier: workspace:*
+        version: link:../../packages/safety/groundtruth
+      '@ethosagent/storage-fs':
+        specifier: workspace:*
+        version: link:../../packages/storage-fs
       '@ethosagent/types':
         specifier: workspace:*
         version: link:../../packages/types
@@ -2407,6 +2413,12 @@ importers:
         specifier: workspace:*
         version: link:../../types
 
+  packages/safety/groundtruth:
+    dependencies:
+      '@ethosagent/types':
+        specifier: workspace:*
+        version: link:../../types
+
   packages/safety/injection:
     dependencies:
       '@ethosagent/types':
@@ -2666,6 +2678,9 @@ importers:
       '@ethosagent/safety-channel':
         specifier: workspace:*
         version: link:../safety/channel
+      '@ethosagent/safety-groundtruth':
+        specifier: workspace:*
+        version: link:../safety/groundtruth
       '@ethosagent/safety-injection':
         specifier: workspace:*
         version: link:../safety/injection
@@ -2795,6 +2810,9 @@ importers:
       '@ethosagent/voice-session':
         specifier: workspace:*
         version: link:../../extensions/voice-session
+      '@ethosagent/voice-text':
+        specifier: workspace:*
+        version: link:../voice-text
       '@ethosagent/watchers':
         specifier: workspace:*
         version: link:../../extensions/watchers

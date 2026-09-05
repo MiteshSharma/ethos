@@ -887,6 +887,9 @@ export async function buildAgentLoop(
     clarifyBridge: infra.clarifyBridge,
     ...(config.teamName ? { teamId: config.teamName } : {}),
     ...(opts.observability ? { observability: opts.observability } : {}),
+    // Ground-truth verification (T4). Only passed when grounding is enabled, so
+    // an opted-out loop's config is byte-identical to today's.
+    ...(toolsResult.turnAuditors.length > 0 ? { turnAuditors: toolsResult.turnAuditors } : {}),
     ...(requestDumpStore ? { requestDumpStore } : {}),
     ...(activeMcpPolicy ? { mcpPolicy: activeMcpPolicy } : {}),
     onToolMetric: (metric) => {
@@ -1372,6 +1375,10 @@ export async function buildAgentLoop(
       consolidate,
       tombstones: captureTombstones,
       ...(capturePropose ? { propose: capturePropose } : {}),
+      // R8 — memory must not quietly record "I did a good job" from a turn its
+      // own tools contradict. Absent when `grounding.enabled: false`, so an
+      // opted-out deployment's capture path is byte-identical to today's.
+      ...(toolsResult.memoryConsult ? { grounding: toolsResult.memoryConsult } : {}),
       config: {
         ...(captureConfig.maxPerHour !== undefined ? { maxPerHour: captureConfig.maxPerHour } : {}),
         ...(captureConfig.maxPerDay !== undefined ? { maxPerDay: captureConfig.maxPerDay } : {}),

@@ -134,6 +134,18 @@ describe('kanban tools', () => {
     expect(store.getTask(out.task_id)?.acceptanceCriteria).toBe('output must contain SHIPPED');
   });
 
+  // The verifier fails closed on a `check:` line that does not parse, so a
+  // prose line that happens to start "check:" rejects the completion. The
+  // reservation has to be stated where the author writes the criteria — the
+  // serialized schema is the string the model actually receives.
+  it('kanban_create tells the author that "check:" is a reserved line prefix', () => {
+    const schema = JSON.stringify((tools.kanban_create as Tool).schema);
+    expect(schema).toContain('is a RESERVED line prefix');
+    expect(schema).toContain('never read as prose');
+    expect(schema).toContain('put ordinary prose on its own line');
+    expect(schema).toContain('check: file_exists <path>');
+  });
+
   it('kanban_create rejects a non-string acceptance_criteria', async () => {
     const result = await (tools.kanban_create as Tool).execute(
       { title: 'x', acceptance_criteria: 123 },

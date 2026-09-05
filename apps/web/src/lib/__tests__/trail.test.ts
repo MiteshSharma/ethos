@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import {
   appendTrailEntry,
+  applyTrailEvent,
   closeTrail,
   formatDuration,
+  parseGroundingMessage,
   previewArgs,
   statusGlyph,
   statusWord,
@@ -200,6 +202,116 @@ describe('summariseTrail', () => {
     trail = appendTrailEntry(trail, 't1', action({ toolCallId: 'tc1', status: 'unrecorded' }));
     trail = updateTrailActionAnywhere(trail, 'tc1', { status: 'failed', durationMs: 9 });
     expect(summariseTrail(trail.t1 ?? [])).toMatchObject({ unrecorded: 0, failed: 1 });
+  });
+});
+
+// The `_grounding` wire format the producer emits:
+//
+//     "<claim>"[ — <evidence>][ [ref:<toolCallId>]]
+//
+// The whole string is also what the CLI and every channel adapter print
+// verbatim, so the rule that governs every case below is: a shape the parser
+// does not recognise becomes the claim untouched. Nothing is ever dropped.
+describe('parseGroundingMessage', () => {
+  it('splits the full form into claim, evidence and the cited call', () => {
+    expect(parseGroundingMessage('"tests pass" — run_tests exited 1 [ref:toolu_01ABC]')).toEqual({
+      claim: 'tests pass',
+      evidence: 'run_tests exited 1',
+      citesToolCallId: 'toolu_01ABC',
+    });
+  });
+
+  it('reads a bare quoted claim', () => {
+    expect(parseGroundingMessage('"no tools ran this turn"')).toEqual({
+      claim: 'no tools ran this turn',
+    });
+  });
+
+  it('reads a claim with evidence but no ref', () => {
+    expect(parseGroundingMessage('"I wrote the file" — no write tool ran')).toEqual({
+      claim: 'I wrote the file',
+      evidence: 'no write tool ran',
+    });
+  });
+
+  it('reads a claim with a ref but no evidence', () => {
+    expect(parseGroundingMessage('"tests pass" [ref:tc9]')).toEqual({
+      claim: 'tests pass',
+      citesToolCallId: 'tc9',
+    });
+  });
+
+  it('keeps an em dash INSIDE the claim in the claim', () => {
+    // The closing quote ends the claim, so the separator search starts after
+    // it — the producer replaces inner quotes with `'` to guarantee this.
+    expect(parseGroundingMessage('"I ran it — twice" — run_tests never ran')).toEqual({
+      claim: 'I ran it — twice',
+      evidence: 'run_tests never ran',
+    });
+  });
+
+  it('keeps an em dash INSIDE the evidence in the evidence', () => {
+    expect(parseGroundingMessage('"tests pass" — run_tests exited 1 — see the log')).toEqual({
+      claim: 'tests pass',
+      evidence: 'run_tests exited 1 — see the log',
+    });
+  });
+
+  it('leaves a ref-SHAPED string that is not a trailing ref in the evidence', () => {
+    // Not at the end, and an id with a space is not an id: neither is a ref,
+    // and neither may be silently eaten.
+    expect(parseGroundingMessage('"x" — [ref:tc9] came back empty')).toEqual({
+      claim: 'x',
+      evidence: '[ref:tc9] came back empty',
+    });
+    expect(parseGroundingMessage('"x" — nothing ran [ref:not an id]')).toEqual({
+      claim: 'x',
+      evidence: 'nothing ran [ref:not an id]',
+    });
+  });
+
+  it('takes an unparseable message as the whole claim, losing nothing', () => {
+    for (const message of [
+      'the tests pass', // no leading quote at all
+      '"unterminated claim', // no closing quote
+      '"" — nothing between the quotes',
+      '"tests pass" run_tests exited 1', // no separator before the evidence
+      '"tests pass" —', // a separator with nothing after it
+    ]) {
+      expect(parseGroundingMessage(message)).toEqual({ claim: message });
+    }
+  });
+});
+
+describe('applyTrailEvent — a grounding finding', () => {
+  const groundingEvent = {
+    type: 'tool_progress',
+    toolName: '_grounding',
+    message: '"tests pass" — run_tests exited 1 [ref:tc9]',
+    audience: 'user',
+  } as const;
+
+  it('appends a finding carrying the parsed claim, evidence and citation', () => {
+    const trail = applyTrailEvent({}, 't1', groundingEvent);
+    expect(trail?.t1).toEqual([
+      {
+        kind: 'finding',
+        id: 't1-finding-0',
+        claim: 'tests pass',
+        evidence: 'run_tests exited 1',
+        citesToolCallId: 'tc9',
+      },
+    ]);
+  });
+
+  it('omits evidence and citation when the message carries neither', () => {
+    const trail = applyTrailEvent({}, 't1', {
+      ...groundingEvent,
+      message: '"no tools ran this turn"',
+    });
+    expect(trail?.t1).toEqual([
+      { kind: 'finding', id: 't1-finding-0', claim: 'no tools ran this turn' },
+    ]);
   });
 });
 

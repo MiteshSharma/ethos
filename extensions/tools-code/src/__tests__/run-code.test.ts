@@ -216,3 +216,114 @@ describe('run_tests / lint routing (F1)', () => {
     if (!result.ok) expect(result.code).toBe('not_available');
   });
 });
+
+// ---------------------------------------------------------------------------
+// Ground-truth evidence (plan `ground-truth-verification`, R6)
+// ---------------------------------------------------------------------------
+
+describe('run_tests / lint exit-code evidence', () => {
+  it('run_tests states the exit code in the value on the routed path', async () => {
+    const backend = makeBackend(true, { stdout: 'PASS', exitCode: 0 });
+    const [, runTests] = createCodeTools({ backend });
+    const result = await runTests.execute({}, ctx);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    // The suffix is the only part of the evidence the model can read:
+    // `structured` never reaches the LLM.
+    expect(result.value).toBe('PASS\n(exit 0)');
+    expect(result.structured).toEqual({ exitCode: 0, command: 'pnpm test' });
+  });
+
+  it('lint states the exit code on the local path, with the overridden command', async () => {
+    const spawn = vi.fn().mockResolvedValue({ exitCode: 0, stdout: 'clean', stderr: '' });
+    const localCtx = { ...ctx, scopedProcess: { spawn } as unknown as typeof ctx.scopedProcess };
+    const [, , lint] = createCodeTools({});
+    const result = await lint.execute({ command: 'biome check .' }, localCtx);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value).toBe('clean\n(exit 0)');
+    expect(result.structured).toEqual({ exitCode: 0, command: 'biome check .' });
+  });
+
+  it('states it on an empty-output success too', async () => {
+    const backend = makeBackend(true, { stdout: '', exitCode: 0 });
+    const [, runTests] = createCodeTools({ backend });
+    const result = await runTests.execute({}, ctx);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value).toBe('(tests passed with no output)\n(exit 0)');
+  });
+
+  it('carries no structured on a non-zero exit (ok:false IS the evidence)', async () => {
+    const backend = makeBackend(true, { stderr: '1 failing', exitCode: 1 });
+    const [, runTests] = createCodeTools({ backend });
+    const result = await runTests.execute({}, ctx);
+    expect(result.ok).toBe(false);
+    expect('structured' in result).toBe(false);
+  });
+
+  it('keeps the suffix inside the budget when the output overruns it', async () => {
+    const big = 'x'.repeat(5_000);
+    const backend = makeBackend(true, { stdout: big, exitCode: 0 });
+    const [, runTests] = createCodeTools({ backend });
+    const budget = 500;
+    const result = await runTests.execute({}, { ...ctx, resultBudgetChars: budget });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    // `executeParallel` trims an over-budget value by slicing its HEAD, so the
+    // suffix survives only if the tool left room for it.
+    expect(result.value.endsWith('\n(exit 0)')).toBe(true);
+    expect(result.value).toContain('[truncated');
+    expect(result.value.length).toBeLessThanOrEqual(budget);
+  });
+});
+
+describe('run_code exit-code evidence', () => {
+  it('carries structured { exitCode } with no command — it runs a script, not a command', async () => {
+    const backend = makeBackend(true, { stdout: 'hello', exitCode: 0 });
+    const [runCode] = createCodeTools({ backend });
+    const result = await runCode.execute({ runtime: 'python', code: 'print(1)' }, ctx);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.structured).toEqual({ exitCode: 0 });
+    // R6 scopes the model-visible suffix to the command tools; run_code's value
+    // is the script's own output and stays verbatim.
+    expect(result.value).toBe('hello');
+  });
+
+  it('carries no structured on a non-zero exit', async () => {
+    const backend = makeBackend(true, { stderr: 'Traceback', exitCode: 1 });
+    const [runCode] = createCodeTools({ backend });
+    const result = await runCode.execute({ runtime: 'python', code: 'boom' }, ctx);
+    expect(result.ok).toBe(false);
+    expect('structured' in result).toBe(false);
+  });
+
+  it('claims no exit code when the backend reported none — unknown is not zero', async () => {
+    // `makeBackend` with no `exitCode` emits no exit chunk, so `drainExec`
+    // yields null: an older backend. The call still succeeds, but it reports
+    // no outcome, because it observed none.
+    const backend = makeBackend(true, { stdout: 'hello' });
+    const [runCode] = createCodeTools({ backend });
+    const result = await runCode.execute({ runtime: 'python', code: 'print(1)' }, ctx);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value).toBe('hello');
+    expect('structured' in result).toBe(false);
+  });
+
+  it('run_tests states no exit code when the backend reported none', async () => {
+    const backend = makeBackend(true, { stdout: 'PASS' });
+    const [, runTests] = createCodeTools({ backend });
+    const result = await runTests.execute({}, ctx);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    // The suffix is the only evidence the model can read, and it would be a
+    // fabricated zero here — a claim that "the tests passed, exit 0" backed by
+    // a run that never said so.
+    expect(result.value).toBe('PASS');
+    expect(result.value).not.toContain('(exit');
+    // `command` survives: identity, not outcome.
+    expect(result.structured).toEqual({ command: 'pnpm test' });
+  });
+});

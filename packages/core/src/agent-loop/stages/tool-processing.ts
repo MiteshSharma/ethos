@@ -576,7 +576,27 @@ export async function* processTools(
       // Lane 1(c) — hook-authored rejection reasons ride the same ingestion
       // cap as executed results (a plugin hook can return arbitrary text).
       llmContent = capIngestedResult(p.rejected, deps.resultBudgetChars);
-      // tool_end already emitted above; no after_tool_call hook for blocked tools
+      // tool_end already emitted above. `after_tool_call` DOES fire, marked
+      // `rejected`: a refusal absent from the evidence ledger silenced the
+      // claims auditor twice over — the name still reached `toolNames`, so
+      // `no_tools_at_all` could not fire, and that same name read as
+      // write-capable activity that gated the `unsupported` finding away.
+      // Nothing ran, so `durationMs` is 0 and the payload is identity only.
+      await deps.hooks.fireVoid(
+        'after_tool_call',
+        {
+          sessionId: ctx.sessionId,
+          toolCallId: p.toolCallId,
+          toolName: p.name,
+          args: p.args,
+          personalityId: ctx.personality.id,
+          workingDir: ctx.workingDir,
+          result,
+          durationMs: 0,
+          rejected: true,
+        },
+        ctx.allowedPlugins,
+      );
     } else {
       const execResult = execResultMap.get(p.toolCallId);
       const durationMs = execResult?.durationMs ?? Date.now() - batchStartedAt;
@@ -632,7 +652,14 @@ export async function* processTools(
         'after_tool_call',
         {
           sessionId: ctx.sessionId,
+          toolCallId: p.toolCallId,
           toolName: p.name,
+          // `p.args` is the full, untruncated effective args — the same value
+          // the memory-telemetry call above uses, never the span's truncated
+          // `attrs.args` JSON.
+          args: p.args,
+          personalityId: ctx.personality.id,
+          workingDir: ctx.workingDir,
           result,
           durationMs,
         },

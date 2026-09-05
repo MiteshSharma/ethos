@@ -12,11 +12,21 @@ import type { HookRegistry, LLMProvider, Tool, ToolContext, ToolResult } from '@
 
 export { type PostmortemHandlerOptions, registerPostmortemHandler } from './postmortem';
 export {
+  type CheckExec,
+  type CheckProbe,
+  type CheckProbeOptions,
+  createCheckProbe,
+} from './probe';
+export {
   createKanbanRoleGateHook,
   type KanbanRoleGateOptions,
   type TeamRole,
 } from './role-gate';
-export { type CompletionVerifierOptions, createCompletionVerifier } from './verifier';
+export {
+  CHECK_VERBS,
+  type CompletionVerifierOptions,
+  createCompletionVerifier,
+} from './verifier';
 
 // Rules block — appended to every tool description so the LLM remembers when
 // to reach for kanban vs the ephemeral `todo_*` toolset.
@@ -213,7 +223,20 @@ function createKanbanCreate(store: KanbanStore): Tool {
           type: 'string',
           description:
             'Optional. What "done" means for this task — checked by a before_ticket_complete ' +
-            'verifier hook when one is registered. No behavioural impact when absent.',
+            'verifier hook when one is registered. No behavioural impact when absent. ' +
+            'Prose is weighed by an LLM judge. "check:" is a RESERVED line prefix: any line ' +
+            'beginning with it is parsed as a ground-truth check and never read as prose, so ' +
+            'it must use one of the four verbs below — put ordinary prose on its own line, ' +
+            'starting with a different word. A check is settled deterministically before the ' +
+            'judge runs, and a failing one sends the ticket to needs_revision. Four verbs: ' +
+            'check: file_exists <path> | check: file_min_bytes <path> <n> | ' +
+            'check: file_contains <path> <substring> | check: run <command> exit <code>. ' +
+            'Relative paths resolve against the team workdir (solo: the personality workdir). ' +
+            '"run" only works for a command an operator opted into via ' +
+            'grounding.kanban.allowedCheckCommands, matched WHOLE: an allowlisted command ' +
+            'with an extra argument appended is refused, so do not add flags of your own. ' +
+            'A "check:" line that does not parse ' +
+            'rejects the completion, so write them exactly as shown.',
         },
       },
     },

@@ -1,0 +1,16 @@
+{
+  "name": "@ethosagent/safety-groundtruth",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "import": "./src/index.ts",
+      "types": "./src/index.ts",
+      "production": "./dist/index.js"
+    }
+  },
+  "dependencies": {
+    "@ethosagent/types": "workspace:*"
+  }
+}

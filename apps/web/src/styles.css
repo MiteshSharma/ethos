@@ -4176,6 +4176,14 @@ button.activity-row:hover {
   white-space: nowrap;
 }
 
+/* A finding's evidence is prose about what the tools actually did, not a
+   literal the operator will retype — Geist, while the quoted claim beside it
+   stays mono because those are the model's own words
+   (plan/phases/ground-truth-verification.md, "What the user sees"). */
+.activity-row-unverified .activity-row-result {
+  font-family: "Geist", system-ui, sans-serif;
+}
+
 .activity-row-meta {
   margin-left: auto;
   color: var(--text-tertiary);

@@ -345,3 +345,107 @@ describe('MemoryCaptureRunner', () => {
     expect((await history.read('personality:muse', { source: 'capture' })).entries).toHaveLength(1); // …no second write
   });
 });
+
+// ---------------------------------------------------------------------------
+// Ground-truth consult (ground-truth-verification R8)
+// ---------------------------------------------------------------------------
+
+/** Drive the real `agent_done` handler, which is where the consult happens. */
+async function fireAgentDone(runner: MemoryCaptureRunner): Promise<void> {
+  let handler: ((p: AgentDonePayload) => Promise<void>) | undefined;
+  const hooks = {
+    registerVoid: (_name: string, fn: (p: AgentDonePayload) => Promise<void>) => {
+      handler = fn;
+      return () => {};
+    },
+  } as unknown as HookRegistry;
+  runner.registerHook(hooks);
+  await handler?.({
+    sessionId: 's1',
+    text: 'Congrats!',
+    turnCount: 1,
+    personalityId: 'muse',
+    initialPrompt: LONG,
+  });
+  await runner.whenIdle();
+}
+
+describe('MemoryCaptureRunner — grounding consult', () => {
+  it('behaves exactly as before when no grounding seam is wired', async () => {
+    const h = makeHarness();
+    await fireAgentDone(h.runner);
+    expect(h.llmCalls).toHaveLength(1);
+    const entries = (await h.history.read('personality:muse')).entries;
+    expect(entries).toHaveLength(1);
+    expect((await h.provider.read('USER.md', ctx()))?.content).toContain('daughter named Priya');
+    expect((await h.provider.read('USER.md', ctx()))?.content).not.toContain('unverified');
+  });
+
+  it('skips a contradicted turn entirely — no extraction call, no write', async () => {
+    const h = makeHarness({ grounding: { contradicted: () => true } });
+    await fireAgentDone(h.runner);
+    expect(h.llmCalls).toHaveLength(0);
+    expect((await h.history.read('personality:muse')).entries).toHaveLength(0);
+    expect(await h.provider.read('USER.md', ctx())).toBeNull();
+  });
+
+  it('captures a turn the consult clears', async () => {
+    const h = makeHarness({ grounding: { contradicted: () => false } });
+    await fireAgentDone(h.runner);
+    expect((await h.history.read('personality:muse')).entries).toHaveLength(1);
+    expect((await h.provider.read('USER.md', ctx()))?.content).not.toContain('unverified');
+  });
+
+  it('tags instead of skipping when memoryTag is configured', async () => {
+    const h = makeHarness({ grounding: { contradicted: () => true, tag: true } });
+    await fireAgentDone(h.runner);
+    const content = (await h.provider.read('USER.md', ctx()))?.content ?? '';
+    expect(content).toContain('daughter named Priya');
+    expect(content).toContain('(unverified)');
+    // Tagging marks the durable line; it must not change the fact's identity,
+    // or a tagged capture would dodge dedup and be recorded again next turn.
+    const entries = (await h.history.read('personality:muse')).entries;
+    expect(entries[0]?.captureHashes).toEqual([hashFact('Has a daughter named Priya, born 2019.')]);
+  });
+
+  it('tags the parked candidate too when the approval gate is active', async () => {
+    const parked: string[] = [];
+    const h = makeHarness({
+      grounding: { contradicted: () => true, tag: true },
+      propose: async (p) => {
+        if (p.update.action === 'add') parked.push(p.update.content);
+      },
+    });
+    await fireAgentDone(h.runner);
+    expect(parked).toHaveLength(1);
+    expect(parked[0]).toContain('(unverified)');
+  });
+
+  it('fails open when the consult throws — a broken seam must not stop memory', async () => {
+    const h = makeHarness({
+      grounding: {
+        contradicted: () => {
+          throw new Error('ledger exploded');
+        },
+      },
+    });
+    await fireAgentDone(h.runner);
+    expect((await h.history.read('personality:muse')).entries).toHaveLength(1);
+  });
+
+  it('the consult sees the job it is judging', async () => {
+    const seen: CaptureJob[] = [];
+    const h = makeHarness({
+      grounding: {
+        contradicted: (job) => {
+          seen.push(job);
+          return false;
+        },
+      },
+    });
+    await fireAgentDone(h.runner);
+    expect(seen).toHaveLength(1);
+    expect(seen[0]?.sessionId).toBe('s1');
+    expect(seen[0]?.text).toBe('Congrats!');
+  });
+});

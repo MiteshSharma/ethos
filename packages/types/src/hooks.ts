@@ -106,9 +106,47 @@ export interface BeforeToolCallResult {
 
 export interface AfterToolCallPayload {
   sessionId: string;
+  /** The `toolCallId` of the `before_tool_call` this closes. An evidence
+   *  collector keys its records by it so a finding can name the exact call it
+   *  is about, and a surface can link the two. */
+  toolCallId: string;
   toolName: string;
+  /** The effective arguments the tool actually ran with — post-hook, so it is
+   *  what happened, not what was proposed. Evidence needs the request as well
+   *  as the result: `ok: true` from `terminal` means nothing without the
+   *  command, and a write's path lives here when the tool reports none. */
+  args: unknown;
+  /**
+   * Personality running the TURN that issued this call. Same reason
+   * `BeforeToolCallPayload.personalityId` exists: a loop shared by several
+   * personalities (one team-scoped loop per team, teams-as-a-scope D4) runs a
+   * different personality per turn, and only the loop knows which one. Evidence
+   * is attributed to the personality that produced it, not to the personality
+   * the loop was constructed with.
+   */
+  personalityId?: string;
+  /** The AgentLoop's working directory at the time the tool ran, so a relative
+   *  path in `args` can be resolved. Per-turn, like `ToolEndWithPathPayload`'s
+   *  field of the same name — it comes from the turn's personality. */
+  workingDir: string;
   result: ToolResult;
   durationMs: number;
+  /**
+   * The call was REFUSED and never executed — a `before_tool_call` rejection, a
+   * watcher halt mid-batch, an MCP `reject_args` policy denial, an unparseable
+   * argument blob. `result` is then the framework-authored `ok: false` carrying
+   * the rejection reason, `durationMs` is 0, and NOTHING ran.
+   *
+   * The hook fires for these so a ledger can hold the fact that a tool was
+   * blocked. Absence is not neutral: a refused `write_file` under "I wrote the
+   * file" used to leave the turn's evidence empty while the tool's NAME still
+   * counted as work having been attempted, which silenced the very warning the
+   * refusal makes most likely (ground-truth verification, R7).
+   *
+   * A handler that counts EXECUTIONS must skip these, and `result.ok` is
+   * already false for every one of them, so a success counter is unaffected.
+   */
+  rejected?: boolean;
 }
 
 /**

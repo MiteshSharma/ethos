@@ -102,7 +102,13 @@ describe('Orchestrator guardrails', () => {
     // irreducible pass-through lines. All the emit-on-change logic lives in
     // agent-loop/stages/context-emit.ts, called from
     // agent-loop/stages/context-assembly.ts.
-    expect(lineCount).toBeLessThanOrEqual(961);
+    // Bumped 961 -> 972 (ground-truth verification, T2/R5): the optional
+    // `turnAuditors` config field — AgentLoopConfig injection like every other
+    // optional dep, its private field, the one-line constructor assignment and
+    // one conditional spread into the finalizer context. 11 irreducible
+    // pass-through lines; the budget, the fail-open handling and the
+    // before-`done` yield all live in agent-loop/stages/turn-finalizer.ts.
+    expect(lineCount).toBeLessThanOrEqual(972);
   });
 
   it('no stage file exceeds 700 lines', () => {
@@ -190,7 +196,20 @@ describe('Orchestrator guardrails', () => {
       // either side's number alone — 820 and 817 are each stale by the other's
       // delta. Merged file measures 820 lines; the cap keeps this file's
       // one-line convention.
-      if (lineCount > 821) {
+      // Bumped 821 -> 828 (ground-truth verification, T2): the `after_tool_call`
+      // payload gains the four fields an evidence collector needs — the call
+      // id, the effective args, the turn's personality and its working dir —
+      // all already in scope at the fire site. Four property lines plus the
+      // comment recording that `p.args` is the untruncated effective args, not
+      // the span's truncated `attrs.args`. No logic.
+      // Bumped 828 -> 848 (ground-truth verification, FIX C): the rejected
+      // branch now fires `after_tool_call` too, marked `rejected: true`, so a
+      // refused call reaches the evidence ledger instead of vanishing from it.
+      // One `fireVoid` with the same payload the executed branch builds (13
+      // lines, no new values computed) plus the five-line comment recording why
+      // absence was not neutral. No logic — the branch's own handling of
+      // `result`/`llmContent` is untouched.
+      if (lineCount > 848) {
         violations.push(`${file}: ${lineCount} lines`);
       }
     }

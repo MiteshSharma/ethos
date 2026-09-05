@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { mkdir, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -132,6 +133,135 @@ describe('write_file', () => {
       expect(result.code).toBe('execution_failed');
       expect(result.error).toMatch(/Write verification failed/);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Ground-truth evidence (plan `ground-truth-verification`, R6)
+// ---------------------------------------------------------------------------
+
+/** A ScopedFs whose write is a no-op — the silent-drop failure class. */
+function droppingFs(dir: string): ScopedFs {
+  const allowed = new Set([dir]);
+  const real = new ScopedFsImpl(new FsStorage(), allowed, allowed);
+  return {
+    read: (p) => real.read(p),
+    readBytes: (p) => real.readBytes(p),
+    write: async () => {},
+    exists: (p) => real.exists(p),
+    list: (p) => real.list(p),
+    listEntries: (p) => real.listEntries(p),
+    mtime: (p) => real.mtime(p),
+    mkdir: (p) => real.mkdir(p),
+  };
+}
+
+const sha256 = (text: string) =>
+  createHash('sha256').update(Buffer.from(text, 'utf8')).digest('hex');
+
+describe('write_file evidence', () => {
+  it('carries structured { path, bytes, sha256 } on success', async () => {
+    const path = join(testDir, 'evidence.ts');
+    const content = 'export const x = 1;';
+    const result = await writeFileTool.execute({ path, content }, makeCtx(testDir));
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.structured).toEqual({
+      path,
+      bytes: content.length,
+      sha256: sha256(content),
+    });
+  });
+
+  it('reports the UTF-8 byte length, not the UTF-16 code-unit count', async () => {
+    const path = join(testDir, 'multibyte.txt');
+    // 4 UTF-16 code units, 10 UTF-8 bytes: the emoji is a surrogate pair (4
+    // bytes) and each CJK character is 3.
+    const content = '\u{1F600}\u4F60\u597D';
+    expect(content.length).toBe(4);
+    const expectedBytes = Buffer.byteLength(content, 'utf8');
+    expect(expectedBytes).toBe(10);
+
+    const result = await writeFileTool.execute({ path, content }, makeCtx(testDir));
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.structured).toEqual({ path, bytes: expectedBytes, sha256: sha256(content) });
+    // The model-visible text has to be honest too — it said 4 before.
+    expect(result.value).toBe(`Written ${expectedBytes} bytes to ${path}`);
+  });
+
+  it('carries no structured on the read-back mismatch (ok:false IS the evidence)', async () => {
+    const ctx = { ...makeCtx(testDir), scopedFs: droppingFs(testDir) };
+    const result = await writeFileTool.execute(
+      { path: join(testDir, 'dropped-evidence.ts'), content: 'x' },
+      ctx,
+    );
+    expect(result.ok).toBe(false);
+    expect('structured' in result).toBe(false);
+  });
+});
+
+describe('patch_file evidence', () => {
+  it('carries structured { path, bytes, sha256, changed: true } on a real patch', async () => {
+    const path = join(testDir, 'evidence-patch.ts');
+    await writeFile(path, 'const y = 2;\n');
+    const result = await patchFileTool.execute(
+      { path, old_text: 'const y = 2;', new_text: 'const y = 42;' },
+      makeCtx(testDir),
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const patched = 'const y = 42;\n';
+    expect(result.structured).toEqual({
+      path,
+      bytes: Buffer.byteLength(patched, 'utf8'),
+      sha256: sha256(patched),
+      changed: true,
+    });
+  });
+
+  it('reports changed: false for an already-applied patch', async () => {
+    const path = join(testDir, 'evidence-noop.ts');
+    const content = 'const y = 42;\n';
+    await writeFile(path, content);
+    const result = await patchFileTool.execute(
+      { path, old_text: 'const y = 2;', new_text: 'const y = 42;' },
+      makeCtx(testDir),
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.structured).toEqual({
+      path,
+      bytes: Buffer.byteLength(content, 'utf8'),
+      sha256: sha256(content),
+      changed: false,
+    });
+  });
+
+  it('fails when the patch write is silently dropped (read-back verification)', async () => {
+    const path = join(testDir, 'dropped-patch.ts');
+    await writeFile(path, 'const y = 2;\n');
+    const ctx = { ...makeCtx(testDir), scopedFs: droppingFs(testDir) };
+    const result = await patchFileTool.execute(
+      { path, old_text: 'const y = 2;', new_text: 'const y = 42;' },
+      ctx,
+    );
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.code).toBe('execution_failed');
+    expect(result.error).toMatch(/Patch verification failed/);
+    expect('structured' in result).toBe(false);
+  });
+
+  it('carries no structured when old_text is not found', async () => {
+    const path = join(testDir, 'evidence-miss.ts');
+    await writeFile(path, 'hello world\n');
+    const result = await patchFileTool.execute(
+      { path, old_text: 'not there', new_text: 'replacement' },
+      makeCtx(testDir),
+    );
+    expect(result.ok).toBe(false);
+    expect('structured' in result).toBe(false);
   });
 });
 

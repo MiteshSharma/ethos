@@ -161,6 +161,61 @@ describe('terminal routing', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Ground-truth evidence (plan `ground-truth-verification`, R6)
+// ---------------------------------------------------------------------------
+
+describe('terminal exit-code evidence', () => {
+  it('states the exit code in the value on the local path', async () => {
+    const result = await terminalTool.execute({ command: 'echo hi' }, ctx);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    // The suffix is the only part of the evidence the model can read:
+    // `structured` never reaches the LLM.
+    expect(result.value.endsWith('\n(exit 0)')).toBe(true);
+    expect(result.structured).toEqual({ exitCode: 0, command: 'echo hi' });
+  });
+
+  it('states the exit code in the value on the routed path too', async () => {
+    const backend = makeExitBackend('done', 0);
+    const [tool] = createTerminalTools({ backend });
+    const result = await tool.execute({ command: 'true' }, ctx);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.endsWith('\n(exit 0)')).toBe(true);
+    expect(result.structured).toEqual({ exitCode: 0, command: 'true' });
+  });
+
+  it('states it on an empty-output success too', async () => {
+    const result = await terminalTool.execute({ command: 'true' }, ctx);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value).toBe('(command completed with no output)\n(exit 0)');
+  });
+
+  it('carries no structured on a non-zero exit (ok:false IS the evidence)', async () => {
+    const result = await terminalTool.execute({ command: 'exit 1' }, ctx);
+    expect(result.ok).toBe(false);
+    expect('structured' in result).toBe(false);
+  });
+
+  it('claims no exit code when the backend reported none — unknown is not zero', async () => {
+    // An older backend emits no exit chunk, so `drainExec` yields null. The
+    // call still succeeds (unchanged contract), but it must not assert a zero
+    // nobody observed: no `(exit 0)` for the model to repeat, and no
+    // `structured.exitCode` for the evidence ledger to read as a passing run.
+    const backend = makeExitBackend('done', null);
+    const [tool] = createTerminalTools({ backend });
+    const result = await tool.execute({ command: 'true' }, ctx);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value).toBe('done');
+    expect(result.value).not.toContain('(exit');
+    // `command` survives: it is the call's identity, not its outcome.
+    expect(result.structured).toEqual({ command: 'true' });
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Truncation spill
 // ---------------------------------------------------------------------------
 
@@ -259,13 +314,24 @@ describe('terminal truncation spill', () => {
     await expect(stat(spillDir)).rejects.toThrow();
   });
 
+  it('keeps the exit-code suffix inside the budget on an oversized result', async () => {
+    const result = await terminalTool.execute({ command: 'noisy' }, spillCtx(new FsStorage()));
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    // `executeParallel` trims an over-budget value by slicing its HEAD, so the
+    // suffix survives only if the tool left room for it.
+    expect(result.value.endsWith('\n(exit 0)')).toBe(true);
+    expect(result.value.length).toBeLessThanOrEqual(SPILL_BUDGET);
+  });
+
   it('returns output unchanged when it fits the budget', async () => {
     const result = await terminalTool.execute(
       { command: 'tiny' },
       spillCtx(new FsStorage(), 'tiny'),
     );
     expect(result.ok).toBe(true);
-    if (result.ok) expect(result.value).toBe('tiny');
+    // Body unchanged; only the R6 exit-code suffix is added.
+    if (result.ok) expect(result.value).toBe('tiny\n(exit 0)');
     await expect(stat(spillDir)).rejects.toThrow();
   });
 
@@ -287,11 +353,13 @@ describe('terminal truncation spill', () => {
 });
 
 /** Backend whose session/exec emit a terminal exit chunk with `code`. */
-function makeExitBackend(out: string, code: number): ExecutionBackend {
+/** `code: null` models an older backend that emits no exit chunk at all — the
+ *  case `drainExec` reports as a null exit code. */
+function makeExitBackend(out: string, code: number | null): ExecutionBackend {
   const exec = (_cmd: string, _opts: ExecOpts): AsyncIterable<ExecChunk> => {
     async function* gen(): AsyncIterable<ExecChunk> {
       yield { stream: 'stdout', data: out };
-      yield { stream: 'exit', code };
+      if (code !== null) yield { stream: 'exit', code };
     }
     return gen();
   };

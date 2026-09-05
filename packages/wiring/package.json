@@ -83,6 +83,7 @@
     "@ethosagent/plugin-sdk": "workspace:*",
     "@ethosagent/request-dump": "workspace:*",
     "@ethosagent/safety-channel": "workspace:*",
+    "@ethosagent/safety-groundtruth": "workspace:*",
     "@ethosagent/safety-injection": "workspace:*",
     "@ethosagent/safety-network": "workspace:*",
     "@ethosagent/safety-scanner": "workspace:*",
@@ -126,6 +127,7 @@
     "@ethosagent/types": "workspace:*",
     "@ethosagent/voice-providers": "workspace:*",
     "@ethosagent/voice-session": "workspace:*",
+    "@ethosagent/voice-text": "workspace:*",
     "@ethosagent/watchers": "workspace:*",
     "@ethosagent/worker-router": "workspace:*"
   },

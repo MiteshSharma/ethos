@@ -191,6 +191,13 @@ export interface AgentLoopConfig {
     description?: string;
     authUrl?: string;
   } | null>;
+  /**
+   * Ground-truth verification (R5) — checkers run at the end of every turn,
+   * after `agent_done` and before `done`, comparing the final text against
+   * what the turn's tools actually did. Fail-open and time-boxed; unset (the
+   * default) means no audit runs and the turn ends exactly as it did before.
+   */
+  turnAuditors?: readonly import('@ethosagent/types').TurnAuditor[];
   /** Injected safety bundle — injection defense, redaction, and scoped storage. */
   safety: AgentSafety;
   /** Library output sink (Law 10). Carries the once-per-loop `ungated`
@@ -372,6 +379,8 @@ export class AgentLoop {
   private readonly attachmentCache?: import('@ethosagent/types').AttachmentCache;
   private readonly dataDir?: string;
   private readonly observability?: AgentLoopObservability;
+  /** See AgentLoopConfig.turnAuditors. */
+  private readonly turnAuditors?: readonly import('@ethosagent/types').TurnAuditor[];
   private readonly contextEngines: ContextEngineRegistry;
   /** Bridge for the `clarify` tool; undefined when no interactive surface is wired. */
   readonly clarifyBridge?: ClarifyBridge;
@@ -434,6 +443,7 @@ export class AgentLoop {
     if (config.attachmentCache) this.attachmentCache = config.attachmentCache;
     if (config.dataDir) this.dataDir = config.dataDir;
     if (config.observability) this.observability = config.observability;
+    if (config.turnAuditors) this.turnAuditors = config.turnAuditors;
     if (config.teamId) this.teamId = config.teamId;
     if (config.clarifyBridge) this.clarifyBridge = config.clarifyBridge;
     if (config.requestDumpStore) this.requestDumpStore = config.requestDumpStore;
@@ -921,6 +931,7 @@ export class AgentLoop {
       dryRunCapped: dryRunState.capped,
       isDryRun: opts.dryRun ?? false,
       turnUsage,
+      ...(this.turnAuditors ? { turnAuditors: this.turnAuditors } : {}),
     });
 
     // Phase 3 — turn-end context maintenance (silent memory flush at 70%,

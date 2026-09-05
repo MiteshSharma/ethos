@@ -32,9 +32,16 @@ export function Trail({ entries, turnId, stopped }: TrailProps) {
   const [expanded, setExpanded] = useState(false);
   const summary = summariseTrail(entries);
 
-  // Zero actions → no footer at all. A reply the agent simply wrote has
-  // nothing to account for, and an empty accounting line is noise.
-  if (summary.actions === 0) return null;
+  // Nothing to account for → no footer at all. A reply the agent simply wrote
+  // has no work behind it, and an empty accounting line is noise.
+  if (summary.actions === 0 && summary.findings === 0) return null;
+
+  // A turn with findings but NO actions is the `no_tools_at_all` case, which
+  // has zero actions by definition — the whole point of the finding is that
+  // the agent claimed work it never did. `0 actions · —` would be two pieces
+  // of noise around the one thing worth reading, so the findings ARE the
+  // footer: `⚠ 1 unverified ▸`.
+  const actionless = summary.actions === 0;
 
   const duration = summary.totalDurationMs === null ? '—' : formatDuration(summary.totalDurationMs);
   const actionsWord = summary.actions === 1 ? 'action' : 'actions';
@@ -69,13 +76,13 @@ export function Trail({ entries, turnId, stopped }: TrailProps) {
         aria-expanded={expanded}
         onClick={() => setExpanded((v) => !v)}
       >
-        <span className="trail-footer-lead">{lead}</span>
+        {actionless ? null : <span className="trail-footer-lead">{lead}</span>}
         {summary.findings > 0 ? (
           <span className="trail-footer-findings">
-            {' · '}⚠ {summary.findings} unverified
+            {actionless ? '' : ' · '}⚠ {summary.findings} unverified
           </span>
         ) : null}
-        <span className="trail-footer-duration">{` · ${duration}`}</span>
+        {actionless ? null : <span className="trail-footer-duration">{` · ${duration}`}</span>}
         <span className="trail-footer-chevron" aria-hidden="true">
           {expanded ? '▾' : '▸'}
         </span>
@@ -122,8 +129,12 @@ export function TrailRow({ entry, rowId, citedRowId }: TrailRowProps) {
         }}
       >
         <RowState status="unverified" />
-        <span className="activity-row-subject">{entry.claim}</span>
-        {entry.evidence ? <span className="activity-row-result">{entry.evidence}</span> : null}
+        {/* The claim is the model's own words, so it is quoted — the quotes the
+            wire format carried are stripped on the way in and drawn here. */}
+        <span className="activity-row-subject">{`"${entry.claim}"`}</span>
+        {entry.evidence ? (
+          <span className="activity-row-result">{`— ${entry.evidence}`}</span>
+        ) : null}
       </button>
     );
   }

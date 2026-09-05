@@ -271,6 +271,10 @@ function makeProcessStart(
         return {
           ok: true,
           value: JSON.stringify({ id, pid, name: effectiveName, started_at: startedAt }),
+          // Ground-truth evidence (plan `ground-truth-verification`, R6): the
+          // two identifiers a later liveness probe needs to check that the
+          // process the agent says it started actually exists.
+          structured: { id, pid },
         };
       });
     },
@@ -662,4 +666,4 @@ export {
   type StopSignal,
   stopProcess,
 } from './operations';
-export { type ProcessEntry, saveRegistry } from './registry';
+export { isAlive, type ProcessEntry, saveRegistry } from './registry';

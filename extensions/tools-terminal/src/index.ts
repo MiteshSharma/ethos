@@ -5,6 +5,7 @@ import type {
   Tool,
   ToolResult,
 } from '@ethosagent/types';
+import { EXIT_SUFFIX } from './exit-code';
 import { ERROR_WRAPPER_RESERVE, spillOversizedOutput } from './spill';
 
 const DEFAULT_TIMEOUT_MS = 30_000;
@@ -109,8 +110,24 @@ function makeTerminalTool(
               code: 'execution_failed',
             };
           }
-          const value = await spillOversizedOutput(out, ctx);
-          return { ok: true, value: value || '(command completed with no output)' };
+          // UNKNOWN IS NOT ZERO. A null exit code (older backend that emits
+          // no exit chunk) still counts as success, to keep the tool's return
+          // contract — but the result must not ASSERT a code nobody observed.
+          // Claiming `(exit 0)` here fabricates evidence at the source of the
+          // ledger, and it fabricates it in the direction that hides: it would
+          // let "the tests passed" be backed by a run that never reported an
+          // exit code at all. So the suffix and `structured.exitCode` are
+          // emitted only on an EXPLICIT zero. `command` stays either way — it
+          // is the call's identity, not its outcome.
+          const observedZero = exitCode === 0;
+          // Reserve the suffix's chars: `executeParallel` trims an
+          // over-budget value by slicing its HEAD, so a suffix on an oversized
+          // value is exactly what would get cut.
+          const value = await spillOversizedOutput(out, ctx, observedZero ? EXIT_SUFFIX.length : 0);
+          const body = value || '(command completed with no output)';
+          return observedZero
+            ? { ok: true, value: `${body}${EXIT_SUFFIX}`, structured: { exitCode: 0, command } }
+            : { ok: true, value: body, structured: { command } };
         } catch (err) {
           return {
             ok: false,
@@ -162,10 +179,11 @@ function makeTerminalTool(
           };
         }
 
-        const value = await spillOversizedOutput(out, ctx);
+        const value = await spillOversizedOutput(out, ctx, EXIT_SUFFIX.length);
         return {
           ok: true,
-          value: value || '(command completed with no output)',
+          value: `${value || '(command completed with no output)'}${EXIT_SUFFIX}`,
+          structured: { exitCode: 0, command },
         };
       } catch (err) {
         return {

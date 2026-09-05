@@ -98,5 +98,16 @@ export interface AgentLoopObservability {
   recordContextDrift?(
     opts: RecordEventOpts & { kind: string; expectedHash: string; actualHash: string },
   ): void;
+  /**
+   * Ground-truth verification (R5) — a turn auditor found something in the
+   * final text that its tool evidence does not support. Recorded for EVERY
+   * finding, including the `info`-severity ones the seam does not surface, so
+   * the gated verdicts are still countable; `severity` carries which tier it
+   * was, `code` the verdict, `auditorId` who said so.
+   *
+   * Optional, like `recordSkillInvocation` — `EthosObservability` satisfies
+   * it, lighter adapters need not.
+   */
+  recordGroundingFinding?(opts: RecordEventOpts & { auditorId: string; claim?: string }): void;
   flush(): void;
 }

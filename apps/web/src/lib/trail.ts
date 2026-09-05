@@ -131,6 +131,49 @@ export function updateTrailActionAnywhere(
  *  (producer lands with `plan/phases/ground-truth-verification.md`). */
 const GROUNDING_TOOL = '_grounding';
 
+/** ` [ref:<toolCallId>]`, and only at the very end of the message. */
+const GROUNDING_REF = / \[ref:([A-Za-z0-9_-]+)\]$/;
+/** Space, EM DASH, space — what separates the claim from its evidence. */
+const GROUNDING_SEP = ' \u2014 ';
+
+/**
+ * Split a `_grounding` message into the parts a finding row draws.
+ *
+ * The wire format (`plan/phases/ground-truth-verification.md`):
+ *
+ *     "<claim>"[ — <evidence>][ [ref:<toolCallId>]]
+ *
+ * e.g. `"tests pass" — run_tests exited 1 [ref:toolu_01ABC]`. The producer
+ * replaces quotes INSIDE the claim with `'`, so the closing `"` is unambiguous
+ * and an em dash inside either half is safe.
+ *
+ * Anything that does not parse is the whole claim, rendered as-is. The same
+ * string is printed verbatim by the CLI and every channel adapter, so it has to
+ * read as a sentence even unparsed — and a malformed message must never lose
+ * content on the way to the screen.
+ */
+export function parseGroundingMessage(
+  message: string,
+): Pick<TrailFinding, 'claim' | 'evidence' | 'citesToolCallId'> {
+  if (!message.startsWith('"')) return { claim: message };
+  const close = message.indexOf('"', 1);
+  // No closing quote, or nothing between the quotes: not a claim.
+  if (close <= 1) return { claim: message };
+
+  let rest = message.slice(close + 1);
+  const ref = GROUNDING_REF.exec(rest);
+  if (ref) rest = rest.slice(0, rest.length - ref[0].length);
+  // Text after the claim that is not the evidence separator did not parse.
+  if (rest !== '' && !rest.startsWith(GROUNDING_SEP)) return { claim: message };
+  const evidence = rest.slice(GROUNDING_SEP.length);
+
+  return {
+    claim: message.slice(1, close),
+    ...(evidence ? { evidence } : {}),
+    ...(ref?.[1] ? { citesToolCallId: ref[1] } : {}),
+  };
+}
+
 /**
  * The ONE event→trail transition, called by both surfaces (contract §4, "one
  * trail, two renderers"). Sharing the TYPES was not enough: each reducer
@@ -193,7 +236,7 @@ export function applyTrailEvent(
       return appendTrailEntry(trail, turnId, {
         kind: 'finding',
         id: `${turnId}-finding-${seq}`,
-        claim: event.message,
+        ...parseGroundingMessage(event.message),
       });
     }
     default:

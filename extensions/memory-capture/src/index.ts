@@ -12,6 +12,7 @@ export {
   type CaptureJob,
   type CaptureNotice,
   DEFAULT_CAPTURE_CONFIG,
+  type GroundingConsult,
   type MemoryProposal,
   type ProposeFn,
   type TombstoneChecker,

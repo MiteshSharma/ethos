@@ -25,6 +25,8 @@
   "dependencies": {
     "@ethosagent/eval-harness": "workspace:*",
     "@ethosagent/kanban-store": "workspace:*",
+    "@ethosagent/safety-groundtruth": "workspace:*",
+    "@ethosagent/storage-fs": "workspace:*",
     "@ethosagent/types": "workspace:*"
   },
   "devDependencies": {

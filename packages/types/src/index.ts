@@ -62,6 +62,7 @@ export type {
   ToolResultReducer,
   ToolResultReducerRegistry,
 } from './tool-reducer';
+export * from './turn-auditor';
 export * from './vision-limits';
 export * from './voice';
 export * from './voice-realtime';

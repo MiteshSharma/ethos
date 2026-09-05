@@ -2062,6 +2062,62 @@ export interface EthosConfig {
     maxInProgressPerProfile?: number;
   };
   /**
+   * Ground-truth verification — does what the agent SAID match what its tools
+   * DID (plan/phases/ground-truth-verification.md). Policy lives here rather
+   * than on the frozen `PersonalityConfig`: two deployments of the same
+   * personality can reasonably disagree about how loud the check should be.
+   *
+   * Config format (values shown are the defaults):
+   *   grounding.enabled: true
+   *   grounding.onFinding: annotate            # annotate | correct
+   *   grounding.showUnsupported: false
+   *   grounding.memoryTag: false
+   *   grounding.kanban.checks: true
+   *   grounding.kanban.allowedCheckCommands: pnpm test, pnpm typecheck
+   */
+  grounding?: {
+    /** Master switch. Off = no evidence collector, no auditor, no injector. */
+    enabled?: boolean;
+    /**
+     * What a finding does. `annotate` surfaces the `_grounding` line and stops
+     * there; `correct` additionally asks the next turn to open with a
+     * correction.
+     */
+    onFinding?: 'annotate' | 'correct';
+    /**
+     * Surface `unsupported` verdicts even on a turn that ran a write-capable
+     * tool. Off by default (R7) — on such a turn an unmatched claim is far
+     * more often a gap in the pattern table than a lie.
+     */
+    showUnsupported?: boolean;
+    /**
+     * Tag a contradicted turn's memory capture `unverified` instead of
+     * skipping it.
+     */
+    memoryTag?: boolean;
+    kanban?: {
+      /** Run `check:` lines from `acceptanceCriteria` before the LLM judge. */
+      checks?: boolean;
+      /**
+       * WHOLE COMMANDS a `check: run <command> exit <n>` may name. A check's
+       * command must equal an entry token for token, with nothing appended, so
+       * the list being empty means no `run` check ever executes.
+       *
+       * Exact, not a prefix: acceptance criteria are written by the AGENT, so
+       * an entry whose tail the agent fills in is not an authorization. `node`
+       * as a prefix would admit `node -e '<any program>'`, and `pnpm test`
+       * would admit `pnpm test --config <agent-chosen>.js`. Name each command
+       * you actually want run — `pnpm test --reporter=json` is a separate
+       * entry from `pnpm test`.
+       *
+       * The command also runs through the personality's execution posture (the
+       * container at `docker`, the host `ScopedProcess` at `local`, nothing at
+       * `none`), never a spawn of its own.
+       */
+      allowedCheckCommands?: string[];
+    };
+  };
+  /**
    * Playwright timeouts for the `browser` toolset. Both were hardcoded at the
    * call sites before they became configurable, so the defaults below are
    * exactly what those literals were.
@@ -3200,6 +3256,22 @@ export async function writeConfig(
     if (config.kanban.maxInProgressPerProfile !== undefined)
       lines.push(`kanban.maxInProgressPerProfile: ${config.kanban.maxInProgressPerProfile}`);
   }
+  if (config.grounding) {
+    const gr = config.grounding;
+    if (gr.enabled !== undefined) lines.push(`grounding.enabled: ${gr.enabled}`);
+    if (gr.onFinding !== undefined) lines.push(`grounding.onFinding: ${gr.onFinding}`);
+    if (gr.showUnsupported !== undefined)
+      lines.push(`grounding.showUnsupported: ${gr.showUnsupported}`);
+    if (gr.memoryTag !== undefined) lines.push(`grounding.memoryTag: ${gr.memoryTag}`);
+    if (gr.kanban?.checks !== undefined) lines.push(`grounding.kanban.checks: ${gr.kanban.checks}`);
+    // Comma-joined, not space-joined: a check command is itself several words
+    // (`pnpm test`), so the separator has to be something a command cannot
+    // contain.
+    if (gr.kanban?.allowedCheckCommands !== undefined)
+      lines.push(
+        `grounding.kanban.allowedCheckCommands: ${gr.kanban.allowedCheckCommands.join(', ')}`,
+      );
+  }
   if (config.browser) {
     if (config.browser.navigationTimeoutMs !== undefined)
       lines.push(`browser.navigationTimeoutMs: ${config.browser.navigationTimeoutMs}`);
@@ -3501,6 +3573,11 @@ function parseConfigYaml(src: string): EthosConfig {
   const executionDockerKv: Record<string, string> = {};
   // kanban.<maxInProgress|maxInProgressPerProfile>: <n> — board WIP caps.
   const kanbanKv: Record<string, string> = {};
+  // grounding.<field>: <value> — ground-truth verification policy. The nested
+  // `grounding.kanban.*` keys get their own map so the two levels cannot
+  // collide on a shared field name.
+  const groundingKv: Record<string, string> = {};
+  const groundingKanbanKv: Record<string, string> = {};
   // toolLoop.<field>: <n> — soft-warn tiers under the loop's hard tool caps.
   const toolLoopKv: Record<string, string> = {};
   // browser.<navigationTimeoutMs|commandTimeoutMs>: <ms> — Playwright budgets.
@@ -4182,6 +4259,19 @@ function parseConfigYaml(src: string): EthosConfig {
       kanbanKv[kb[1]] = kb[2].trim().replace(/^["']|["']$/g, '');
       continue;
     }
+    // grounding.kanban.<field>: <value>  — matched BEFORE the flat grounding
+    // keys below so the deeper key never falls through to the shallower branch.
+    const grk = line.match(/^grounding\.kanban\.(checks|allowedCheckCommands):\s*(.+)$/);
+    if (grk) {
+      groundingKanbanKv[grk[1]] = grk[2].trim().replace(/^["']|["']$/g, '');
+      continue;
+    }
+    // grounding.<field>: <value>  (ground-truth verification policy)
+    const gr = line.match(/^grounding\.(enabled|onFinding|showUnsupported|memoryTag):\s*(.+)$/);
+    if (gr) {
+      groundingKv[gr[1]] = gr[2].trim().replace(/^["']|["']$/g, '');
+      continue;
+    }
     // kanbanPoll.<field>: <value>
     const kp = line.match(/^kanbanPoll\.(\w+):\s*(.+)$/);
     if (kp) {
@@ -4589,7 +4679,9 @@ function parseConfigYaml(src: string): EthosConfig {
   const quick_commands = buildQuickCommands(qcKv);
   const channelToolsets = buildChannelToolsets(channelToolsetsKv);
   const channelFilter = buildChannelFilter(channelFilterKv);
+  const groundingResult = buildGrounding(groundingKv, groundingKanbanKv);
   const parseErrors = [
+    ...groundingResult.errors,
     ...telegramResult.errors,
     ...slackResult.errors,
     ...whatsappResult.errors,
@@ -4815,6 +4907,7 @@ function parseConfigYaml(src: string): EthosConfig {
         : undefined,
     toolLoop: buildToolLoop(toolLoopKv),
     kanban: buildKanban(kanbanKv),
+    grounding: groundingResult.grounding,
     browser: buildBrowser(browserKv),
     gateway: buildGateway(gatewayKv),
     teamSupervisor: restartLoopGuard ? { restartLoopGuard } : undefined,
@@ -6797,6 +6890,65 @@ function buildKanban(kv: Record<string, string>): EthosConfig['kanban'] | undefi
     if (Number.isFinite(n) && n > 0) result[key] = Math.floor(n);
   }
   return Object.keys(result).length > 0 ? result : undefined;
+}
+
+const GROUNDING_ON_FINDING = ['annotate', 'correct'] as const;
+
+/**
+ * `grounding.*` — ground-truth verification policy, from the flat keys and the
+ * nested `grounding.kanban.*` ones.
+ *
+ * Loud rather than lenient on `onFinding`, following `voice.trunk.provider`:
+ * the two values do materially different things (one annotates, the other
+ * rewrites the next turn's prompt), so a typo silently falling back to
+ * `annotate` would leave an operator who asked for `correct` believing they
+ * had it. Every other field here is a boolean or a list, where "not the two
+ * spellings of true/false" is unambiguous and simply drops.
+ */
+function buildGrounding(
+  kv: Record<string, string>,
+  kanbanKv: Record<string, string>,
+): { grounding?: EthosConfig['grounding']; errors: string[] } {
+  if (Object.keys(kv).length === 0 && Object.keys(kanbanKv).length === 0) return { errors: [] };
+  const errors: string[] = [];
+  const result: NonNullable<EthosConfig['grounding']> = {};
+
+  for (const key of ['enabled', 'showUnsupported', 'memoryTag'] as const) {
+    const raw = kv[key];
+    if (raw === 'true') result[key] = true;
+    else if (raw === 'false') result[key] = false;
+  }
+
+  const onFinding = kv.onFinding;
+  if (onFinding === 'annotate' || onFinding === 'correct') {
+    result.onFinding = onFinding;
+  } else if (onFinding !== undefined) {
+    errors.push(
+      `grounding.onFinding: invalid value '${onFinding}' (expected one of: ${GROUNDING_ON_FINDING.join(', ')}).`,
+    );
+  }
+
+  const kanban: NonNullable<NonNullable<EthosConfig['grounding']>['kanban']> = {};
+  if (kanbanKv.checks === 'true') kanban.checks = true;
+  else if (kanbanKv.checks === 'false') kanban.checks = false;
+  const allowed = kanbanKv.allowedCheckCommands;
+  if (allowed !== undefined) {
+    // Split on commas ONLY. A check command is several words (`pnpm test`), so
+    // the whitespace split the other list-valued keys use would shred it into
+    // tokens that match nothing.
+    const commands = allowed
+      .split(',')
+      .map((c) => c.trim())
+      .filter((c) => c.length > 0);
+    if (commands.length > 0) kanban.allowedCheckCommands = commands;
+  }
+  if (Object.keys(kanban).length > 0) result.kanban = kanban;
+
+  if (errors.length > 0) return { errors };
+  return {
+    ...(Object.keys(result).length > 0 ? { grounding: result } : {}),
+    errors: [],
+  };
 }
 
 /**

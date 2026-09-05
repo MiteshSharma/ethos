@@ -44,6 +44,7 @@ import { createImageTools } from '@ethosagent/tools-image';
 import { compose as composeInteractive } from '@ethosagent/tools-interactive/compose';
 import {
   type AutonomyTierOf,
+  createCheckProbe,
   createCompletionVerifier,
   createKanbanRoleGateHook,
   registerPostmortemHandler,
@@ -56,7 +57,7 @@ import type { MessagingSendFn } from '@ethosagent/tools-messaging';
 import { compose as composeMessaging } from '@ethosagent/tools-messaging/compose';
 import { createTeamDesignTools } from '@ethosagent/tools-personality-design';
 import { compose as composePersonalityDesign } from '@ethosagent/tools-personality-design/compose';
-import { createProcessGuardHook } from '@ethosagent/tools-process';
+import { createProcessGuardHook, isAlive } from '@ethosagent/tools-process';
 import { compose as composeProcess } from '@ethosagent/tools-process/compose';
 import { createRedditSearchTool, createRedditThreadTool } from '@ethosagent/tools-reddit';
 import { compose as composeSkillsTools } from '@ethosagent/tools-skills/compose';
@@ -84,9 +85,16 @@ import type {
   Skill,
   Storage,
   Tool,
+  TurnAuditor,
 } from '@ethosagent/types';
 import type { InfrastructureResult } from './build-infrastructure';
 import { ensureFsReachDirs } from './fs-reach-dirs';
+import {
+  composeGrounding,
+  createCheckRunExec,
+  type GroundingMemoryConsult,
+  kanbanChecksEnabled,
+} from './grounding';
 import type { CreateAgentLoopOptions, WiringConfig, WiringProfile } from './index';
 import { resolveKanbanDbPath } from './kanban-path';
 import { MODEL_CATALOG } from './model-catalog';
@@ -466,6 +474,11 @@ export interface ComposeToolsResult {
   skillsInjector: SkillsInjector;
   /** McpManager instance — threaded to the web-api so re-auth hits the live manager. */
   mcpManager: McpManager;
+  /** Ground-truth turn auditors (T4). Empty when `grounding.enabled: false`. */
+  turnAuditors: TurnAuditor[];
+  /** Ground-truth consult for `MemoryCaptureRunner` (R8). Absent when
+   *  `grounding.enabled: false`, so capture behaves exactly as before. */
+  memoryConsult?: GroundingMemoryConsult;
 }
 
 export interface ComposeToolsDeps {
@@ -764,16 +777,63 @@ export async function composeAllTools(
 
     // Phase 7 — mandatory verifier review state on team (multi-personality) goals.
     // Praxis lesson: agents skip an optional review state, so on team deployments
-    // the eval-harness verifier is default-wired, not opt-in. Single-personality
-    // kanban keeps the opt-in hook.
-    if (config.teamName !== undefined) {
-      hooks.registerClaiming(
-        'before_ticket_complete',
-        createCompletionVerifier({
-          getProvider: buildVerifierProviderGetter(infra.llmProviders, config, log),
-        }),
-      );
-    }
+    // the eval-harness verifier is default-wired, not opt-in.
+    //
+    // Ground-truth verification R8 — the verifier is now registered ALWAYS,
+    // solo included. What changes with `teamName` is only whether the LLM
+    // JUDGE runs: judging prose costs a model call and needs a team provider,
+    // whereas a `check:` line states a fact a probe settles for free. A solo
+    // deployment writing prose-only criteria therefore behaves exactly as it
+    // did before — no provider, nothing to judge, completion proceeds.
+    //
+    // The probe roots relative check paths at the team's directory (R4), or at
+    // the personality's own workdir when there is no team. Unresolvable →
+    // omitted, and a ticket carrying checks then fails closed rather than
+    // completing on a verification nobody ran.
+    const verifyWorkdir =
+      config.teamName !== undefined && isSafeTeamName(config.teamName)
+        ? join(dataDir, 'teams', config.teamName)
+        : assetDirFor(activePerson.id);
+    // `check: run` executes THROUGH the personality's own execution posture —
+    // the container when there is one, the host `ScopedProcess` at `local`, and
+    // nothing at all when the personality may not run commands. Before this,
+    // the probe spawned via `node:child_process` itself: a second execution
+    // path with none of the controls attached to the first. `undefined` here
+    // means `run` checks fail closed.
+    const checkRunExec = createCheckRunExec({
+      posture,
+      ...(executionBackend !== undefined ? { backend: executionBackend } : {}),
+      personality: activePerson,
+      allowedCheckCommands: config.grounding?.kanban?.allowedCheckCommands ?? [],
+      hostExecForbidden,
+    });
+    hooks.registerClaiming(
+      'before_ticket_complete',
+      createCompletionVerifier({
+        ...(config.teamName !== undefined
+          ? { getProvider: buildVerifierProviderGetter(infra.llmProviders, config, log) }
+          : {}),
+        ...(verifyWorkdir !== undefined
+          ? {
+              probe: createCheckProbe({
+                storage: wiringCtx.storage,
+                workdir: verifyWorkdir,
+                ...(checkRunExec !== undefined ? { exec: checkRunExec } : {}),
+              }),
+            }
+          : {}),
+        // Empty by default, so `check: run …` executes nothing until an
+        // operator names a command.
+        allowedCheckCommands: config.grounding?.kanban?.allowedCheckCommands ?? [],
+        // `grounding.enabled` is the MASTER switch over both halves of this
+        // feature; `grounding.kanban.checks` is the per-feature one. Either
+        // being false turns the deterministic pass off WHOLE — nothing parsed,
+        // nothing probed, nothing spawned — because an off-switch that leaves
+        // half the feature running is worse than no switch at all: the
+        // operator believes they turned it off.
+        checks: kanbanChecksEnabled(config.grounding),
+      }),
+    );
   }
 
   // Goal store is shared infrastructure — a single goals.db per dataDir backs the
@@ -1054,6 +1114,21 @@ export async function composeAllTools(
     hooks.registerModifying('before_tool_call', createProcessGuardHook());
   }
 
+  // -------------------------------------------------------------------------
+  // Ground-truth verification (T4) — evidence collector + per-turn ledger reset
+  // + the claims auditor. Registered for solo AND team deployments, unlike the
+  // kanban completion verifier above (R8). `isAlive` is the injected `pidAlive`
+  // port; the layer crossing happens here, at the wiring seam, because the
+  // groundtruth package may import nothing but `@ethosagent/types`.
+  // -------------------------------------------------------------------------
+
+  const grounding = composeGrounding({
+    ...(config.grounding ? { config: config.grounding } : {}),
+    hooks,
+    pidAlive: isAlive,
+  });
+  injectors.push(...grounding.injectors);
+
   // Plan B — kanban role gate hook.
   if (kanbanStore !== null && config.teamName !== undefined && config.role !== undefined) {
     hooks.registerModifying(
@@ -1177,5 +1252,7 @@ export async function composeAllTools(
     skillScanner,
     skillsInjector,
     mcpManager,
+    turnAuditors: grounding.turnAuditors,
+    ...(grounding.memoryConsult ? { memoryConsult: grounding.memoryConsult } : {}),
   };
 }

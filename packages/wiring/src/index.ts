@@ -133,6 +133,17 @@ export interface WiringConfig {
    */
   kanban?: { maxInProgress?: number; maxInProgressPerProfile?: number };
   /**
+   * Ground-truth verification policy (mapped from `EthosConfig.grounding`).
+   * Read by `composeGrounding`; absent = the defaults, which is ON.
+   */
+  grounding?: {
+    enabled?: boolean;
+    onFinding?: 'annotate' | 'correct';
+    showUnsupported?: boolean;
+    memoryTag?: boolean;
+    kanban?: { checks?: boolean; allowedCheckCommands?: string[] };
+  };
+  /**
    * Tool-loop soft-warn tiers (mapped from `EthosConfig.toolLoop`). Forwarded
    * to `AgentLoopConfig.options`; absent = no warn tier.
    */

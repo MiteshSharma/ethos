@@ -189,6 +189,7 @@
       "@ethosagent/request-dump": ["./extensions/request-dump/src"],
       "@ethosagent/recipes": ["./extensions/recipes/src"],
       "@ethosagent/safety-channel": ["./packages/safety/channel/src"],
+      "@ethosagent/safety-groundtruth": ["./packages/safety/groundtruth/src"],
       "@ethosagent/safety-injection": ["./packages/safety/injection/src"],
       "@ethosagent/safety-network": ["./packages/safety/network/src"],
       "@ethosagent/safety-scanner": ["./packages/safety/scanner/src"],

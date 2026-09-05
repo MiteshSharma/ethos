@@ -34,6 +34,45 @@ export interface CaptureJob {
    * it so the exclusion is correct if a signal is ever threaded through.
    */
   isDryRun: boolean;
+  /**
+   * The turn contradicted its own evidence and `grounding.memoryTag` chose to
+   * record it anyway (see `GroundingConsult`). Every fact captured from the
+   * turn is marked in the durable line, so a later reader — human or model —
+   * can see the memory came out of a turn whose claims did not check out.
+   * Absent on every ordinary capture.
+   */
+  unverified?: true;
+}
+
+/**
+ * Ground-truth consult (ground-truth-verification R8).
+ *
+ * Optional and INJECTED rather than imported: memory-capture has no dependency
+ * on `@ethosagent/safety-groundtruth` at all, so a deployment where the
+ * grounding package is absent — or present but unwired — cannot behave any
+ * differently from one built before this seam existed. There is no import to
+ * fail and no flag to read.
+ *
+ * Consulted from the `agent_done` handler, which fires BEFORE the turn
+ * auditors run (`packages/core/src/agent-loop/stages/turn-finalizer.ts` fires
+ * `agent_done`, then audits), so the turn's findings do not exist yet and
+ * cannot simply be read back. Wiring answers the question by running the same
+ * deterministic audit over the turn's evidence ledger — which `session_start`
+ * resets each turn, so it holds exactly this one.
+ *
+ * The implementation must stay synchronous-cheap (no I/O): it sits on the
+ * enqueue hot path, whose contract is to return in under a millisecond.
+ */
+export interface GroundingConsult {
+  /** Did the turn's final text contradict what its tools actually did? */
+  contradicted(job: CaptureJob): boolean | Promise<boolean>;
+  /**
+   * `grounding.memoryTag`. Default (false) SKIPS a contradicted turn entirely
+   * — the strong reading of "memory must not record a claim the turn itself
+   * contradicted". True keeps the capture and marks it `unverified` instead,
+   * for deployments that would rather keep a flagged memory than lose one.
+   */
+  tag?: boolean;
 }
 
 /** Tuning knobs; every field has a default so wiring can pass a partial. */

@@ -441,7 +441,10 @@ describe('drawer-reducer', () => {
       {
         type: 'tool_progress',
         toolName: '_grounding',
-        message: 'unverified: tests pass',
+        // The full wire format: claim, evidence and the call it cites. Parsing
+        // lives in the shared transition, so neither surface can parse it
+        // differently — or, as before, only one of them parse it at all.
+        message: '"tests pass" — terminal exited 1 [ref:c1]',
         audience: 'user',
       },
       { type: 'tool_progress', toolName: 'terminal', message: 'reading', audience: 'user' },
@@ -459,7 +462,12 @@ describe('drawer-reducer', () => {
       return entries.map((e) =>
         e.kind === 'action'
           ? { kind: e.kind, toolName: e.toolName, status: e.status, durationMs: e.durationMs }
-          : { kind: e.kind, claim: e.claim },
+          : {
+              kind: e.kind,
+              claim: e.claim,
+              evidence: e.evidence,
+              citesToolCallId: e.citesToolCallId,
+            },
       );
     }
 
@@ -478,7 +486,12 @@ describe('drawer-reducer', () => {
       // the unfinished call the error settled are all there.
       expect(rows(newestEntries(drawer))).toEqual([
         { kind: 'action', toolName: 'terminal', status: 'ok', durationMs: 12 },
-        { kind: 'finding', claim: 'unverified: tests pass' },
+        {
+          kind: 'finding',
+          claim: 'tests pass',
+          evidence: 'terminal exited 1',
+          citesToolCallId: 'c1',
+        },
         { kind: 'action', toolName: 'read_file', status: 'failed', durationMs: undefined },
       ]);
     });
