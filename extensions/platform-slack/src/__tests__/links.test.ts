@@ -238,6 +238,7 @@ const base = 'https://ethos.example.com';
 
 const fullDeps = {
   webUiBaseUrl: base,
+  resolveChannelMode: () => 'all',
   session: {
     lookupSession: async (id: string) => ({
       id,
@@ -344,7 +345,7 @@ describe('events/links — registerLinkEvents', () => {
 
   it('skips a matched URL when its reader is absent (no hollow card)', async () => {
     const app = fakeApp();
-    registerLinkEvents(app as never, { webUiBaseUrl: base });
+    registerLinkEvents(app as never, { webUiBaseUrl: base, resolveChannelMode: () => 'all' });
     const unfurl = vi.fn().mockResolvedValue(undefined);
     const handler = app.handlers.get('event:link_shared');
     if (!handler) throw new Error('handler not registered');
@@ -363,6 +364,7 @@ describe('events/links — registerLinkEvents', () => {
     const app = fakeApp();
     registerLinkEvents(app as never, {
       webUiBaseUrl: base,
+      resolveChannelMode: () => 'all',
       session: { lookupSession: async () => null },
     });
     const unfurl = vi.fn().mockResolvedValue(undefined);
@@ -383,6 +385,7 @@ describe('events/links — registerLinkEvents', () => {
     const app = fakeApp();
     registerLinkEvents(app as never, {
       webUiBaseUrl: base,
+      resolveChannelMode: () => 'all',
       session: fullDeps.session,
       // no kanban reader wired
     });
@@ -422,6 +425,7 @@ describe('events/links — registerLinkEvents', () => {
     const app = fakeApp();
     registerLinkEvents(app as never, {
       webUiBaseUrl: base,
+      resolveChannelMode: () => 'all',
       session: {
         lookupSession: async () => {
           throw new Error('db down');
@@ -469,7 +473,11 @@ describe('events/links — registerLinkEvents', () => {
       personalityName: 'Researcher',
       lastActivity: new Date(0),
     }));
-    registerLinkEvents(app as never, { webUiBaseUrl: base, session: { lookupSession } });
+    registerLinkEvents(app as never, {
+      webUiBaseUrl: base,
+      resolveChannelMode: () => 'all',
+      session: { lookupSession },
+    });
     const unfurl = vi.fn().mockResolvedValue(undefined);
     const handler = app.handlers.get('event:link_shared');
     if (!handler) throw new Error('handler not registered');

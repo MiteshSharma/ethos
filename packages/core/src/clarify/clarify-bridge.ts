@@ -21,6 +21,7 @@ import type {
   ClarifySurfaceType,
   PendingClarify,
 } from '@ethosagent/types';
+import { isClarifyAnswerableOn } from './takeover-handback';
 import { handbackUrlFor } from './takeover-prompt';
 
 /**
@@ -490,6 +491,7 @@ export class ClarifyBridge {
     if (!entry) {
       const persisted = await this.store.get(response.requestId);
       if (!persisted) return;
+      if (!this.acceptsUserAnswer(persisted, response)) return;
       const notify = response.source === 'timeout-no-default' ? null : response;
       if (!persisted.answer) {
         await this.store.update(response.requestId, { answer: response });
@@ -497,6 +499,7 @@ export class ClarifyBridge {
       this.notifyResolved(persisted, notify);
       return;
     }
+    if (!this.acceptsUserAnswer(entry.row, response)) return;
     if (entry.timer) clearTimeout(entry.timer);
     this.pending.delete(response.requestId);
     await this.store.remove(response.requestId);
@@ -551,6 +554,36 @@ export class ClarifyBridge {
       await this.respond({ requestId, answer: '', source: 'cancel' });
     }
     return ordered.length;
+  }
+
+  /**
+   * The takeover answer gate. A `browser_takeover` says "I am parked on a
+   * login; drive my browser and hand it back" — so an answer to one is a claim
+   * that a real authenticated session now exists, which the tool reports to the
+   * agent as `handed_back: true`. Only a surface that can actually reach that
+   * browser may make the claim (`isClarifyAnswerableOn`); on every other
+   * surface a takeover row is text, not a question.
+   *
+   * Here rather than in each adapter because here is the ONE funnel: every
+   * surface, in every process (a channel's own `respond()`, the cross-process
+   * `answer` a peer bridge wrote onto the row and this one reconciles, the web
+   * takeover socket's hand-back) arrives at this method. Three adapters each
+   * grew their own free-form answer path and each looked correct alone; a
+   * fifth cannot repeat that, because refusal is what happens when nobody
+   * writes any code at all.
+   *
+   * Scoped to `source === 'user'`: `cancel` and both `timeout-*` sources pass
+   * through untouched, so a takeover nobody may answer still resolves and
+   * `browser_request_takeover`'s `finally` still clears the session lock.
+   *
+   * Silent, like every other unresolvable `respond()` (unknown id, already
+   * resolved). The surfaces below refuse to draw an answer affordance for a
+   * takeover in the first place, so nothing reaches here that a user is
+   * waiting on a reply to.
+   */
+  private acceptsUserAnswer(row: PendingClarify, response: ClarifyResponse): boolean {
+    if (response.source !== 'user') return true;
+    return isClarifyAnswerableOn(row, row.surfaceType);
   }
 
   private notifyResolved(row: PendingClarify, response: ClarifyResponse | null): void {

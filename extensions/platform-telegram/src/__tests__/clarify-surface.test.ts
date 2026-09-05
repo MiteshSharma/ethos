@@ -483,6 +483,17 @@ describe('TelegramClarifySurface — onResolved edits the prompt in place', () =
 // cannot be answered on Telegram: the browser is open on the machine running
 // Ethos and the hand-back button lives in the web chat. The prompt says so, and
 // names both the host and the link.
+//
+// The ANSWER path is what these tests exercise, not just the rendered text —
+// asserting the text alone is exactly how the hole below survived review. A
+// takeover row carries no `options`, `present()` used to read that as
+// "free-form" and open a FORCE REPLY, and `correlateMessage()` handed whatever
+// was typed back as `source: 'user'`, which `browser_request_takeover` reports
+// to the agent as `handed_back: true`.
+//
+// Revert `isClarifyAnswerableOn` in `../clarify-surface` and/or the
+// `acceptsUserAnswer` gate in `ClarifyBridge.respond()` and the first three
+// tests here fail.
 describe('browser takeover (D3)', () => {
   const TAKEOVER = {
     kind: 'browser_takeover' as const,
@@ -493,21 +504,92 @@ describe('browser takeover (D3)', () => {
     },
   };
 
-  it('presents the text form with the host and the hand-back link', async () => {
+  it('presents the text form with the host and the hand-back link — and no force reply', async () => {
     const h = makeHarness();
     await h.surface.present(makeRow(TAKEOVER));
-    const sent = h.adapter.sentForceReply[0];
+
+    // A force reply opens the keyboard and DEMANDS an answer this chat cannot
+    // give. The card goes out as an inline keyboard whose only button is Cancel.
+    expect(h.adapter.sentForceReply).toHaveLength(0);
+    const sent = h.adapter.sentInline[0];
     expect(sent?.text).toContain('accounts.example.com');
     expect(sent?.text).toContain('https://ethos.local/chat/sess-1');
     expect(sent?.text).toContain('the browser window is open on the machine running Ethos');
     // Not the raw reason, which reads as an answerable question here.
     expect(sent?.text.startsWith('stuck on a login')).toBe(false);
+    // And it does not invite an answer it will refuse.
+    expect(sent?.text).not.toContain('answer within');
+    expect(sent?.rows.map((r) => r.map((b) => b.label))).toEqual([['Cancel']]);
   });
 
-  // The resolved edit replaces the SAME message, so its head must not change
-  // identity between the two — same degraded-mode respond path as the
-  // `onResolved` suite above.
-  it('edits the same message to the same head when it resolves', async () => {
+  it('does not resolve when someone replies to the takeover prompt', async () => {
+    const { adapter, bridge, store, surface } = makeHarness();
+    const resolved: ClarifyResponse[] = [];
+    bridge.onResolved((_row, resp) => {
+      if (resp) resolved.push(resp);
+    });
+    adapter.setNextMessageId('tg-takeover');
+    const row = makeRow(TAKEOVER);
+    await store.add(row);
+    await surface.present(row);
+
+    // The real inbound path: a reply to the prompt message the surface sent.
+    const res = await surface.correlateMessage(inbound({ replyToId: 'tg-takeover', text: 'ok' }));
+
+    // Null, not a refused response — a correlated message is swallowed before
+    // the normal pipeline, so "ok" must fall through to the agent instead of
+    // vanishing.
+    expect(res).toBeNull();
+    expect(resolved).toHaveLength(0);
+    // Still open, and with no answer recorded on it — not merely un-removed.
+    expect((await store.get('req-1'))?.answer).toBeUndefined();
+  });
+
+  it('does not resolve even if a response reaches the bridge anyway', async () => {
+    const { bridge, store } = makeHarness();
+    const resolved: ClarifyResponse[] = [];
+    bridge.onResolved((_row, resp) => {
+      if (resp) resolved.push(resp);
+    });
+    await store.add(
+      makeRow({
+        ...TAKEOVER,
+        surfaceContext: { chatId: 'chat-1', botKey: BOT_KEY, messageId: 'msg-1' },
+      }),
+    );
+
+    // The backstop a fifth adapter cannot forget: even a direct `respond()`
+    // naming a channel-routed takeover is refused.
+    await bridge.respond({ requestId: 'req-1', answer: 'handed back', source: 'user' });
+
+    expect(resolved).toHaveLength(0);
+    // Still open, and with no answer recorded on it — not merely un-removed.
+    expect((await store.get('req-1'))?.answer).toBeUndefined();
+  });
+
+  it('still answers an ordinary question on the same path (control)', async () => {
+    const { adapter, bridge, store, surface } = makeHarness();
+    adapter.setNextMessageId('tg-question');
+    const row = makeRow();
+    await store.add(row);
+    await surface.present(row);
+
+    const res = await surface.correlateMessage(
+      inbound({ replyToId: 'tg-question', text: 'postgres' }),
+    );
+    expect(res).toEqual({ requestId: 'req-1', answer: 'postgres', source: 'user' });
+
+    const resolved: ClarifyResponse[] = [];
+    bridge.onResolved((_r, resp) => {
+      if (resp) resolved.push(resp);
+    });
+    await bridge.respond(res ?? { requestId: 'req-1', answer: '', source: 'cancel' });
+    expect(resolved).toEqual([{ requestId: 'req-1', answer: 'postgres', source: 'user' }]);
+  });
+
+  // The takeover must still RESOLVE, or `browser_request_takeover`'s session
+  // lock never clears. Cancel is the release path that stays open here.
+  it('still cancels from the chat, and edits the same message to the same head', async () => {
     const { adapter, bridge, store, surface } = makeHarness();
     void surface;
     const row = makeRow({
@@ -516,11 +598,13 @@ describe('browser takeover (D3)', () => {
     });
     await store.add(row);
 
-    await bridge.respond({ requestId: row.requestId, answer: 'handed back', source: 'user' });
+    const res = await surface.correlateMessage(inbound({ text: '/cancel' }));
+    expect(res).toEqual({ requestId: 'req-1', answer: '', source: 'cancel' });
+    await bridge.respond(res ?? { requestId: 'req-1', answer: '', source: 'user' });
 
     expect(adapter.edits).toHaveLength(1);
     expect(adapter.edits[0]?.text).toContain('accounts.example.com');
-    expect(adapter.edits[0]?.text).toContain('→ handed back');
+    expect(adapter.edits[0]?.text).toContain('(cancelled)');
   });
 
   it('leaves an ordinary question exactly as it was', async () => {

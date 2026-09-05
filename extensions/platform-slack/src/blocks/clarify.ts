@@ -8,6 +8,7 @@
 // parsing anything out of the message itself. See plan/phases/tool_clarity_plan.md
 // Surface 5.
 
+import { isClarifyAnswerableOn } from '@ethosagent/core';
 import type { ClarifyResponseSource, PendingClarify } from '@ethosagent/types';
 import { context, escapeMrkdwn, header, type SlackBlock, section, truncate } from './shared';
 
@@ -56,6 +57,18 @@ export interface ClarifyPendingInput {
   default?: string;
   /** ISO 8601 — shown in the context line so the user knows when default fires. */
   defaultDeadlineAt: string;
+  /**
+   * Whether this card may carry an ANSWER affordance. Default `true`.
+   *
+   * `false` for a `browser_takeover` (the caller decides — see
+   * `isClarifyAnswerableOn` in `@ethosagent/core`): the free-form branch below
+   * otherwise draws an "Answer" button that opens a text modal, and whatever
+   * someone typed into it is refused by `ClarifyBridge.respond()` — the click,
+   * the typing and the submit all happen and nothing at all comes back. Cancel
+   * stays either way: giving up is the one thing Slack CAN do about a browser
+   * it cannot see. Mirrors the same field on Discord's `ClarifyPendingInput`.
+   */
+  answerable?: boolean;
 }
 
 export function clarifyPendingBlocks(input: ClarifyPendingInput): SlackBlock[] {
@@ -89,26 +102,26 @@ export function clarifyPendingBlocks(input: ClarifyPendingInput): SlackBlock[] {
     });
     blocks.push({ type: 'actions', elements });
   } else {
-    // Free-form: Answer (opens modal) + Cancel.
-    blocks.push({
-      type: 'actions',
-      elements: [
-        {
-          type: 'button',
-          action_id: CLARIFY_ANSWER_ACTION_ID,
-          text: { type: 'plain_text', text: 'Answer', emoji: true },
-          style: 'primary',
-          value: input.requestId,
-        },
-        {
-          type: 'button',
-          action_id: CLARIFY_CANCEL_ACTION_ID,
-          text: { type: 'plain_text', text: 'Cancel', emoji: true },
-          style: 'danger',
-          value: input.requestId,
-        },
-      ],
+    // Free-form: Answer (opens modal) + Cancel — or Cancel alone when the row
+    // cannot be answered on this surface (see `answerable`).
+    const elements: unknown[] = [];
+    if (input.answerable !== false) {
+      elements.push({
+        type: 'button',
+        action_id: CLARIFY_ANSWER_ACTION_ID,
+        text: { type: 'plain_text', text: 'Answer', emoji: true },
+        style: 'primary',
+        value: input.requestId,
+      });
+    }
+    elements.push({
+      type: 'button',
+      action_id: CLARIFY_CANCEL_ACTION_ID,
+      text: { type: 'plain_text', text: 'Cancel', emoji: true },
+      style: 'danger',
+      value: input.requestId,
     });
+    blocks.push({ type: 'actions', elements });
   }
 
   // Context line — what the default is and when it fires. Visible-default
@@ -117,6 +130,11 @@ export function clarifyPendingBlocks(input: ClarifyPendingInput): SlackBlock[] {
   if (input.default !== undefined) {
     ctx.push(
       `default at <!date^${epoch(input.defaultDeadlineAt)}^{time}|${escapeMrkdwn(input.defaultDeadlineAt)}>: \`${escapeMrkdwn(truncate(input.default, DEFAULT_LABEL_MAX))}\``,
+    );
+  } else if (input.answerable === false) {
+    // Don't tell someone to answer a card this surface will refuse to answer.
+    ctx.push(
+      `waiting until <!date^${epoch(input.defaultDeadlineAt)}^{time}|${escapeMrkdwn(input.defaultDeadlineAt)}> — cancel to give up`,
     );
   } else {
     ctx.push(
@@ -175,12 +193,18 @@ export function clarifyHomeEntryBlocks(row: PendingClarify): SlackBlock[] {
   // only ever returns rows that were actually presented (a still-queued row
   // has no `surfaceContext.botKey` yet, so it's filtered out there) — the
   // `?? row.createdAt` fallback is defensive only, for the type.
+  //
+  // A Home entry's buttons reach the same `handleAction` (with `fromHome`),
+  // so a takeover must lose its Answer button here too. The row is in hand,
+  // so this decides it rather than taking it from a caller — `home/view.ts`
+  // has no reason to know about the takeover gate.
   return clarifyPendingBlocks({
     requestId: row.requestId,
     question: row.question,
     options: row.options,
     default: row.default,
     defaultDeadlineAt: row.defaultDeadlineAt ?? row.createdAt,
+    answerable: isClarifyAnswerableOn(row, 'slack'),
   });
 }
 
@@ -226,6 +250,29 @@ export function clarifyModalView(input: ClarifyModalInput): Record<string, unkno
             : {}),
         },
       },
+    ],
+  };
+}
+
+/**
+ * The dialog shown when someone clicks Answer on a card this surface cannot
+ * answer — a `browser_takeover` card posted before the Answer button was
+ * dropped and still pending across a restart.
+ *
+ * It deliberately carries NO `submit` and NO `callback_id`: Slack renders a
+ * close-only dialog, so this view can never produce a `view_submission`, and
+ * `handleClarifyModalSubmission` would ignore one anyway. `question` is the
+ * text form from `clarifyPromptText` — it names the host and the hand-back
+ * link, so the person who clicked leaves knowing where to go.
+ */
+export function clarifyTakeoverNoticeView(input: { question: string }): Record<string, unknown> {
+  return {
+    type: 'modal',
+    title: { type: 'plain_text', text: 'Not answerable here', emoji: true },
+    close: { type: 'plain_text', text: 'Close', emoji: true },
+    blocks: [
+      section("This can't be handed back from Slack — open the web chat."),
+      section(escapeMrkdwn(truncate(input.question, QUESTION_MAX))),
     ],
   };
 }

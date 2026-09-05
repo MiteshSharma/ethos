@@ -55,7 +55,12 @@ async function takeover(
   });
   const presented = await shown;
   const persisted = await store.get(presented.requestId);
-  await bridge.respond({ requestId: presented.requestId, answer: 'handed back', source: 'user' });
+  // `cancel`, not a hand-back: a takeover routed to a CHANNEL can no longer be
+  // answered from one (`isClarifyAnswerableOn`), and `respond()` refuses it
+  // silently — a `source: 'user'` here would leave `pending` unsettled forever.
+  // Cancel is the release path that stays open on a channel, which is what
+  // keeps the browser's takeover lock clearable from there.
+  await bridge.respond({ requestId: presented.requestId, answer: '', source: 'cancel' });
   await pending;
   if (!persisted) throw new Error('row was not persisted');
   return persisted;

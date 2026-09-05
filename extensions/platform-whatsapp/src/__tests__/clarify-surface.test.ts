@@ -272,17 +272,30 @@ describe('WhatsAppClarifySurface — correlateMessage (numbered replies)', () =>
 
 // D3 — a `browser_takeover` cannot be answered on WhatsApp: the browser is open
 // on the machine running Ethos and the hand-back button lives in the web chat.
+//
+// This suite used to assert only the rendered text while carrying that name,
+// and never touched `correlateMessage` — which was the whole hole. WhatsApp's
+// free-form branch matched ANY message in the chat while a row was pending, so
+// a takeover (no `options`, by construction) was handed back by the next
+// person to say anything, and `browser_request_takeover` reported that to the
+// agent as `handed_back: true`.
+//
+// Revert `isClarifyAnswerableOn` in `../clarify-surface` and/or the
+// `acceptsUserAnswer` gate in `ClarifyBridge.respond()` and the middle three
+// tests here fail.
 describe('browser takeover (D3)', () => {
+  const TAKEOVER = {
+    kind: 'browser_takeover' as const,
+    question: 'stuck on a login',
+    meta: {
+      url: 'https://accounts.example.com/signin?flow=2',
+      handbackUrl: 'https://ethos.local/chat/sess-1',
+    },
+  };
+
   it('presents the text form with the host and the hand-back link', async () => {
     const { adapter, store, surface } = makeHarness();
-    const row = makeRow({
-      kind: 'browser_takeover',
-      question: 'stuck on a login',
-      meta: {
-        url: 'https://accounts.example.com/signin?flow=2',
-        handbackUrl: 'https://ethos.local/chat/sess-1',
-      },
-    });
+    const row = makeRow(TAKEOVER);
     await store.add(row);
 
     await surface.present(row);
@@ -292,6 +305,77 @@ describe('browser takeover (D3)', () => {
     expect(text).toContain('https://ethos.local/chat/sess-1');
     expect(text).toContain('the browser window is open on the machine running Ethos');
     expect(text.startsWith('stuck on a login')).toBe(false);
+    // And it does not invite an answer this chat will refuse.
+    expect(text).not.toContain('answer within');
+  });
+
+  it('does not resolve on an arbitrary group message while it is pending', async () => {
+    const { bridge, store, surface } = makeHarness();
+    const resolved: string[] = [];
+    bridge.onResolved((_row, resp) => {
+      if (resp) resolved.push(resp.source);
+    });
+    await store.add(presentedRow(TAKEOVER));
+
+    // The real inbound path — any message in the chat, from anyone.
+    const res = await surface.correlateMessage(
+      inbound({ userId: 'user-B', text: 'ok done, logged in' }),
+    );
+
+    // Null, not a refused response: a correlated message is swallowed before
+    // the normal pipeline, so an unrelated message must still reach the agent.
+    expect(res).toBeNull();
+    expect(resolved).toHaveLength(0);
+    // Still open, and with no answer recorded on it — not merely un-removed.
+    expect((await store.get('req-1'))?.answer).toBeUndefined();
+  });
+
+  it('does not resolve even if a response reaches the bridge anyway', async () => {
+    const { bridge, store } = makeHarness();
+    const resolved: string[] = [];
+    bridge.onResolved((_row, resp) => {
+      if (resp) resolved.push(resp.source);
+    });
+    await store.add(presentedRow(TAKEOVER));
+
+    await bridge.respond({ requestId: 'req-1', answer: 'handed back', source: 'user' });
+
+    expect(resolved).toHaveLength(0);
+    // Still open, and with no answer recorded on it — not merely un-removed.
+    expect((await store.get('req-1'))?.answer).toBeUndefined();
+  });
+
+  // The takeover must still RESOLVE, or `browser_request_takeover`'s session
+  // lock never clears.
+  it('still cancels from the chat', async () => {
+    const { bridge, store, surface } = makeHarness();
+    const resolved: string[] = [];
+    bridge.onResolved((_row, resp) => {
+      if (resp) resolved.push(resp.source);
+    });
+    await store.add(presentedRow(TAKEOVER));
+
+    const res = await surface.correlateMessage(inbound({ text: '/cancel' }));
+    expect(res).toEqual({ requestId: 'req-1', answer: '', source: 'cancel' });
+    await bridge.respond(res ?? { requestId: 'req-1', answer: '', source: 'user' });
+    expect(resolved).toEqual(['cancel']);
+    // No live `request()` behind this row in the test, so `respond()` takes its
+    // cross-process branch and records the answer instead of removing the row.
+    expect((await store.get('req-1'))?.answer?.source).toBe('cancel');
+  });
+
+  it('still answers an ordinary free-form question on the same path (control)', async () => {
+    const { bridge, store, surface } = makeHarness();
+    const resolved: string[] = [];
+    bridge.onResolved((_row, resp) => {
+      if (resp) resolved.push(resp.source);
+    });
+    await store.add(presentedRow());
+
+    const res = await surface.correlateMessage(inbound({ text: 'postgres' }));
+    expect(res).toEqual({ requestId: 'req-1', answer: 'postgres', source: 'user' });
+    await bridge.respond(res ?? { requestId: 'req-1', answer: '', source: 'cancel' });
+    expect(resolved).toEqual(['user']);
   });
 
   it('leaves an ordinary question exactly as it was', async () => {

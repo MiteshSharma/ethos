@@ -6,6 +6,7 @@ import { ClarifyBridge, FileClarifyStore } from '@ethosagent/core';
 import { InMemoryStorage } from '@ethosagent/storage-fs';
 import type { ClarifyResponse, PendingClarify } from '@ethosagent/types';
 import { describe, expect, it } from 'vitest';
+import { CLARIFY_ANSWER_ACTION_ID } from '../blocks/clarify';
 import { type SessionRoutingForClarify, SlackClarifySurface } from '../clarify-surface';
 import type { ClarifyActionEvent, ClarifyModalSubmissionEvent } from '../interactions/clarify';
 
@@ -89,13 +90,19 @@ function makeHarness() {
   const adapter = makeFakeAdapter();
   const routing = new Map<string, SessionRoutingForClarify>();
   routing.set('sess-1', { chatId: 'C1', requesterUserId: 'U-orig' });
+  const safetyBlocks: Array<{ code?: string; cause?: string }> = [];
   const surface = new SlackClarifySurface({
     adapter,
     bridge,
     store,
     getSessionRouting: (id) => routing.get(id),
+    observability: {
+      recordSafetyBlock(opts) {
+        safetyBlocks.push(opts);
+      },
+    },
   });
-  return { adapter, bridge, store, surface, routing };
+  return { adapter, bridge, store, surface, routing, safetyBlocks };
 }
 
 describe('SlackClarifySurface — present()', () => {
@@ -519,6 +526,28 @@ describe('SlackClarifySurface — listPendingForBot', () => {
 
 // D3 — a `browser_takeover` cannot be answered on Slack: the browser is open on
 // the machine running Ethos and the hand-back button lives in the web chat.
+//
+// This suite used to assert only the card's rendered TEXT, and settled the
+// takeover with `source: 'user'` as though that were an ordinary resolution. It
+// is not. A takeover row carries no `options`, and no options is the shape every
+// surface reads as free-form, so the card ships an "Answer" button that opens a
+// text modal — and whatever was typed there resolved the clarify with
+// `source: 'user'`, which `browser_request_takeover` reports to the agent as
+// `handed_back: true`. Anyone typing "ok" told the agent a login it is about to
+// depend on had happened.
+//
+// The ANSWER path was closed for free by the single-place fix —
+// `isClarifyAnswerableOn` in `@ethosagent/core`, enforced by the
+// `acceptsUserAnswer` gate in `ClarifyBridge.respond()`, an allowlist of the
+// surfaces that can genuinely hand a browser back (`web`, `tui`, `cli`). Revert
+// either and the middle two tests here fail.
+//
+// The AFFORDANCE was not, and that was worse than the original bug: `present()`
+// still drew a free-form Answer button, so a person clicked it, typed into the
+// modal, submitted — and got nothing back at all. Slack now presents a takeover
+// the way Telegram and Discord do: Cancel alone, and no line telling the reader
+// to answer. The card TEXT is unchanged; someone in the channel must still
+// learn where the agent is stuck and where to go.
 describe('SlackClarifySurface — browser takeover (D3)', () => {
   const TAKEOVER = {
     kind: 'browser_takeover' as const,
@@ -541,19 +570,173 @@ describe('SlackClarifySurface — browser takeover (D3)', () => {
     expect(text).toContain('the browser window is open on the machine running Ethos');
   });
 
-  it('keeps the same head when the card updates to its resolved state', async () => {
+  it('posts a Cancel-only card — no Answer button, no "answer by" line', async () => {
+    const { adapter, store, surface } = makeHarness();
+    const row = makeRow(TAKEOVER);
+    await store.add(row);
+    await surface.present(row);
+
+    const blocks = adapter.posted[0]?.blocks ?? [];
+    const actions = blocks.find((b) => (b as { type: string }).type === 'actions') as
+      | { elements: Array<{ action_id: string; text: { text: string } }> }
+      | undefined;
+    expect(actions?.elements.map((e) => e.text.text)).toEqual(['Cancel']);
+    expect(JSON.stringify(blocks)).not.toContain(CLARIFY_ANSWER_ACTION_ID);
+    expect(JSON.stringify(blocks)).not.toContain('answer by');
+  });
+
+  // The control: nothing about an ordinary free-form question changes.
+  it('still draws Answer + Cancel for an ordinary free-form question', async () => {
+    const { adapter, store, surface } = makeHarness();
+    const row = makeRow();
+    await store.add(row);
+    await surface.present(row);
+
+    const blocks = adapter.posted[0]?.blocks ?? [];
+    const actions = blocks.find((b) => (b as { type: string }).type === 'actions') as
+      | { elements: Array<{ text: { text: string } }> }
+      | undefined;
+    expect(actions?.elements.map((e) => e.text.text)).toEqual(['Answer', 'Cancel']);
+    expect(JSON.stringify(blocks)).toContain('answer by');
+  });
+
+  // A card posted before the Answer button was dropped survives a restart and
+  // is still clickable. Opening the answer form for it would walk the user
+  // through typing and submitting something the bridge silently refuses — the
+  // exact no-feedback bug. Show what CAN be done instead, in a close-only
+  // dialog that no `view_submission` can follow.
+  it('answers a stale Answer click with a close-only notice, not the answer form', async () => {
+    const { adapter, store, surface } = makeHarness();
+    void surface;
+    await store.add(
+      makeRow({
+        ...TAKEOVER,
+        surfaceContext: { chatId: 'C1', botKey: BOT_KEY, messageTs: 'ts-1' },
+      }),
+    );
+
+    adapter.fireAction({
+      kind: 'open-modal',
+      requestId: 'req-1',
+      userId: 'U-orig',
+      channelId: 'C1',
+      messageTs: 'ts-1',
+      triggerId: 'TRG',
+      fromHome: false,
+    });
+    await new Promise((r) => setImmediate(r));
+
+    expect(adapter.modals).toHaveLength(1);
+    const view = adapter.modals[0]?.view ?? {};
+    expect(view.submit).toBeUndefined();
+    expect(view.callback_id).toBeUndefined();
+    expect(JSON.stringify(view)).toContain("can't be handed back from Slack");
+    expect(JSON.stringify(view)).toContain('https://ethos.local/chat/sess-1');
+  });
+
+  it('records a refusal for a modal-submit that arrives anyway', async () => {
+    const { adapter, store, surface, safetyBlocks } = makeHarness();
+    void surface;
+    await store.add(
+      makeRow({
+        ...TAKEOVER,
+        surfaceContext: { chatId: 'C1', botKey: BOT_KEY, messageTs: 'ts-1' },
+      }),
+    );
+
+    // A modal opened before this shipped, submitted after.
+    adapter.fireModal({ requestId: 'req-1', answer: 'ok logged in', userId: 'U-orig' });
+    await new Promise((r) => setImmediate(r));
+
+    expect(safetyBlocks.map((b) => b.code)).toEqual(['slack.clarify.takeover_not_answerable']);
+    expect((await store.get('req-1'))?.answer).toBeUndefined();
+  });
+
+  it('does not resolve when the Answer modal path is driven anyway', async () => {
     const { adapter, bridge, store, surface } = makeHarness();
     void surface;
-    const row = makeRow({
-      ...TAKEOVER,
-      surfaceContext: { chatId: 'C1', botKey: BOT_KEY, messageTs: 'ts-1' },
+    await store.add(
+      makeRow({
+        ...TAKEOVER,
+        surfaceContext: { chatId: 'C1', botKey: BOT_KEY, messageTs: 'ts-1' },
+      }),
+    );
+    let resolved: ClarifyResponse | null = null;
+    bridge.onResolved((_r, resp) => {
+      resolved = resp;
     });
-    await store.add(row);
 
-    await bridge.respond({ requestId: row.requestId, answer: 'handed back', source: 'user' });
+    // The interaction path end to end: a click on a stale Answer button, then
+    // a modal submission. Neither reaches the bridge.
+    adapter.fireAction({
+      kind: 'open-modal',
+      requestId: 'req-1',
+      userId: 'U-orig',
+      channelId: 'C1',
+      messageTs: 'ts-1',
+      triggerId: 'TRG',
+      fromHome: false,
+    });
+    await new Promise((r) => setImmediate(r));
+    adapter.fireModal({ requestId: 'req-1', answer: 'ok logged in', userId: 'U-orig' });
+    await new Promise((r) => setImmediate(r));
+
+    expect(resolved).toBeNull();
+    expect(adapter.updated).toHaveLength(0);
+    // Still open, with no answer recorded on it — not merely un-removed.
+    expect((await store.get('req-1'))?.answer).toBeUndefined();
+  });
+
+  it('does not resolve even if a response reaches the bridge anyway', async () => {
+    const { bridge, store, surface } = makeHarness();
+    void surface;
+    await store.add(
+      makeRow({
+        ...TAKEOVER,
+        surfaceContext: { chatId: 'C1', botKey: BOT_KEY, messageTs: 'ts-1' },
+      }),
+    );
+    let resolved: ClarifyResponse | null = null;
+    bridge.onResolved((_r, resp) => {
+      resolved = resp;
+    });
+
+    // The backstop a fifth adapter cannot forget: even a direct `respond()`
+    // naming a channel-routed takeover is refused.
+    await bridge.respond({ requestId: 'req-1', answer: 'handed back', source: 'user' });
+
+    expect(resolved).toBeNull();
+    expect((await store.get('req-1'))?.answer).toBeUndefined();
+  });
+
+  // The takeover must still RESOLVE, or `browser_request_takeover`'s session
+  // lock never clears. Cancel is the release path that stays open here, and the
+  // resolved card must still edit the SAME message to the same head.
+  it('still cancels from the card, keeping the same head', async () => {
+    const { adapter, store, surface } = makeHarness();
+    void surface;
+    await store.add(
+      makeRow({
+        ...TAKEOVER,
+        surfaceContext: { chatId: 'C1', botKey: BOT_KEY, messageTs: 'ts-1' },
+      }),
+    );
+
+    adapter.fireAction({
+      kind: 'cancel',
+      requestId: 'req-1',
+      userId: 'U-orig',
+      channelId: 'C1',
+      messageTs: 'ts-1',
+      fromHome: false,
+    });
+    await new Promise((r) => setImmediate(r));
 
     expect(adapter.updated).toHaveLength(1);
-    expect(JSON.stringify(adapter.updated[0]?.blocks ?? [])).toContain('accounts.example.com');
+    expect(adapter.updated[0]?.messageTs).toBe('ts-1');
+    const text = JSON.stringify(adapter.updated[0]?.blocks ?? []);
+    expect(text).toContain('accounts.example.com');
+    expect(text).toContain('(cancelled)');
   });
 
   it('leaves an ordinary question exactly as it was', async () => {

@@ -11,9 +11,16 @@
 // "other browser tools refuse while locked" fails. Revert the `bringToFront`
 // branch and the headed test fails.
 
-import type { ClarifyBridge, ClarifyRequestInput } from '@ethosagent/core';
-import { ClarifyTimedOutNoDefaultError } from '@ethosagent/core';
-import type { ClarifyResponse, Tool, ToolContext } from '@ethosagent/types';
+import type { ClarifyRequestInput } from '@ethosagent/core';
+import { ClarifyBridge, ClarifyTimedOutNoDefaultError, FileClarifyStore } from '@ethosagent/core';
+import { InMemoryStorage } from '@ethosagent/storage-fs';
+import type {
+  ClarifyResponse,
+  ClarifySurfaceType,
+  PendingClarify,
+  Tool,
+  ToolContext,
+} from '@ethosagent/types';
 import type { BrowserContext, Page } from 'playwright';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createBrowserTakeoverTool } from '../browser-takeover';
@@ -81,11 +88,15 @@ function seed(sessionId: string, page: Page, over: Partial<BrowserSession> = {})
   return session;
 }
 
-function toolCtx(sessionId: string, abortSignal?: AbortSignal): ToolContext {
+function toolCtx(
+  sessionId: string,
+  abortSignal?: AbortSignal,
+  platform: ToolContext['platform'] = 'cli',
+): ToolContext {
   return {
     sessionId,
     sessionKey: `cli:${sessionId}`,
-    platform: 'cli',
+    platform,
     workingDir: '/tmp',
     currentTurn: 1,
     messageCount: 1,
@@ -429,5 +440,104 @@ describe('other browser tools while the lock is held', () => {
 
     settle().resolve({ requestId: 'r1', answer: 'handed back', source: 'user' });
     await pending;
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The takeover answer gate, driven through a REAL ClarifyBridge.
+// ---------------------------------------------------------------------------
+//
+// Every test above settles a STUB bridge directly, which is exactly how the
+// hole survived: nothing here ever asked whether a channel could produce that
+// `source: 'user'` in the first place. It could — a takeover carries no
+// `options`, and no options was the free-form shape on Telegram, WhatsApp and
+// Discord alike — so anyone typing anything made this tool report
+// `handed_back: true` for a login that had not happened.
+//
+// Revert `acceptsUserAnswer` in `ClarifyBridge.respond()` and the first test
+// below fails. Revert the `finally` in `browser-takeover.ts` and the other two
+// fail on the lock.
+describe('browser_request_takeover — a channel cannot hand the browser back', () => {
+  function realBridge(surfaceType: ClarifySurfaceType) {
+    const store = new FileClarifyStore(new InMemoryStorage(), '/ethos/clarify');
+    const bridge = new ClarifyBridge(store, { reconcilePollMs: 0 });
+    const presented: PendingClarify[] = [];
+    bridge.registerPresenter(surfaceType, (row) => {
+      presented.push(row);
+    });
+    return { bridge, store, presented };
+  }
+
+  async function untilPresented(presented: PendingClarify[]): Promise<PendingClarify> {
+    while (presented.length === 0) await new Promise((r) => setImmediate(r));
+    const row = presented[0];
+    if (!row) throw new Error('nothing was presented');
+    return row;
+  }
+
+  it('refuses a telegram answer, and still reports the outcome honestly on cancel', async () => {
+    const p = fakePage();
+    const session = seed('gate-telegram', p.page);
+    const { bridge, store, presented } = realBridge('telegram');
+    const tool = createBrowserTakeoverTool(bridge);
+
+    const pending = tool.execute(
+      { reason: 'log in' },
+      toolCtx('gate-telegram', undefined, 'telegram'),
+    );
+    const row = await untilPresented(presented);
+    expect(session.takeover).toBeDefined();
+
+    // What a group participant typing "ok" produces.
+    await bridge.respond({ requestId: row.requestId, answer: 'ok', source: 'user' });
+
+    // Still parked: the lock is held and no result has been produced.
+    expect(session.takeover).toBeDefined();
+    expect((await store.get(row.requestId))?.answer).toBeUndefined();
+
+    // Cancel is the release path a channel keeps, and it clears the lock.
+    await bridge.respond({ requestId: row.requestId, answer: '', source: 'cancel' });
+    const result = await pending;
+    expect(session.takeover).toBeUndefined();
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(JSON.parse(result.value)).toMatchObject({ handed_back: false, outcome: 'cancel' });
+  });
+
+  it('still times out a takeover nobody may answer, and clears the lock', async () => {
+    const p = fakePage();
+    const session = seed('gate-timeout', p.page);
+    const { bridge, presented } = realBridge('whatsapp');
+    const tool = createBrowserTakeoverTool(bridge);
+
+    const pending = tool.execute(
+      { reason: 'log in', timeout_s: 1 },
+      toolCtx('gate-timeout', undefined, 'whatsapp'),
+    );
+    const row = await untilPresented(presented);
+    await bridge.respond({ requestId: row.requestId, answer: 'done', source: 'user' });
+
+    const result = await pending;
+    expect(session.takeover).toBeUndefined();
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.code).toBe('execution_failed');
+  });
+
+  it('still hands back from a surface that can actually reach the browser', async () => {
+    const p = fakePage();
+    const session = seed('gate-web', p.page);
+    const { bridge, presented } = realBridge('web');
+    const tool = createBrowserTakeoverTool(bridge);
+
+    const pending = tool.execute({ reason: 'log in' }, toolCtx('gate-web', undefined, 'web'));
+    const row = await untilPresented(presented);
+    await bridge.respond({ requestId: row.requestId, answer: 'handed back', source: 'user' });
+
+    const result = await pending;
+    expect(session.takeover).toBeUndefined();
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(JSON.parse(result.value)).toMatchObject({ handed_back: true, outcome: 'user' });
   });
 });

@@ -28,6 +28,7 @@ import {
   type SessionUnfurlData,
   sessionUnfurlBlocks,
 } from '../blocks/unfurl';
+import { canSpeakInChannel } from '../routing/triage';
 
 /** Lookup-by-id readers the unfurl handler needs. A `link_shared` URL carries a
  *  specific id, so unlike the list-oriented readers used by `/ethos` commands
@@ -50,6 +51,16 @@ export interface LinkEventDeps {
    *  slash). When absent, the adapter can't recognize Ethos URLs and the
    *  `link_shared` handler is never registered. */
   webUiBaseUrl?: string;
+  /** Resolves the active channel mode for a channel id. `string`, not
+   *  `ChannelMode` — a stored override this build's enum cannot read reaches
+   *  here verbatim, and `canSpeakInChannel` fails closed on it.
+   *
+   *  REQUIRED, unlike every other dep on this interface. The readers below are
+   *  optional because an absent one degrades to a skipped unfurl, which is
+   *  safe; an absent mode resolver would degrade to unfurling into a room that
+   *  asked for silence, which is the bug this dep exists to close. A caller
+   *  that cannot supply it has no business registering this handler. */
+  resolveChannelMode: (channel: string) => string;
   session?: SessionUnfurlReader;
   kanban?: KanbanUnfurlReader;
   personality?: PersonalityUnfurlReader;
@@ -150,6 +161,14 @@ export function registerLinkEvents(app: App, deps: LinkEventDeps): void {
       links?: Array<{ url?: string }>;
     };
     if (!evt.channel || !evt.message_ts || !evt.links) return;
+
+    // An unfurl is content posted into the channel — a card with our data in
+    // it, attached to someone's message, visible to everyone in the room. It
+    // had no mode check at all, so a room set to `observe` still got one
+    // whenever anybody pasted an Ethos link. Checked before the reader fan-out
+    // as well as before `chat.unfurl`: a silent room should not even cost the
+    // lookups.
+    if (!canSpeakInChannel(deps.resolveChannelMode(evt.channel))) return;
 
     // Match first, then resolve concurrently. Each `buildUnfurl` hits a
     // backing reader; serializing them would make the handler's latency the

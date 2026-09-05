@@ -97,6 +97,19 @@ Set with: /ethos channel-mode all, /ethos channel-mode thread_follow, /ethos cha
 
 `/ethos channel-mode <mode>` sets it, and the setting is a per-channel override on top of the app default. Set that app-wide default with [`slack.apps.<i>.defaultChannelMode`](../using/reference/config-yaml.md#slack-apps) — the same four values, `mention_only` when the key is absent, read at gateway startup. `mention_only` is the default and needs neither subscription; `thread_follow`, `all`, and `observe` all read messages the bot was not addressed in, and all need `message.channels` (public) or `message.groups` (private) for the channel in question. `observe` additionally never replies — the bot reads the channel and says nothing in it.
 
+Silence under `observe` covers every surface, not only replies to messages:
+
+| Surface | Under `observe` |
+|---|---|
+| Messages and `@mentions` | Recorded to the transcript, never answered, no receipt reaction |
+| The greeting the bot posts when you invite it | Not posted |
+| Unfurling an Ethos link someone pastes | Not unfurled |
+| `/ethos ask` | Refused, with a reply only the person who ran it can see |
+
+To ask this bot something while a channel is observed, DM it or change the mode.
+
+A stored mode this build cannot read — a typo such as `obserev`, or a mode a newer Ethos wrote into the same override file — is treated exactly like `observe`: nothing reaches the room, and nothing is recorded either. If a channel has gone quiet unexpectedly, run `/ethos channel-mode`, which prints the stored string verbatim rather than the default it is not. `/ethos help`, the App Home tab, and the `/ethos ask` refusal show the same value.
+
 Only users on the `/ethos` allowlist can run this; see [step 5a](#5a-restrict-who-can-run-ethos-and-open-app-home).
 
 ### 2. Wire the secrets

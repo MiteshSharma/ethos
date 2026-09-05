@@ -17,7 +17,7 @@
 // Mirrors `TelegramClarifySurface` and `SlackClarifySurface`. See
 // plan/phases/tool_clarity_plan.md Surface 6.
 
-import { type ClarifyBridge, clarifyPromptText } from '@ethosagent/core';
+import { type ClarifyBridge, clarifyPromptText, isClarifyAnswerableOn } from '@ethosagent/core';
 import type { ClarifyResponse, ClarifyStore, PendingClarify } from '@ethosagent/types';
 import {
   type ClarifyModalInput,
@@ -125,6 +125,10 @@ export class DiscordClarifySurface {
       // `present()` only fires once a row is actually presented (D2), at
       // which point this is always set — the fallback is defensive only.
       defaultDeadlineAt: row.defaultDeadlineAt ?? row.createdAt,
+      // No Answer button for a `browser_takeover`: the modal behind it took
+      // free text and reported it to the agent as a completed hand-back.
+      // Cancel survives, so the browser lock is still releasable from here.
+      answerable: isClarifyAnswerableOn(row, SURFACE),
     });
     const result = await this.adapter.postClarifyCard({
       chatId: routing.chatId,

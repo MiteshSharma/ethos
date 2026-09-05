@@ -5,6 +5,7 @@
 
 import type { App } from '@slack/bolt';
 import type { Binding } from '../config';
+import { canSpeakInChannel } from '../routing/triage';
 
 export interface MemberJoinedDeps {
   /** The bot's own Slack user id, e.g. `U0123ABCD`. Used to filter the
@@ -23,6 +24,17 @@ export function registerMemberEvents(app: App, deps: MemberJoinedDeps): void {
     if (!deps.selfUserId) return;
     if (event.user !== deps.selfUserId) return;
     const mode = deps.resolveChannelMode(event.channel);
+    // The greeting is a public `chat.postMessage`, so it is bound by the same
+    // promise every other post is: an observed room hears nothing, not even
+    // the bot introducing itself. The mode used to be display text here and
+    // never a gate, which made `defaultChannelMode: observe` announce the bot
+    // in every room it was invited to.
+    //
+    // An unreadable mode is silenced too, by `canSpeakInChannel`'s fail-closed
+    // reasoning — and it stays diagnosable, because the operator reads the raw
+    // string back from `/ethos channel-mode show`, `/ethos help`, the refusal
+    // `/ethos ask` returns, and the App Home tab, none of which the room sees.
+    if (!canSpeakInChannel(mode)) return;
     const subject = deps.binding.type === 'team' ? 'team coordinator' : 'personality';
     const text =
       `:wave: I'm bound to the *${subject}* \`${deps.binding.name}\`. ` +

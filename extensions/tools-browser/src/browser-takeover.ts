@@ -134,6 +134,17 @@ export function createBrowserTakeoverTool(bridge: ClarifyBridge): Tool<TakeoverA
         const response = await bridge.request({
           question: `Take over the browser at ${url} — ${reason}`,
           timeoutMs: timeoutS * 1000,
+          // Stays `'anyone'`, deliberately, now that it means something narrower
+          // than it used to. `answerableBy` is read by exactly one thing — the
+          // channel surfaces' `gateAnswerer` — and a channel can no longer
+          // ANSWER a takeover at all (`isClarifyAnswerableOn`, enforced in
+          // `ClarifyBridge.respond()`). So the only decision left for it to gate
+          // on a channel is `cancel`, and cancel is how a person who is not the
+          // originator gives up on a browser nobody is going to reach. Narrowing
+          // this to `'originator'` would buy nothing on the surfaces that CAN
+          // hand back (web/tui/cli never consult it) and would silently strand
+          // a background job's takeover, whose row carries no originator stamp
+          // at all, on its full 15-minute timeout.
           answerableBy: 'anyone',
           sessionId: ctx.sessionId,
           ...(ctx.jobId !== undefined ? { jobId: ctx.jobId } : {}),

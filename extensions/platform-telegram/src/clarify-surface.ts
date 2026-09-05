@@ -17,7 +17,7 @@
 //
 // See plan/phases/tool_clarity_plan.md Surface 4.
 
-import { type ClarifyBridge, clarifyPromptText } from '@ethosagent/core';
+import { type ClarifyBridge, clarifyPromptText, isClarifyAnswerableOn } from '@ethosagent/core';
 import type {
   ClarifyResponse,
   ClarifyStore,
@@ -116,8 +116,13 @@ export class TelegramClarifySurface {
     }
 
     const text = formatPrompt(row);
+    // A force reply opens the keyboard and demands one — the wrong affordance
+    // for a `browser_takeover`, which this chat cannot answer at all (see
+    // `isClarifyAnswerableOn`). It still gets a card, but the only button on
+    // it is Cancel: giving up is the one thing Telegram CAN do about a browser
+    // it cannot see. `buildButtonRows` with no options is exactly that row.
     const result =
-      row.options && row.options.length > 0
+      (row.options && row.options.length > 0) || !isClarifyAnswerableOn(row, SURFACE)
         ? await this.adapter.sendInlineKeyboard(routing.chatId, text, buildButtonRows(row))
         : await this.adapter.sendForceReply(routing.chatId, text);
 
@@ -178,6 +183,11 @@ export class TelegramClarifySurface {
     );
     if (!target) return null;
     if (!gateAnswerer(target, message.userId)) return null;
+    // A takeover is not answerable here. Returning null rather than a response
+    // the bridge would refuse is deliberate: a correlated message is swallowed
+    // before the normal pipeline, so refusing later would make whatever the
+    // person typed vanish with no reply at all.
+    if (!isClarifyAnswerableOn(target, SURFACE)) return null;
     this.bridge.recordPresence(SURFACE, { chatId: message.chatId, botKey: this.adapter.botKey });
     return { requestId: target.requestId, answer: text, source: 'user' };
   }
@@ -330,7 +340,10 @@ function formatPrompt(row: PendingClarify): string {
   // is stuck, and the web link that can hand it back); Telegram cannot hand a
   // browser back itself. An ordinary question passes through unchanged.
   const lines: string[] = [clarifyPromptText(row), ''];
-  if (row.default !== undefined) {
+  if (!isClarifyAnswerableOn(row, SURFACE)) {
+    // Don't tell someone to answer a prompt this chat will refuse to answer.
+    lines.push(`waiting up to ${minutes}m — cancel to give up`);
+  } else if (row.default !== undefined) {
     lines.push(`default in ${minutes}m: ${row.default}`);
   } else {
     lines.push(`no default — answer within ${minutes}m or cancel`);

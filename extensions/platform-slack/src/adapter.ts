@@ -609,16 +609,22 @@ export class SlackAdapter implements PlatformAdapter, ApprovalCapableAdapter, Vo
       },
     );
 
+    // One resolver, shared by every handler that can put content into a
+    // channel. `member_joined_channel` and `link_shared` both consult it via
+    // `canSpeakInChannel`; the slash commands build their own from the same
+    // `SlashContext` fields.
+    const resolveMode = (channel: string): string =>
+      resolveChannelMode(channel, {
+        botKey: this.botKey,
+        defaultChannelMode: this.defaultChannelMode,
+        channelOverrides: this.channelOverrides,
+      });
+
     if (this.binding) {
       registerMemberEvents(this.app, {
         selfUserId: this.selfUserId,
         binding: this.binding,
-        resolveChannelMode: (channel) =>
-          resolveChannelMode(channel, {
-            botKey: this.botKey,
-            defaultChannelMode: this.defaultChannelMode,
-            channelOverrides: this.channelOverrides,
-          }),
+        resolveChannelMode: resolveMode,
       });
     }
 
@@ -820,6 +826,7 @@ export class SlackAdapter implements PlatformAdapter, ApprovalCapableAdapter, Vo
     // degrades to a skipped unfurl when its reader is absent.
     registerLinkEvents(this.app, {
       webUiBaseUrl: this.webUiBaseUrl,
+      resolveChannelMode: resolveMode,
       session: this.sessionUnfurl,
       kanban: this.kanbanUnfurl,
       personality: this.personalityUnfurl,
@@ -1517,9 +1524,12 @@ export class SlackAdapter implements PlatformAdapter, ApprovalCapableAdapter, Vo
         userId: input.user,
         text: input.text,
         isDm: false,
-        // Slash invocations are always treated as a direct address — the
-        // user explicitly invoked the bot, so channel-mode is bypassed.
-        // No `threadId`: slash commands fire from the channel root.
+        // Slash invocations are always treated as a direct address — the user
+        // explicitly invoked the bot. Channel-mode is NOT bypassed by that: it
+        // is enforced one layer up, in `handleAsk`, which refuses ephemerally
+        // rather than submitting a turn whose answer would be posted into a
+        // room set to `observe`. This submitter is only reached once that gate
+        // has opened. No `threadId`: slash commands fire from the channel root.
         isGroupMention: true,
         raw: { source: 'slash:/ethos ask' },
       };

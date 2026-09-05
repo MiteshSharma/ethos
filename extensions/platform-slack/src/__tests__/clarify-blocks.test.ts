@@ -1,5 +1,6 @@
 // Pure-builder tests for the clarify Block Kit blocks.
 
+import type { PendingClarify } from '@ethosagent/types';
 import { describe, expect, it } from 'vitest';
 import {
   CLARIFY_ANSWER_ACTION_ID,
@@ -8,9 +9,11 @@ import {
   CLARIFY_MODAL_CALLBACK_ID,
   CLARIFY_MODAL_INPUT_ACTION_ID,
   CLARIFY_MODAL_INPUT_BLOCK_ID,
+  clarifyHomeEntryBlocks,
   clarifyModalView,
   clarifyPendingBlocks,
   clarifyResolvedBlocks,
+  clarifyTakeoverNoticeView,
 } from '../blocks/clarify';
 
 const DEADLINE = '2026-05-15T00:15:00.000Z';
@@ -77,6 +80,97 @@ describe('clarifyPendingBlocks', () => {
     });
     const actions = blocks.find((b) => b.type === 'actions') as { elements: unknown[] } | undefined;
     expect(actions?.elements.length).toBe(25); // 24 options + 1 cancel
+  });
+
+  // `answerable: false` is what a `browser_takeover` renders as. Slack can't
+  // hand a browser back (`isClarifyAnswerableOn`), so the card must not invite
+  // it: no Answer button, and no line telling the reader to answer.
+  it('renders Cancel alone when answerable is false — no Answer button', () => {
+    const blocks = clarifyPendingBlocks({
+      requestId: 'r5',
+      question: "I'm stuck on a login at accounts.example.com",
+      defaultDeadlineAt: DEADLINE,
+      answerable: false,
+    });
+    const actions = blocks.find((b) => b.type === 'actions') as
+      | { elements: Array<{ action_id: string; value: string }> }
+      | undefined;
+    expect(actions?.elements.map((e) => e.action_id)).toEqual([CLARIFY_CANCEL_ACTION_ID]);
+    expect(actions?.elements[0]?.value).toBe('r5');
+    expect(JSON.stringify(blocks)).not.toContain(CLARIFY_ANSWER_ACTION_ID);
+  });
+
+  it('replaces the "answer by" line with a cancel-only line when answerable is false', () => {
+    const blocks = clarifyPendingBlocks({
+      requestId: 'r6',
+      question: 'stuck on a login',
+      defaultDeadlineAt: DEADLINE,
+      answerable: false,
+    });
+    const ctx = blocks.find((b) => b.type === 'context') as
+      | { elements: Array<{ text: string }> }
+      | undefined;
+    const line = ctx?.elements[0]?.text ?? '';
+    expect(line).not.toContain('answer by');
+    expect(line).toContain('cancel to give up');
+  });
+});
+
+// The App Home "Waiting on you" entry reuses the pending builder, and its
+// buttons reach the same handler as a channel card's. A takeover must lose its
+// Answer button here too, or the Home tab keeps the invitation the channel
+// card just dropped.
+describe('clarifyHomeEntryBlocks', () => {
+  function homeRow(overrides: Partial<PendingClarify> = {}): PendingClarify {
+    return {
+      requestId: 'home-1',
+      sessionId: 'sess-1',
+      surfaceType: 'slack',
+      surfaceContext: { chatId: 'C1', botKey: 'k', messageTs: 'ts-1' },
+      question: 'Which database?',
+      answerableBy: 'anyone',
+      createdAt: '2026-05-15T00:00:00.000Z',
+      defaultDeadlineAt: DEADLINE,
+      ...overrides,
+    };
+  }
+
+  it('drops the Answer button for a browser_takeover row', () => {
+    const blocks = clarifyHomeEntryBlocks(homeRow({ kind: 'browser_takeover' }));
+    const actions = blocks.find((b) => b.type === 'actions') as
+      | { elements: Array<{ action_id: string }> }
+      | undefined;
+    expect(actions?.elements.map((e) => e.action_id)).toEqual([CLARIFY_CANCEL_ACTION_ID]);
+  });
+
+  it('keeps Answer + Cancel for an ordinary free-form row', () => {
+    const blocks = clarifyHomeEntryBlocks(homeRow());
+    const actions = blocks.find((b) => b.type === 'actions') as
+      | { elements: Array<{ action_id: string }> }
+      | undefined;
+    expect(actions?.elements.map((e) => e.action_id)).toEqual([
+      CLARIFY_ANSWER_ACTION_ID,
+      CLARIFY_CANCEL_ACTION_ID,
+    ]);
+  });
+});
+
+describe('clarifyTakeoverNoticeView', () => {
+  // Shown when someone clicks Answer on a stale takeover card. It must be
+  // close-only: a submit button would produce a `view_submission` the bridge
+  // refuses, which is the silent no-op this whole change exists to remove.
+  it('is a close-only modal that names the web chat and carries the prompt text', () => {
+    const view = clarifyTakeoverNoticeView({
+      question:
+        "I'm stuck on a login at accounts.example.com — open the web chat to hand back: https://ethos.local/chat/sess-1",
+    });
+    expect(view.submit).toBeUndefined();
+    expect(view.callback_id).toBeUndefined();
+    expect(view.close).toBeDefined();
+    const text = JSON.stringify(view.blocks);
+    expect(text).toContain("can't be handed back from Slack");
+    expect(text).toContain('accounts.example.com');
+    expect(text).toContain('https://ethos.local/chat/sess-1');
   });
 });
 

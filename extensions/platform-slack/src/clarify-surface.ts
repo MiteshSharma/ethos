@@ -17,9 +17,14 @@
 // Mirrors `TelegramClarifySurface`. See plan/phases/tool_clarity_plan.md
 // Surface 5.
 
-import { type ClarifyBridge, clarifyPromptText } from '@ethosagent/core';
+import { type ClarifyBridge, clarifyPromptText, isClarifyAnswerableOn } from '@ethosagent/core';
 import type { ClarifyResponse, ClarifyStore, PendingClarify } from '@ethosagent/types';
-import { clarifyModalView, clarifyPendingBlocks, clarifyResolvedBlocks } from './blocks/clarify';
+import {
+  clarifyModalView,
+  clarifyPendingBlocks,
+  clarifyResolvedBlocks,
+  clarifyTakeoverNoticeView,
+} from './blocks/clarify';
 import type { ClarifyActionEvent, ClarifyModalSubmissionEvent } from './interactions/clarify';
 
 const SURFACE: 'slack' = 'slack';
@@ -129,6 +134,11 @@ export class SlackClarifySurface {
       // `present()` only fires once a row is actually presented (D2), at
       // which point this is always set — the fallback is defensive only.
       defaultDeadlineAt: row.defaultDeadlineAt ?? row.createdAt,
+      // No Answer button for a `browser_takeover`: the modal behind it took
+      // free text, and `ClarifyBridge.respond()` refuses the submission, so
+      // the whole gesture was an invitation to do nothing. Cancel survives,
+      // so the browser lock is still releasable from here.
+      answerable: isClarifyAnswerableOn(row, SURFACE),
     });
 
     const result = await this.adapter.postClarifyCard({
@@ -219,14 +229,20 @@ export class SlackClarifySurface {
     }
 
     if (evt.kind === 'open-modal') {
-      await this.adapter.openClarifyModal({
-        triggerId: evt.triggerId,
-        view: clarifyModalView({
-          requestId: row.requestId,
-          question: row.question,
-          ...(row.default !== undefined ? { default: row.default } : {}),
-        }),
-      });
+      // A takeover card no longer draws an Answer button, but one posted
+      // before this shipped can still be sitting in a channel or on the Home
+      // tab. Opening the answer form for it would walk the user through
+      // typing and submitting an answer the bridge then refuses in silence —
+      // show what CAN be done instead. The notice view has no submit button,
+      // so no `view_submission` follows it.
+      const view = isClarifyAnswerableOn(row, SURFACE)
+        ? clarifyModalView({
+            requestId: row.requestId,
+            question: row.question,
+            ...(row.default !== undefined ? { default: row.default } : {}),
+          })
+        : clarifyTakeoverNoticeView({ question: clarifyPromptText(row) });
+      await this.adapter.openClarifyModal({ triggerId: evt.triggerId, view });
       return;
     }
 
@@ -262,6 +278,21 @@ export class SlackClarifySurface {
     if (!row || row.surfaceType !== SURFACE) return;
     if (row.surfaceContext.botKey !== this.adapter.botKey) return;
     if (!gateAnswerer(row, evt.userId)) return;
+    if (!isClarifyAnswerableOn(row, SURFACE)) {
+      // Only reachable from an answer modal opened before this surface
+      // stopped offering one — `handleAction` now shows the close-only notice
+      // view for a takeover instead. `ClarifyBridge.respond()` would refuse
+      // this anyway; stopping here keeps the refusal at the surface that
+      // knows why. A `view_submission` carries no `trigger_id` and no
+      // channel, so there is no way to answer the submitter from here; the
+      // audit row is what remains.
+      this.observability?.recordSafetyBlock({
+        code: 'slack.clarify.takeover_not_answerable',
+        cause: 'a browser_takeover cannot be handed back from Slack',
+        details: { requestId: evt.requestId, userId: evt.userId },
+      });
+      return;
+    }
     this.rememberResponder(row.requestId, evt.userId);
     this.bridge.recordPresence(SURFACE, {
       chatId: row.surfaceContext.chatId,

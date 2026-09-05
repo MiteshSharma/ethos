@@ -232,6 +232,32 @@ async function resolveSenderName(
  *     answering `mention_only` default.
  *   - a valid override        → its mode (unchanged).
  */
+/**
+ * May the bot put VISIBLE content into this channel?
+ *
+ * `observe` is documented as "the bot reads the channel and says nothing in
+ * it", and that promise is not a property of the message path — every handler
+ * that can post is bound by it. Three non-message handlers can put content in
+ * a room (the `member_joined_channel` greeting, `/ethos ask`, and a
+ * `link_shared` unfurl), and each one used to decide for itself. This is the
+ * single question they now ask, answered by the same `evaluateChannelMode` the
+ * message path uses, so a Slack-local copy of the matrix cannot drift from it.
+ *
+ * `isGroupMention: true` is deliberate: on all three paths a human has already
+ * addressed the bot directly — invited it, invoked a slash command, pasted one
+ * of its links — so the only open question is whether the ROOM permits a reply
+ * at all. `observe` answers no. So does a mode string this build cannot read,
+ * by the same fail-closed reasoning `evaluateChannelMode` documents: an
+ * unreadable mode is as likely to be a newer silent one as a typo, and a room
+ * that may have asked for silence does not get a post out of our uncertainty.
+ * The operator still learns the unreadable string verbatim from the surfaces
+ * the room cannot see — `/ethos channel-mode show`, `/ethos help`, the refusal
+ * `/ethos ask` returns, and the App Home tab.
+ */
+export function canSpeakInChannel(channelMode: string): boolean {
+  return evaluateChannelMode({ isDm: false, isGroupMention: true, channelMode }).shouldReply;
+}
+
 export function resolveChannelMode(channel: string, ctx: TriageContext): string {
   // `.mode` — the shared store indexes `{ mode, regexPattern? }`, where
   // Slack's own copy indexed a bare mode.

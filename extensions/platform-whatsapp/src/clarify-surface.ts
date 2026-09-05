@@ -23,7 +23,7 @@
 //
 // See plan/phases/tool_clarity_plan.md and the Telegram surface it mirrors.
 
-import { type ClarifyBridge, clarifyPromptText } from '@ethosagent/core';
+import { type ClarifyBridge, clarifyPromptText, isClarifyAnswerableOn } from '@ethosagent/core';
 import type {
   ClarifyResponse,
   ClarifyStore,
@@ -157,6 +157,14 @@ export class WhatsAppClarifySurface {
       return { requestId: target.requestId, answer: '', source: 'cancel' };
     }
 
+    // A takeover is not answerable here — and on WhatsApp the free-form branch
+    // below matched ANY message in the chat, so this was the widest of the
+    // three holes. Null, not a response the bridge would refuse: a correlated
+    // message is swallowed before the normal pipeline, so refusing later would
+    // make an unrelated message vanish with no reply at all. `/cancel` above
+    // still resolves it — the browser lock has to be releasable from here.
+    if (!isClarifyAnswerableOn(target, SURFACE)) return null;
+
     const options = target.options ?? [];
     if (options.length === 0) {
       return { requestId: target.requestId, answer: text, source: 'user' };
@@ -211,7 +219,10 @@ function formatPrompt(row: PendingClarify): string {
   // D3 — a `browser_takeover` row renders as the text form; WhatsApp cannot
   // hand a browser back itself. An ordinary question passes through unchanged.
   const lines: string[] = [clarifyPromptText(row), ''];
-  if (row.default !== undefined) {
+  if (!isClarifyAnswerableOn(row, SURFACE)) {
+    // Don't tell someone to answer a prompt this chat will refuse to answer.
+    lines.push(`waiting up to ${minutes}m — reply /cancel to give up`);
+  } else if (row.default !== undefined) {
     lines.push(`default in ${minutes}m: ${row.default}`);
   } else {
     lines.push(`no default — answer within ${minutes}m or reply /cancel`);

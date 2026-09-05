@@ -67,6 +67,17 @@ export interface ClarifyPendingInput {
   options?: string[];
   default?: string;
   defaultDeadlineAt: string;
+  /**
+   * Whether this card may carry an ANSWER affordance. Default `true`.
+   *
+   * `false` for a `browser_takeover` (the caller decides — see
+   * `isClarifyAnswerableOn` in `@ethosagent/core`): the free-form branch below
+   * otherwise draws an "Answer" button that opens a text modal, and whatever
+   * someone typed into it told the agent the login it is parked on had been
+   * completed. Cancel stays either way — giving up is the one thing Discord
+   * CAN do about a browser it cannot see.
+   */
+  answerable?: boolean;
 }
 
 export interface ClarifyPendingMessage {
@@ -82,12 +93,15 @@ export function clarifyPendingMessage(input: ClarifyPendingInput): ClarifyPendin
     lines.push(
       `_default by <t:${epoch(input.defaultDeadlineAt)}:t>: \`${truncate(escapeMd(input.default), LABEL_MAX)}\`_`,
     );
+  } else if (input.answerable === false) {
+    // Don't tell someone to answer a card this surface will refuse to answer.
+    lines.push(`_waiting until <t:${epoch(input.defaultDeadlineAt)}:t> — cancel to give up_`);
   } else {
     lines.push(`_no default — answer by <t:${epoch(input.defaultDeadlineAt)}:t> or cancel_`);
   }
   return {
     content: lines.join('\n'),
-    components: buildActionRows(input.requestId, input.options),
+    components: buildActionRows(input.requestId, input.options, input.answerable !== false),
   };
 }
 
@@ -174,28 +188,32 @@ export function clarifyEntryComponents(row: PendingClarify): APIActionRow[] {
 // Helpers
 // ---------------------------------------------------------------------------
 
-function buildActionRows(requestId: string, options: string[] | undefined): APIActionRow[] {
+function buildActionRows(
+  requestId: string,
+  options: string[] | undefined,
+  answerable = true,
+): APIActionRow[] {
   const rows: APIActionRow[] = [];
   const opts = (options ?? []).filter((o) => o.length > 0);
   if (opts.length === 0) {
-    // Free-form: Answer + Cancel.
-    rows.push({
-      type: COMPONENT_TYPE.actionRow,
-      components: [
-        {
-          type: COMPONENT_TYPE.button,
-          style: BUTTON_STYLE.primary,
-          label: 'Answer',
-          custom_id: `${CLARIFY_BUTTON_PREFIX}:${CLARIFY_ANSWER_KIND}:${requestId}`,
-        },
-        {
-          type: COMPONENT_TYPE.button,
-          style: BUTTON_STYLE.danger,
-          label: 'Cancel',
-          custom_id: `${CLARIFY_BUTTON_PREFIX}:${CLARIFY_CANCEL_KIND}:${requestId}`,
-        },
-      ],
+    // Free-form: Answer + Cancel — or Cancel alone when the card is not
+    // answerable on this surface (see `ClarifyPendingInput.answerable`).
+    const buttons: APIButton[] = [];
+    if (answerable) {
+      buttons.push({
+        type: COMPONENT_TYPE.button,
+        style: BUTTON_STYLE.primary,
+        label: 'Answer',
+        custom_id: `${CLARIFY_BUTTON_PREFIX}:${CLARIFY_ANSWER_KIND}:${requestId}`,
+      });
+    }
+    buttons.push({
+      type: COMPONENT_TYPE.button,
+      style: BUTTON_STYLE.danger,
+      label: 'Cancel',
+      custom_id: `${CLARIFY_BUTTON_PREFIX}:${CLARIFY_CANCEL_KIND}:${requestId}`,
     });
+    rows.push({ type: COMPONENT_TYPE.actionRow, components: buttons });
     return rows;
   }
   // Discord caps at 5 buttons per row, 5 rows per message — so 25 total.

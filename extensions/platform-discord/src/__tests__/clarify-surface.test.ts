@@ -431,6 +431,16 @@ describe('DiscordClarifySurface — onResolved edits the card in place', () => {
 
 // D3 — a `browser_takeover` cannot be answered on Discord: the browser is open
 // on the machine running Ethos and the hand-back button lives in the web chat.
+//
+// This suite used to assert only the card's TEXT. The card itself contradicted
+// it: a takeover carries no `options`, and no options was the free-form shape,
+// so the card came with an "Answer" button that opened a text modal and
+// resolved the clarify with `source: 'user'` — which
+// `browser_request_takeover` reports to the agent as `handed_back: true`.
+//
+// Revert `answerable` in `../clarify-blocks` / `../clarify-surface` and/or the
+// `acceptsUserAnswer` gate in `ClarifyBridge.respond()` and the middle three
+// tests here fail.
 describe('DiscordClarifySurface — browser takeover (D3)', () => {
   const TAKEOVER = {
     kind: 'browser_takeover' as const,
@@ -441,32 +451,152 @@ describe('DiscordClarifySurface — browser takeover (D3)', () => {
     },
   };
 
-  it('posts the text form with the host and the hand-back link', async () => {
+  /** Button labels on the posted card, flattened across action rows. */
+  function labelsOf(components: unknown[]): string[] {
+    const out: string[] = [];
+    for (const row of components) {
+      if (typeof row !== 'object' || row === null) continue;
+      const inner = (row as { components?: unknown[] }).components ?? [];
+      for (const btn of inner) {
+        const label = (btn as { label?: unknown }).label;
+        if (typeof label === 'string') out.push(label);
+      }
+    }
+    return out;
+  }
+
+  it('posts the text form with the host and the hand-back link, and no Answer button', async () => {
     const { adapter, store, surface } = makeHarness();
     const row = makeRow(TAKEOVER);
     await store.add(row);
     await surface.present(row);
 
-    const content = adapter.posted[0]?.content ?? '';
-    expect(content).toContain('accounts.example.com');
-    expect(content).toContain('https://ethos.local/chat/sess-1');
-    expect(content).toContain('the browser window is open on the machine running Ethos');
+    const card = adapter.posted[0];
+    expect(card?.content ?? '').toContain('accounts.example.com');
+    expect(card?.content ?? '').toContain('https://ethos.local/chat/sess-1');
+    expect(card?.content ?? '').toContain(
+      'the browser window is open on the machine running Ethos',
+    );
+    // Cancel only — giving up is the one thing Discord can do about a browser
+    // it cannot see.
+    expect(labelsOf(card?.components ?? [])).toEqual(['Cancel']);
+    // And the card does not invite an answer it will refuse.
+    expect(card?.content ?? '').not.toContain('answer by');
   });
 
-  it('keeps the same head when the card updates to its resolved state', async () => {
+  it('does not resolve when the Answer/modal path is driven anyway', async () => {
     const { adapter, bridge, store, surface } = makeHarness();
+    await store.add(
+      makeRow({ ...TAKEOVER, surfaceContext: { chatId: 'C1', botKey: BOT_KEY, messageId: 'M1' } }),
+    );
+    let resolved: ClarifyResponse | null = null;
+    bridge.onResolved((_r, resp) => {
+      resolved = resp;
+    });
+    void surface;
+
+    // The real interaction path, end to end: open the modal, submit text.
+    adapter.fireInteraction({
+      interactionId: 'I1',
+      interactionToken: 'TOK',
+      event: {
+        kind: 'open-modal',
+        requestId: 'req-1',
+        userId: 'U-orig',
+        channelId: 'C1',
+        messageId: 'M1',
+      },
+    });
+    await new Promise((r) => setImmediate(r));
+    adapter.fireInteraction({
+      interactionId: 'I2',
+      interactionToken: 'TOK',
+      event: {
+        kind: 'modal-submit',
+        requestId: 'req-1',
+        answer: 'ok logged in',
+        userId: '123456789012345678',
+        channelId: 'C1',
+      },
+    });
+    await new Promise((r) => setImmediate(r));
+
+    expect(resolved).toBeNull();
+    expect(adapter.updated).toHaveLength(0);
+    // Still open, with no answer recorded on it.
+    expect((await store.get('req-1'))?.answer).toBeUndefined();
+  });
+
+  it('does not resolve even if a response reaches the bridge anyway', async () => {
+    const { bridge, store, surface } = makeHarness();
     void surface;
     await store.add(
-      makeRow({
-        ...TAKEOVER,
-        surfaceContext: { chatId: 'C1', botKey: BOT_KEY, messageId: 'M1' },
-      }),
+      makeRow({ ...TAKEOVER, surfaceContext: { chatId: 'C1', botKey: BOT_KEY, messageId: 'M1' } }),
     );
+    let resolved: ClarifyResponse | null = null;
+    bridge.onResolved((_r, resp) => {
+      resolved = resp;
+    });
 
     await bridge.respond({ requestId: 'req-1', answer: 'handed back', source: 'user' });
 
+    expect(resolved).toBeNull();
+    expect((await store.get('req-1'))?.answer).toBeUndefined();
+  });
+
+  // The takeover must still RESOLVE, or `browser_request_takeover`'s session
+  // lock never clears — and the card must still edit to the same head.
+  it('still cancels from the card, keeping the same head', async () => {
+    const { adapter, bridge, store, surface } = makeHarness();
+    void surface;
+    void bridge;
+    await store.add(
+      makeRow({ ...TAKEOVER, surfaceContext: { chatId: 'C1', botKey: BOT_KEY, messageId: 'M1' } }),
+    );
+
+    adapter.fireInteraction({
+      interactionId: 'I3',
+      interactionToken: 'TOK',
+      event: {
+        kind: 'cancel',
+        requestId: 'req-1',
+        userId: 'U-orig',
+        channelId: 'C1',
+        messageId: 'M1',
+      },
+    });
+    await new Promise((r) => setImmediate(r));
+
     expect(adapter.updated).toHaveLength(1);
     expect(adapter.updated[0]?.content).toContain('accounts.example.com');
+    expect(adapter.updated[0]?.content).toContain('cancelled');
+  });
+
+  it('still answers an ordinary free-form question on the same path (control)', async () => {
+    const { adapter, bridge, store, surface } = makeHarness();
+    void surface;
+    await store.add(
+      makeRow({ surfaceContext: { chatId: 'C1', botKey: BOT_KEY, messageId: 'M1' } }),
+    );
+    let resolved: ClarifyResponse | null = null;
+    bridge.onResolved((_r, resp) => {
+      resolved = resp;
+    });
+
+    adapter.fireInteraction({
+      interactionId: 'I4',
+      interactionToken: 'TOK',
+      event: {
+        kind: 'modal-submit',
+        requestId: 'req-1',
+        answer: 'postgres',
+        userId: '123456789012345678',
+        channelId: 'C1',
+      },
+    });
+    await new Promise((r) => setImmediate(r));
+
+    expect(resolved).toMatchObject({ answer: 'postgres', source: 'user' });
   });
 
   it('leaves an ordinary question exactly as it was', async () => {
@@ -475,5 +605,6 @@ describe('DiscordClarifySurface — browser takeover (D3)', () => {
     await store.add(row);
     await surface.present(row);
     expect(adapter.posted[0]?.content ?? '').toContain('Which database?');
+    expect(labelsOf(adapter.posted[0]?.components ?? [])).toEqual(['Answer', 'Cancel']);
   });
 });
