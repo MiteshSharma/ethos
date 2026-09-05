@@ -64,6 +64,10 @@ interface HarnessOptions {
   defaultMode?: ChannelMode;
   cache?: AttachmentCache;
   storage?: Storage;
+  /** Absent = `false`, which is what every mode test above wants. */
+  denyUnknown?: boolean;
+  allowedJids?: string[];
+  denyMessage?: string;
 }
 
 /**
@@ -75,7 +79,9 @@ async function harness(opts: HarnessOptions = {}) {
   const adapter = new WhatsAppAdapter({
     sessionDir: '/tmp/ethos-wa-channel-mode-test',
     botKey: 'bot1',
-    denyUnknown: false,
+    denyUnknown: opts.denyUnknown ?? false,
+    ...(opts.allowedJids ? { allowedJids: opts.allowedJids } : {}),
+    ...(opts.denyMessage ? { denyMessage: opts.denyMessage } : {}),
     ...(opts.defaultMode ? { defaultMode: opts.defaultMode } : {}),
     ...(opts.cache ? { cache: opts.cache } : {}),
     ...(opts.storage ? { storage: opts.storage, whatsappDir: 'whatsapp' } : {}),
@@ -104,6 +110,15 @@ function textMessage(jid: string, text: string): RawWhatsAppMessage {
   return { key: base(jid), message: { conversation: text }, messageTimestamp: 1700000000 };
 }
 
+/** A group message from somebody who is NOT on the allowlist. */
+function textMessageFrom(jid: string, text: string, participant: string): RawWhatsAppMessage {
+  return {
+    key: { remoteJid: jid, fromMe: false, id: 'wa-1', participant },
+    message: { conversation: text },
+    messageTimestamp: 1700000000,
+  };
+}
+
 function mentionChipMessage(jid: string, text: string, mentioned: string[]): RawWhatsAppMessage {
   return {
     key: base(jid),
@@ -122,6 +137,11 @@ function captionedImage(jid: string, caption: string): RawWhatsAppMessage {
 
 function reactions(): Array<{ jid: string; content: Record<string, unknown> }> {
   return sent.filter((s) => 'react' in s.content);
+}
+
+/** Everything the adapter actually SAID — the deny notice included. */
+function texts(): Array<{ jid: string; content: Record<string, unknown> }> {
+  return sent.filter((s) => 'text' in s.content);
 }
 
 beforeEach(() => {
@@ -436,5 +456,89 @@ describe('sentAt', () => {
     msg.messageTimestamp = undefined;
     await deliver(msg);
     expect(received[0]?.sentAt).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The allowlist and the mode gate
+// ---------------------------------------------------------------------------
+
+/**
+ * The allowlist used to run FIRST, and it sent `denyMessage` to the GROUP jid.
+ * In an observed group every participant is non-allowlisted by definition, so
+ * the bot replied to every message in the one mode whose whole promise is that
+ * it never replies to any. These drive the real `messages.upsert` handler and
+ * assert on what reached the socket, because the bug was invisible from the
+ * return value — the envelope was dropped either way.
+ */
+describe('the allowlist governs who may command, not who may be observed', () => {
+  const STRANGER = '15558888888@s.whatsapp.net';
+  const ALLOWED = '15559999999';
+  const DENY = 'sorry, I only talk to my owner';
+
+  function guarded(defaultMode: ChannelMode) {
+    return harness({
+      defaultMode,
+      denyUnknown: true,
+      allowedJids: [ALLOWED],
+      denyMessage: DENY,
+    });
+  }
+
+  it('says nothing to a stranger in an observed group', async () => {
+    const { deliver } = await guarded('observe');
+
+    await deliver(textMessageFrom(GROUP, 'rebar delivered, pour is thursday', STRANGER));
+
+    // Nothing at all reached the socket: no deny notice, no receipt reaction.
+    expect(sent).toEqual([]);
+  });
+
+  it('records the stranger anyway, because that is what observe is for', async () => {
+    // The operator set this room to `observe` to watch people who will never
+    // be on the allowlist. Gating the RECORDING on it would leave the digest
+    // reading nothing but the owner's own messages.
+    const { received, deliver } = await guarded('observe');
+
+    await deliver(textMessageFrom(GROUP, 'rebar delivered, pour is thursday', STRANGER));
+
+    expect(received).toHaveLength(1);
+    expect(received[0]?.recordOnly).toBe(true);
+    expect(received[0]?.text).toBe('rebar delivered, pour is thursday');
+  });
+
+  it('still denies a stranger in a group it answers', async () => {
+    const { received, deliver } = await guarded('all');
+
+    await deliver(textMessageFrom(GROUP, 'hey bot, run this', STRANGER));
+
+    expect(texts()).toHaveLength(1);
+    expect(texts()[0]?.jid).toBe(GROUP);
+    expect(texts()[0]?.content.text).toBe(DENY);
+    expect(received).toHaveLength(0);
+  });
+
+  it('still denies a stranger in a DM', async () => {
+    const { received, deliver } = await guarded('observe');
+
+    // A DM outranks the mode (`evaluateChannelMode` answers every DM), so the
+    // allowlist is consulted and the refusal is exactly what it always was.
+    await deliver(textMessage(STRANGER, 'let me in'));
+
+    expect(texts()).toHaveLength(1);
+    expect(texts()[0]?.jid).toBe(STRANGER);
+    expect(texts()[0]?.content.text).toBe(DENY);
+    expect(received).toHaveLength(0);
+  });
+
+  it('still answers an allowlisted sender in a group it answers', async () => {
+    const { received, deliver } = await guarded('all');
+
+    await deliver(textMessage(GROUP, 'status?'));
+
+    expect(texts()).toEqual([]);
+    expect(received).toHaveLength(1);
+    expect(received[0]?.recordOnly).toBe(false);
+    expect(reactions()).toHaveLength(1);
   });
 });

@@ -1435,3 +1435,183 @@ describe('the run lock', () => {
     await expect(stat(lockPath())).rejects.toThrow();
   });
 });
+
+// ---------------------------------------------------------------------------
+// One lane's failure
+// ---------------------------------------------------------------------------
+
+/**
+ * A lane's turn used to run outside any try/catch, and so did the loop around
+ * it — with the single watermark write AFTER the loop. One provider throw on
+ * lane 2 therefore threw away lane 1's cursor, so a digest already summarised,
+ * paid for and delivered to the owner was re-summarised and RE-SENT on the next
+ * run; and lane 3 was never reached, on that run or on any later one if the
+ * failure was deterministic.
+ */
+describe('a lane that throws', () => {
+  const WATERMARK_PATH = '/ethos/channel-digest-watermarks.json';
+  const LANES = ['room-a', 'room-b', 'room-c'];
+
+  /** Summarises every lane except one, which throws the way a provider does. */
+  function loopFailing(chatId: string) {
+    const prompts: string[] = [];
+    const completeDirect = vi.fn(async function* (messages: Array<{ content: string }>) {
+      const prompt = messages[0]?.content ?? '';
+      prompts.push(prompt);
+      // The prompt header is `Chat: <platform> <chatId>`.
+      if (prompt.includes(`Chat: telegram ${chatId}`)) throw new Error('provider exploded');
+      yield { type: 'text_delta' as const, text: 'three lines of summary' };
+      yield { type: 'done' as const, finishReason: 'end_turn' as const };
+    });
+    return {
+      prompts,
+      loop: {
+        run: vi.fn(),
+        completeDirect,
+        getAvailableTools: () => [],
+      } as unknown as AgentLoop,
+    };
+  }
+
+  async function house(): Promise<InMemoryStorage> {
+    const storage = new InMemoryStorage();
+    await storage.mkdir('/ethos');
+    return storage;
+  }
+
+  function threeLanes(byLane: Record<string, ChannelTranscriptMessage[]>) {
+    return makeStore(
+      LANES.map((chatId) => lane({ laneKey: `telegram:bot-a:${chatId}`, chatId })),
+      byLane,
+    );
+  }
+
+  function oneEach(): Record<string, ChannelTranscriptMessage[]> {
+    return Object.fromEntries(
+      LANES.map((chatId) => [
+        `telegram:bot-a:${chatId}`,
+        [message({ laneKey: `telegram:bot-a:${chatId}`, text: `news from ${chatId}` })],
+      ]),
+    );
+  }
+
+  function run(
+    storage: InMemoryStorage,
+    byLane: Record<string, ChannelTranscriptMessage[]>,
+    failing = 'room-b',
+    over: Partial<ChannelDigestDeps> = {},
+  ) {
+    const { loop, prompts } = loopFailing(failing);
+    const deps = makeDeps({
+      transcript: threeLanes(byLane),
+      bots: [{ botKey: 'bot-a', loop }],
+      watermarks: { storage, path: WATERMARK_PATH },
+      ...over,
+    });
+    return { deps, prompts };
+  }
+
+  async function marks(storage: InMemoryStorage): Promise<Record<string, { id: number }>> {
+    const raw = await storage.read(WATERMARK_PATH);
+    return raw === null ? {} : JSON.parse(raw);
+  }
+
+  it('does not discard the watermark of a lane that already succeeded', async () => {
+    const storage = await house();
+    const { deps } = run(storage, oneEach());
+
+    await runChannelDigest(deps);
+
+    // Lane a was summarised, delivered AND consumed — the failure after it did
+    // not take its cursor down with it.
+    expect((await marks(storage))['telegram:bot-a:room-a']).toEqual({ id: 1 });
+    expect(deps.sends.map((s) => s.chatId)).toEqual(['owner-1', 'owner-1']);
+  });
+
+  it('still digests the lanes ordered after it', async () => {
+    const storage = await house();
+    const { deps, prompts } = run(storage, oneEach());
+
+    const report = await runChannelDigest(deps);
+
+    expect(prompts).toHaveLength(3);
+    expect(prompts[2]).toContain('news from room-c');
+    expect(report).toMatchObject({ summarised: 2, deliveredToOwner: 2, failed: 1 });
+    expect((await marks(storage))['telegram:bot-a:room-c']).toEqual({ id: 1 });
+  });
+
+  it('leaves its own lane unconsumed', async () => {
+    const storage = await house();
+    const { deps } = run(storage, oneEach());
+
+    await runChannelDigest(deps);
+
+    expect((await marks(storage))['telegram:bot-a:room-b']).toBeUndefined();
+  });
+
+  it('is reported rather than swallowed', async () => {
+    const storage = await house();
+    const { deps } = run(storage, oneEach());
+
+    const report = await runChannelDigest(deps);
+
+    const block = deps.blocks.find((b) => b.code === 'channel.digest_lane_failed');
+    expect(block?.cause).toBe('provider exploded');
+    expect(block?.details?.laneKey).toBe('telegram:bot-a:room-b');
+    // And in the line the cron run-output file prints, which must not read as
+    // a clean run.
+    expect(summarizeChannelDigest(report)).toContain('1 failed');
+  });
+
+  it('says nothing about failures on a clean run', async () => {
+    const storage = await house();
+    const { deps } = run(storage, oneEach(), 'no-such-room');
+
+    const report = await runChannelDigest(deps);
+
+    expect(report.failed).toBe(0);
+    expect(summarizeChannelDigest(report)).not.toContain('failed');
+  });
+
+  it('does not starve the lanes behind it on the next run', async () => {
+    const storage = await house();
+    const byLane = oneEach();
+
+    await runChannelDigest(run(storage, byLane).deps);
+
+    // The failing lane fails the same way again; room-c has said something new.
+    byLane['telegram:bot-a:room-c']?.push(
+      message({ laneKey: 'telegram:bot-a:room-c', text: 'the pour finished' }),
+    );
+    const second = run(storage, byLane, 'room-b', { now: () => Date.UTC(2026, 8, 4, 13, 0) });
+    const report = await runChannelDigest(second.deps);
+
+    // Room-c was digested again — its new message only, not the one already
+    // consumed — while room-b went on failing.
+    expect(report).toMatchObject({ summarised: 1, empty: 1, failed: 1 });
+    expect(second.deps.sends).toHaveLength(1);
+    expect(second.deps.sends[0]?.text).toContain('room-c');
+    const roomC = second.prompts.find((p) => p.includes('Chat: telegram room-c')) ?? '';
+    expect(roomC).toContain('the pour finished');
+    expect(roomC).not.toContain('news from room-c');
+    expect((await marks(storage))['telegram:bot-a:room-c']).toEqual({ id: 2 });
+  });
+
+  it('does not let a delivery failure elsewhere advance a watermark either', async () => {
+    // The preserved rule: the cursor advances only on a CONFIRMED delivery.
+    // Isolation must not quietly turn "the send said no" into "close enough".
+    const storage = await house();
+    const { deps } = run(storage, oneEach(), 'room-b', {
+      sendVia: async (_botKey, _chatId, text) =>
+        text.includes('room-c') ? { ok: false, error: 'no chat' } : { ok: true },
+    });
+
+    const report = await runChannelDigest(deps);
+
+    expect(report).toMatchObject({ deliveredToOwner: 1, undelivered: 1, failed: 1 });
+    const written = await marks(storage);
+    expect(written['telegram:bot-a:room-a']).toEqual({ id: 1 });
+    expect(written['telegram:bot-a:room-b']).toBeUndefined();
+    expect(written['telegram:bot-a:room-c']).toBeUndefined();
+  });
+});

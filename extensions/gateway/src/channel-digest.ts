@@ -421,6 +421,12 @@ export interface ChannelDigestReport {
   /** Digests the owner did not get — not confirmed, or refused. The feed still has them. */
   undelivered: number;
   /**
+   * Lanes whose turn or delivery THREW. Distinct from `undelivered`, which is
+   * a delivery that answered no: this is a lane that did not finish. Its
+   * cursor is untouched, so the next run reads the same messages again.
+   */
+  failed: number;
+  /**
    * Set when the run did NO work because another digest run held the lock.
    * Every other count is then zero and means nothing — this field is what
    * distinguishes "there was nothing to say" from "somebody else is saying it".
@@ -435,9 +441,14 @@ export function summarizeChannelDigest(report: ChannelDigestReport): string {
   if (report.skippedReason !== undefined) {
     return `Channel digest skipped — ${report.skippedReason}`;
   }
+  // The failure count is appended only when there is one. The four counts above
+  // describe work the run DID; this one describes work it could not do, and a
+  // `0 failed` on every healthy run is how an eye learns to skip the field.
+  const failed = report.failed > 0 ? `, ${report.failed} failed` : '';
   return (
     `Channel digest: ${report.summarised} lane(s) summarised, ${report.empty} with nothing ` +
-    `to report, ${report.deliveredToOwner} delivered to the owner, ${report.undelivered} undelivered`
+    `to report, ${report.deliveredToOwner} delivered to the owner, ` +
+    `${report.undelivered} undelivered${failed}`
   );
 }
 
@@ -487,6 +498,9 @@ export function summarizeChannelDigest(report: ChannelDigestReport): string {
  *     chat, an in-app feed that did not confirm, a crash mid-run, or a process
  *     killed before the write all leave the cursor where it was, and the next
  *     run re-digests the same messages;
+ *   * a lane whose turn or delivery THROWS is counted, reported and left
+ *     unconsumed, and the lanes around it are untouched — one room's failure
+ *     is not the run's. See the try/catch in `digestWatchedLanes`;
  *   * the cadence is free. An hourly schedule digests each message once
  *     instead of twenty-four times, and a weekly or long-delayed run reaches
  *     back to the last delivery however long ago it was.
@@ -519,6 +533,7 @@ export async function runChannelDigest(
     empty: 0,
     deliveredToOwner: 0,
     undelivered: 0,
+    failed: 0,
   };
   // Nothing to read, so nothing to serialise against — do not churn the lock.
   if (!deps.transcript) return idle;
@@ -555,6 +570,7 @@ async function digestWatchedLanes(
     empty: 0,
     deliveredToOwner: 0,
     undelivered: 0,
+    failed: 0,
   };
   if (!deps.transcript) return report;
 
@@ -593,116 +609,141 @@ async function digestWatchedLanes(
     const bot = byBotKey.get(lane.botKey);
     if (!bot) continue;
 
-    // Everything past the cursor, and nothing else. No floor, no window, no
-    // post-filter — see CONSUMPTION SEMANTICS above.
-    const cursor = watermarks[lane.laneKey] ?? 0;
-    const page = await deps.transcript.readSince(lane.laneKey, cursor, { limit });
-    if (page.messages.length === 0) {
-      report.empty += 1;
-      continue;
-    }
+    // ISOLATION. One lane's failure is one lane's failure. Without this the
+    // first provider throw aborted the whole run: lanes already summarised,
+    // paid for and DELIVERED lost their cursors with the single write below,
+    // so the next run re-summarised and RE-SENT them — and every lane ordered
+    // after the failing one was never digested at all. A lane that fails
+    // deterministically would have starved the rest of the deployment
+    // silently, and `maxMessagesPerLane` caps a message COUNT, not bytes, so
+    // strangers in one watched room could arrange that for every other room.
+    //
+    // Isolation is the whole of the ordering fix too: every lane is attempted
+    // on every run regardless of what the lane before it did, so there is no
+    // queue position to be starved from and nothing to rotate.
+    try {
+      // Everything past the cursor, and nothing else. No floor, no window, no
+      // post-filter — see CONSUMPTION SEMANTICS above.
+      const cursor = watermarks[lane.laneKey] ?? 0;
+      const page = await deps.transcript.readSince(lane.laneKey, cursor, { limit });
+      if (page.messages.length === 0) {
+        report.empty += 1;
+        continue;
+      }
 
-    // Consumed in ingestion order, SHOWN in the order things were said: a
-    // message the platform delivered late still belongs where its clock time
-    // puts it in a transcript somebody reads.
-    const fresh = [...page.messages].sort((a, b) => a.sentAt - b.sentAt);
-    const nextCursor = page.messages.reduce((max, m) => (m.id > max ? m.id : max), cursor);
+      // Consumed in ingestion order, SHOWN in the order things were said: a
+      // message the platform delivered late still belongs where its clock time
+      // puts it in a transcript somebody reads.
+      const fresh = [...page.messages].sort((a, b) => a.sentAt - b.sentAt);
+      const nextCursor = page.messages.reduce((max, m) => (m.id > max ? m.id : max), cursor);
 
-    const turn = await runLaneTurn(
-      bot.loop,
-      buildDigestPrompt({
-        platform: lane.platform,
-        chatId: lane.chatId,
-        messages: fresh,
-        omittedCount: page.omittedCount,
-        windowStart: fresh[0]?.sentAt ?? now,
-      }),
-    );
-    if (turn.text === '') {
-      report.empty += 1;
-      continue;
-    }
-    report.summarised += 1;
-
-    const text = formatDigest({
-      platform: lane.platform,
-      chatId: lane.chatId,
-      body: turn.text,
-      shown: fresh.length,
-      omittedCount: page.omittedCount,
-      spentUsd: turn.spentUsd,
-      costWarnUsd,
-    });
-
-    // The feed always gets it, whatever `deliverTo` says, so an unreachable
-    // owner DM leaves the digest visible somewhere rather than nowhere.
-    const feed = deps.notify
-      ? await deps.notify({
-          laneKey: lane.laneKey,
+      const turn = await runLaneTurn(
+        bot.loop,
+        buildDigestPrompt({
           platform: lane.platform,
           chatId: lane.chatId,
-          botKey: lane.botKey,
-          text,
-        })
-      : { ok: false, error: 'no in-app notification sink is wired' };
+          messages: fresh,
+          omittedCount: page.omittedCount,
+          windowStart: fresh[0]?.sentAt ?? now,
+        }),
+      );
+      if (turn.text === '') {
+        report.empty += 1;
+        continue;
+      }
+      report.summarised += 1;
 
-    if (deliverTo !== 'owner') {
-      // The feed is the whole delivery in this mode, so its CONFIRMATION — not
-      // the fact that the call returned — is what consumes the lane.
-      if (feed.ok) {
+      const text = formatDigest({
+        platform: lane.platform,
+        chatId: lane.chatId,
+        body: turn.text,
+        shown: fresh.length,
+        omittedCount: page.omittedCount,
+        spentUsd: turn.spentUsd,
+        costWarnUsd,
+      });
+
+      // The feed always gets it, whatever `deliverTo` says, so an unreachable
+      // owner DM leaves the digest visible somewhere rather than nowhere.
+      const feed = deps.notify
+        ? await deps.notify({
+            laneKey: lane.laneKey,
+            platform: lane.platform,
+            chatId: lane.chatId,
+            botKey: lane.botKey,
+            text,
+          })
+        : { ok: false, error: 'no in-app notification sink is wired' };
+
+      if (deliverTo !== 'owner') {
+        // The feed is the whole delivery in this mode, so its CONFIRMATION — not
+        // the fact that the call returned — is what consumes the lane.
+        if (feed.ok) {
+          watermarks[lane.laneKey] = nextCursor;
+          watermarksChanged = true;
+        } else {
+          report.undelivered += 1;
+          deps.observability?.recordSafetyBlock({
+            code: 'channel.digest_undelivered',
+            cause: feed.error ?? 'the in-app feed did not confirm the digest',
+            details: { platform: lane.platform, botKey: lane.botKey, laneKey: lane.laneKey },
+          });
+        }
+        continue;
+      }
+
+      const ownerChatId = deps.ownerChatId(lane.platform);
+      if (!ownerChatId) {
+        report.undelivered += 1;
+        deps.observability?.recordSafetyBlock({
+          code: 'channel.digest_undelivered',
+          cause: `no channel_filter.${lane.platform}.ownerUserId to deliver the digest to`,
+          details: { platform: lane.platform, botKey: lane.botKey, laneKey: lane.laneKey },
+        });
+        continue;
+      }
+
+      // Observe mode promises the watched room absolute silence, and this is the
+      // one place in the digest that produces visible output. `ownerUserId` is a
+      // bare platform id: on Telegram and WhatsApp nothing in it says "DM"
+      // rather than "group", so an owner value mistyped as — or copied from —
+      // the observed chat id would post the summary straight back into the room
+      // it summarised, in front of the people it is about. Fail closed: refuse,
+      // count it undelivered, and say why. The feed copy above still went out,
+      // so the digest is not lost, and the watermark does not advance, so it is
+      // re-digested once the configuration is fixed.
+      if (ownerChatId === lane.chatId) {
+        report.undelivered += 1;
+        deps.observability?.recordSafetyBlock({
+          code: 'channel.digest_owner_is_observed_chat',
+          cause: `channel_filter.${lane.platform}.ownerUserId is the observed chat itself — delivering there would break observe mode's silence`,
+          details: { platform: lane.platform, botKey: lane.botKey, laneKey: lane.laneKey },
+        });
+        continue;
+      }
+
+      const sent = await deps.sendVia(lane.botKey, ownerChatId, text);
+      if (sent.ok) {
+        report.deliveredToOwner += 1;
         watermarks[lane.laneKey] = nextCursor;
         watermarksChanged = true;
       } else {
         report.undelivered += 1;
         deps.observability?.recordSafetyBlock({
           code: 'channel.digest_undelivered',
-          cause: feed.error ?? 'the in-app feed did not confirm the digest',
+          cause: sent.error ?? 'owner delivery did not confirm',
           details: { platform: lane.platform, botKey: lane.botKey, laneKey: lane.laneKey },
         });
       }
-      continue;
-    }
-
-    const ownerChatId = deps.ownerChatId(lane.platform);
-    if (!ownerChatId) {
-      report.undelivered += 1;
+    } catch (err) {
+      // The cursor was only ever advanced on a confirmed delivery, so a lane
+      // that threw is simply not consumed and is re-read next run. Counted
+      // and reported rather than swallowed: a run that could not digest a
+      // room must not print as a clean run.
+      report.failed += 1;
       deps.observability?.recordSafetyBlock({
-        code: 'channel.digest_undelivered',
-        cause: `no channel_filter.${lane.platform}.ownerUserId to deliver the digest to`,
-        details: { platform: lane.platform, botKey: lane.botKey, laneKey: lane.laneKey },
-      });
-      continue;
-    }
-
-    // Observe mode promises the watched room absolute silence, and this is the
-    // one place in the digest that produces visible output. `ownerUserId` is a
-    // bare platform id: on Telegram and WhatsApp nothing in it says "DM"
-    // rather than "group", so an owner value mistyped as — or copied from —
-    // the observed chat id would post the summary straight back into the room
-    // it summarised, in front of the people it is about. Fail closed: refuse,
-    // count it undelivered, and say why. The feed copy above still went out,
-    // so the digest is not lost, and the watermark does not advance, so it is
-    // re-digested once the configuration is fixed.
-    if (ownerChatId === lane.chatId) {
-      report.undelivered += 1;
-      deps.observability?.recordSafetyBlock({
-        code: 'channel.digest_owner_is_observed_chat',
-        cause: `channel_filter.${lane.platform}.ownerUserId is the observed chat itself — delivering there would break observe mode's silence`,
-        details: { platform: lane.platform, botKey: lane.botKey, laneKey: lane.laneKey },
-      });
-      continue;
-    }
-
-    const sent = await deps.sendVia(lane.botKey, ownerChatId, text);
-    if (sent.ok) {
-      report.deliveredToOwner += 1;
-      watermarks[lane.laneKey] = nextCursor;
-      watermarksChanged = true;
-    } else {
-      report.undelivered += 1;
-      deps.observability?.recordSafetyBlock({
-        code: 'channel.digest_undelivered',
-        cause: sent.error ?? 'owner delivery did not confirm',
+        code: 'channel.digest_lane_failed',
+        cause: err instanceof Error ? err.message : String(err),
         details: { platform: lane.platform, botKey: lane.botKey, laneKey: lane.laneKey },
       });
     }

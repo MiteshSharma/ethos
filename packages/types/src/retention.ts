@@ -36,6 +36,32 @@ export interface RetentionConfig {
   minVacuumIntervalDays?: number;
 }
 
+/**
+ * The grammar every `retention.*` value must match: `forever`, or a whole
+ * number followed by `d`(ays) | `w`(eeks) | `m`(onths, 30 days) | `y`(ears,
+ * 365 days). Hours and minutes are NOT in it — `12h` is not a retention value.
+ *
+ * Canonical here because the code that ENFORCES it — `parseDuration` in
+ * `extensions/observability-sqlite/src/retention.ts`, which throws on anything
+ * else — lives in an extension no package may import, so every validating
+ * surface would otherwise keep its own copy. Two already do
+ * (`RETENTION_DURATION_RE` in `apps/web-api/src/services/config.service.ts`,
+ * `RetentionDurationSchema` in `packages/web-contracts/src/router.ts`); they
+ * are byte-identical to this and must change with it.
+ *
+ * Checked on the config-load path by `buildRetentionConfig`
+ * (`packages/config/src/index.ts`), which drops a value that fails and warns.
+ * Guarded by `packages/types/src/__tests__/retention-duration.test.ts`, which
+ * pins this pattern against `parseDuration`'s own accept/reject set.
+ */
+export const RETENTION_DURATION_PATTERN = /^(forever|\d+[dwmy])$/;
+
+/** True when `value` is a duration `parseDuration` will accept rather than
+ *  throw on. See {@link RETENTION_DURATION_PATTERN}. */
+export function isRetentionDuration(value: string): boolean {
+  return RETENTION_DURATION_PATTERN.test(value);
+}
+
 export const RETENTION_DEFAULTS: {
   messages: string;
   traces: string;

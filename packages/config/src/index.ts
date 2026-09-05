@@ -15,6 +15,7 @@ import type {
   SttProviderEntry,
   TtsProviderEntry,
 } from '@ethosagent/types';
+import { isRetentionDuration } from '@ethosagent/types';
 
 // ---------------------------------------------------------------------------
 // ${secrets:ref} substitution
@@ -4665,8 +4666,11 @@ function parseConfigYaml(src: string): EthosConfig {
     })
     .filter((p): p is ProviderConfig => p !== null);
 
-  const retention = buildRetentionConfig(retentionKv);
-  const personalitiesConfig = buildPersonalitiesConfig(personalitiesRetKv);
+  // Malformed retention durations are dropped with a warning rather than
+  // carried through raw — see `retentionDuration`.
+  const retentionWarnings: string[] = [];
+  const retention = buildRetentionConfig(retentionKv, 'retention', retentionWarnings);
+  const personalitiesConfig = buildPersonalitiesConfig(personalitiesRetKv, retentionWarnings);
   const auxiliaryCompression: AuxiliaryCompressionConfig | undefined = auxiliaryCompressionKv.model
     ? {
         model: auxiliaryCompressionKv.model,
@@ -5224,7 +5228,11 @@ function parseConfigYaml(src: string): EthosConfig {
   parseErrorsByConfig.set(config, parseErrors);
   // Cron's deprecations lead: D3(b)'s behaviour-changing case is the one an
   // operator most needs to read, and it is already first within its own group.
-  parseWarningsByConfig.set(config, [...cronDeprecations, ...auxTimeoutWarnings]);
+  parseWarningsByConfig.set(config, [
+    ...cronDeprecations,
+    ...auxTimeoutWarnings,
+    ...retentionWarnings,
+  ]);
   return config;
 }
 
@@ -5707,20 +5715,74 @@ function buildVoiceProviderRoster<E extends { provider: string }>(
   return Object.keys(out).length > 0 ? out : undefined;
 }
 
-function buildRetentionConfig(kv: Record<string, string>): RetentionConfig | undefined {
+/** The `retention.*` and `personalities.<id>.retention.*` keys whose value is a
+ *  duration. `vacuumAfterPrune` / `minVacuumIntervalDays` are not. */
+const RETENTION_DURATION_FIELDS = [
+  'messages',
+  'traces',
+  'spans',
+  'blobs',
+  'archive',
+  'channelTranscript',
+] as const;
+
+const RETENTION_EVENT_FIELDS = ['error', 'audit', 'channel', 'install'] as const;
+
+/**
+ * Take one retention duration off the raw map, or drop it with a warning.
+ *
+ * Nothing downstream validates these. `parseDuration`
+ * (`extensions/observability-sqlite/src/retention.ts:5`) THROWS on any value
+ * outside {@link RETENTION_DURATION_PATTERN}, and its production caller — the
+ * `observability-prune` cron handler in `apps/ethos/src/wiring.ts:182` — does
+ * not guard the call. So a hand-written typo booted cleanly and then threw
+ * inside the nightly handler, disabling pruning for every category with no
+ * operator-visible symptom. Checking it here moves that to a place an operator
+ * reads: parse warnings are printed by `ethos doctor`
+ * (`apps/ethos/src/commands/doctor.ts:900`), `ethos serve`
+ * (`commands/serve.ts:332`), and the gateway/boot deprecation banners.
+ *
+ * Dropped, not fatal, and dropped rather than kept: the category falls back to
+ * its `RETENTION_DEFAULTS` window, so pruning keeps running. Same posture as
+ * `vacuumAfterPrune` below and as the web reader in
+ * `apps/web-api/src/services/config.service.ts` — a value the runtime will not
+ * honour reads back as unset rather than as a string that breaks the consumer.
+ */
+function retentionDuration(
+  raw: string | undefined,
+  keyPath: string,
+  warnings: string[],
+): string | undefined {
+  if (!raw) return undefined;
+  if (isRetentionDuration(raw)) return raw;
+  warnings.push(
+    `${keyPath}: "${raw}" is not a retention duration. Expected \`forever\`, or a whole ` +
+      'number followed by d/w/m/y (e.g. `30d`, `12w`, `1y`) — hours and minutes are not in ' +
+      'the grammar. Ignoring it; this category prunes on its default window.',
+  );
+  return undefined;
+}
+
+function buildRetentionConfig(
+  kv: Record<string, string>,
+  keyPrefix: string,
+  warnings: string[],
+): RetentionConfig | undefined {
   if (Object.keys(kv).length === 0) return undefined;
   const cfg: RetentionConfig = {};
-  if (kv.messages) cfg.messages = kv.messages;
-  if (kv.traces) cfg.traces = kv.traces;
-  if (kv.spans) cfg.spans = kv.spans;
-  if (kv.blobs) cfg.blobs = kv.blobs;
-  if (kv.archive) cfg.archive = kv.archive;
-  if (kv.channelTranscript) cfg.channelTranscript = kv.channelTranscript;
+  for (const field of RETENTION_DURATION_FIELDS) {
+    const value = retentionDuration(kv[field], `${keyPrefix}.${field}`, warnings);
+    if (value) cfg[field] = value;
+  }
   const ev: RetentionEventsConfig = {};
-  if (kv['events.error']) ev.error = kv['events.error'];
-  if (kv['events.audit']) ev.audit = kv['events.audit'];
-  if (kv['events.channel']) ev.channel = kv['events.channel'];
-  if (kv['events.install']) ev.install = kv['events.install'];
+  for (const field of RETENTION_EVENT_FIELDS) {
+    const value = retentionDuration(
+      kv[`events.${field}`],
+      `${keyPrefix}.events.${field}`,
+      warnings,
+    );
+    if (value) ev[field] = value;
+  }
   if (Object.keys(ev).length > 0) cfg.events = ev;
   // Item 6 — post-prune VACUUM. `vacuumAfterPrune` is a strict boolean; a typo
   // leaves it undefined (opt-in stays off). `minVacuumIntervalDays` is a
@@ -7866,11 +7928,12 @@ function buildChannelFilter(
 
 function buildPersonalitiesConfig(
   kv: Record<string, Record<string, string>>,
+  warnings: string[],
 ): Record<string, { retention?: RetentionConfig }> | undefined {
   if (Object.keys(kv).length === 0) return undefined;
   const out: Record<string, { retention?: RetentionConfig }> = {};
   for (const [pid, retKv] of Object.entries(kv)) {
-    const retention = buildRetentionConfig(retKv);
+    const retention = buildRetentionConfig(retKv, `personalities.${pid}.retention`, warnings);
     if (retention) out[pid] = { retention };
   }
   return Object.keys(out).length > 0 ? out : undefined;

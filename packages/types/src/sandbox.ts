@@ -8,17 +8,30 @@
 // that's what closes the "Docker with -v /:/host slips through because
 // the label says docker" hole.
 //
-// **Status (v1):** the interface is defined and a `isStrictAttestation`
-// helper is exported. NO backend currently implements `attest()` — the
-// `TerminalBackend` abstraction itself doesn't exist in this repo yet.
-// When it lands, each backend's factory's `create(config)` should
-// derive the SandboxAttestation from the user's config so a misconfigured
-// Docker (`-v /:/host`, `--privileged`, exposed docker socket) auto-falls
-// back to classifier-on.
+// **Status.** The `ExecutionBackend` abstraction shipped, and four backends
+// now implement `attest()`: `extensions/execution-docker/src/index.ts:1159`
+// (derived from the container's actual run configuration),
+// `extensions/execution-ssh/src/index.ts:882` (one true field —
+// `noDockerSocket` — because ssh is remote-host trust, not confinement),
+// `extensions/execution-local/src/index.ts:156` and
+// `extensions/execution-process-backend/src/index.ts:138`.
 //
-// Until then, the wiring layer treats every personality as
-// "no attestation" and runs the classifier per the personality's
-// `approvalMode` regardless of execution backend.
+// What has NOT shipped is a consumer on the composition path. The only
+// non-test importer of `isStrictAttestation` is
+// `packages/core/src/execution/conformance.ts` — a backend-author validation
+// suite (exported from `packages/core/src/index.ts:105`), not something the
+// wiring layer runs when it builds a loop. So the classifier-skip this was
+// designed to key on does not exist yet, and the constitution's sandbox
+// requirement is enforced by a flag check on the RESOLVED POSTURE instead:
+// `backend === 'ssh' && constitutionForbidsLocal(constitution)` at
+// `packages/wiring/src/resolve-execution-posture.ts:394`, which reads
+// `execution.requireSandbox` / `execution.forbidLocal` and never calls
+// `attest()`.
+//
+// Read that as: the attestations are honest and conformance-checked, but
+// nothing downstream of a running turn consults them. Do not write a comment
+// or a doc sentence that makes an attestation the CAUSE of a refusal until a
+// composition-path caller exists.
 
 export interface SandboxAttestation {
   /** Root filesystem is read-only (overlayfs / mount ro). */

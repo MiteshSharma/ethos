@@ -30,7 +30,7 @@ Narrow it yourself, on the remote host: a dedicated unprivileged user, a key res
 
 **`process_*` tools are not routed over ssh.** A personality on the ssh posture cannot start, list, watch, or stop long-running processes on the remote host. The remote lifecycle design (signalling, environment, reconnection) is deferred.
 
-**A constitution that requires a sandbox still refuses remote execution.** ssh is remote-host trust, not confinement. The backend's attestation reports one true property — `noDockerSocket` — and eight false, and [`isStrictAttestation`](https://github.com/ethosagent/ethos/blob/main/packages/types/src/sandbox.ts) demands all nine. So a personality under `execution.requireSandbox` or `execution.forbidLocal` gets its execution tools refused rather than routed. See [Recover from constitution safe mode](safe-mode.md) for where the constitution lives.
+**A constitution that requires a sandbox still refuses remote execution.** ssh is remote-host trust, not confinement, so a personality under `execution.requireSandbox` or `execution.forbidLocal` gets its execution tools refused rather than routed. The refusal is an unconditional rule about the ssh posture — either flag being `true` refuses it, in [`resolve-execution-posture.ts`](https://github.com/ethosagent/ethos/blob/main/packages/wiring/src/resolve-execution-posture.ts) — not a judgement about a particular target's security. Nothing you can configure on the remote host will satisfy it. See [Recover from constitution safe mode](safe-mode.md) for where the constitution lives.
 
 ## Prerequisites
 

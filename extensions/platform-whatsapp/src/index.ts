@@ -131,6 +131,22 @@ export class WhatsAppAdapter implements PlatformAdapter, VoiceOutboundAdapter {
     }
   }
 
+  /**
+   * `denyUnknown` + `allowedJids`, applied to one sender jid — the DM's own
+   * jid, or a group message's participant. Digits-only comparison, so a stored
+   * `+1 (234) 567-8900` matches the `12345678900@s.whatsapp.net` that arrives.
+   *
+   * Absent `allowedJids` allows everyone, unchanged: the constructor already
+   * refuses that combination with `denyUnknown` on, so the case only arises
+   * where the operator turned the check off.
+   */
+  private isSenderAllowed(senderJid: string): boolean {
+    if (!(this.config.denyUnknown ?? true)) return true;
+    if (!this.config.allowedJids) return true;
+    const number = senderJid.split('@')[0].replace(/[^0-9]/g, '');
+    return this.config.allowedJids.some((allowed) => number === allowed.replace(/[^0-9]/g, ''));
+  }
+
   async start(): Promise<void> {
     if (this.reconnecting) return;
     this.stopped = false;
@@ -237,29 +253,16 @@ export class WhatsAppAdapter implements PlatformAdapter, VoiceOutboundAdapter {
         const jid = msg.key.remoteJid ?? '';
         const isDm = !jid.endsWith('@g.us');
 
-        const denyUnknown = this.config.denyUnknown ?? true;
-        if (denyUnknown && this.config.allowedJids) {
-          const checkJid = isDm ? jid : (msg.key.participant ?? '');
-          const number = checkJid.split('@')[0].replace(/[^0-9]/g, '');
-          const matched = this.config.allowedJids.some((allowed) => {
-            const normalizedAllowed = allowed.replace(/[^0-9]/g, '');
-            return number === normalizedAllowed;
-          });
-          if (!matched) {
-            if (this.config.denyMessage && this.sock) {
-              const s = this.sock as {
-                sendMessage: (jid: string, content: unknown) => Promise<unknown>;
-              };
-              await s.sendMessage(jid, { text: this.config.denyMessage }).catch(() => {});
-            }
-            continue;
-          }
-        }
-
         // The channel-mode decision comes BEFORE the media block on purpose: a
         // message this mode drops must not cost a download. `isBotMentioned` is
         // the parser's own test, so the gate and the envelope can no longer
         // disagree about what counts as a mention.
+        //
+        // It also comes before the ALLOWLIST, and that ordering is the fix for
+        // a room that was promised silence. `denyMessage` is a reply; running
+        // the allowlist first sent it to the GROUP jid, and in an observed
+        // group every participant is non-allowlisted by definition, so the bot
+        // answered every message in the one mode that must never answer any.
         const decision = evaluateChannelMode({
           isDm,
           isGroupMention: !isDm && isBotMentioned(msg, this.botJid),
@@ -267,6 +270,24 @@ export class WhatsAppAdapter implements PlatformAdapter, VoiceOutboundAdapter {
         });
         if (!decision.shouldRecord) continue;
         const recordOnly = !decision.shouldReply;
+
+        // The allowlist governs who may COMMAND the agent, not who may be
+        // OBSERVED, so it is only consulted where the agent would actually
+        // answer. A stranger in an observed room is recorded like anyone else:
+        // the operator set that room to `observe` precisely to watch people
+        // who will never be on the allowlist, and gating the recording on it
+        // would make observe — and the digest that reads it — inert in exactly
+        // the rooms it exists for. Nothing is sent either way; a refusal only
+        // makes sense where there was something to refuse.
+        if (!recordOnly && !this.isSenderAllowed(isDm ? jid : (msg.key.participant ?? ''))) {
+          if (this.config.denyMessage && this.sock) {
+            const s = this.sock as {
+              sendMessage: (jid: string, content: unknown) => Promise<unknown>;
+            };
+            await s.sendMessage(jid, { text: this.config.denyMessage }).catch(() => {});
+          }
+          continue;
+        }
 
         // Recorded, not answered — and the gateway's transcript row is TEXT.
         // Downloading here would spend the bandwidth to throw the bytes away,

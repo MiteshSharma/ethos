@@ -137,7 +137,7 @@ A personality states a requirement; it never names a transport. `docker`, `local
 - **A requirement this deployment cannot meet is refused, not downgraded.** `execution: remote` with no `execution.ssh.host` configured leaves the execution tools unavailable. It does not fall back to running the work here, whatever the constitution permits — a permitting constitution grants the host, which is the one machine this personality ruled out.
 - `ethos personality show <id>` prints the requirement and the resolved transport on separate lines, so you can see both what was asked for and what you got.
 - An unrecognised value is a load error, not a silent drop. So are the retired transport literals `ssh`, `docker` and `local`; the error names the replacement.
-- The requirement is resolved when a loop is composed, so a change takes effect on restart.
+- **When an edit takes effect depends on which personality you edited.** For any personality other than the one the process was started with, the requirement is re-resolved on every turn against the hot-reloaded registry — edit the file, send a message, done. For the process's *default* personality it is resolved once, eagerly, at composition, so that one needs a restart. The eager resolution is deliberate: it makes an unreachable ssh target or an unbuildable sandbox a loud startup failure rather than a surprise mid-turn.
 
 ## fs_reach.read / fs_reach.write {#fs-reach}
 

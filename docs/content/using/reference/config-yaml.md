@@ -152,11 +152,12 @@ telegram.bots.1.bind.name: engineer
 Notes:
 
 - `defaultChannelMode` values, as `evaluateChannelMode()` in [`packages/core/src/channel-mode.ts`](https://github.com/ethosagent/ethos/blob/main/packages/core/src/channel-mode.ts) resolves them:
-  - `mention_only` — reply only when the message contains the bot's `@username` (default). Also the fallback for any value the evaluator does not recognise.
+  - `mention_only` — reply only when the message contains the bot's `@username` (default).
   - `thread_follow` — `mention_only`, plus every message in a forum topic the bot has already posted in.
   - `all` — reply to every message in the chat.
   - `regex_match` — `mention_only`, plus messages matching a per-chat stored pattern. **No effect as a global default:** the pattern is read from a per-chat override, and Telegram has no way to write one yet (see the bullet below), so a message that is not a mention never matches.
   - `observe` — record every message to the channel transcript and reply to none of them, not even an explicit `@mention`. Direct messages to the bot are answered under every mode, `observe` included.
+  - **An unrecognised mode fails closed — not answered, not recorded.** It cannot reach the evaluator from this key (an out-of-range value here is a parse error, per the table above), but it can from the per-chat override store on disk — a hand-edited entry, or a mode written by a newer build and read by an older one. `evaluateChannelMode()` drops those before every other test rather than falling back to `mention_only`; the affected chat goes silent. Direct messages are still answered, which is the channel left to notice it through.
 - **Per-chat overrides cannot be set on Telegram yet.** The adapter reads a per-chat override store (`ChannelOverrideStore`, JSONL under the bot's `telegram/<botKey>/` directory) and a stored entry wins over this key, but no command or API writes one — Slack's `/ethos channel-mode` has no Telegram equivalent. This key is the only way to put a Telegram chat into `observe` today, and it applies to every group the bot is in.
 - A bot whose resolved mode is `observe` while BotFather's Group Privacy is still on records nothing at all. The adapter checks `getMe` at startup and logs `Telegram privacy mode is ON for @<username> — chats set to observe will record nothing.` rather than leaving an empty transcript to explain itself.
 - Session key format in multi-bot mode: `telegram:<botKey>:<chatId>`. This differs from single-bot mode (`telegram:<chatId>`).
@@ -241,10 +242,11 @@ Type: `mention_only` | `thread_follow` | `all` | `observe` · Default: `mention_
 
 Reply-and-record behaviour in every guild channel that has no per-channel override. Discord is single-bot — its credential is the top-level [`discordToken`](#discord-token) scalar, with no `discord.bots` roster — so this is a **top-level** key, not an indexed entry like [`telegram.bots.<i>.defaultChannelMode`](#telegram-bots) or [`slack.apps.<i>.defaultChannelMode`](#slack-apps).
 
-- `mention_only` — reply only when the message `@mentions` the bot (default). Also the fallback for any value the evaluator does not recognise.
+- `mention_only` — reply only when the message `@mentions` the bot (default).
 - `thread_follow` — `mention_only`, plus every message in a thread the bot has already posted in.
 - `all` — reply to every message in the channel.
 - `observe` — record every message to the channel transcript and reply to none of them, not even an explicit `@mention`.
+- **An unrecognised mode fails closed — not answered, not recorded.** Not reachable from this key, which is validated at parse (below), but reachable from a per-channel override written by hand or by a newer build. `evaluateChannelMode()` drops those before every other test rather than falling back to `mention_only`. Direct messages are still answered.
 
 ```yaml
 discord.defaultChannelMode: observe
@@ -395,7 +397,9 @@ skin: mono
 
 ## retention.* {#retention}
 
-Per-category TTLs for the observability store. Values accept duration strings — `30d`, `12h`, `forever`. Unset fields fall back to the runtime defaults shown below.
+Per-category TTLs for the observability store and the observe-mode channel transcript. Unset fields fall back to the runtime defaults shown below.
+
+**Duration grammar:** `forever`, or a whole number followed by `d` (days), `w` (weeks), `m` (months, 30 days) or `y` (years, 365 days) — `30d`, `12w`, `6m`, `2y`. **Hours and minutes are not in the grammar**; `12h` is not a retention value. A value outside the grammar is dropped at load with a warning naming the key, and the category prunes on its default window instead. `ethos doctor` prints that warning, as do `ethos serve`, `ethos gateway` and `ethos boot` at startup.
 
 | Field | Default | Description |
 |---|---|---|
@@ -404,6 +408,7 @@ Per-category TTLs for the observability store. Values accept duration strings �
 | `retention.spans` | `90d` | Tool / LLM spans inside traces. |
 | `retention.blobs` | `7d` | Large response payloads stored out-of-band. |
 | `retention.archive` | `730d` | Archive partitions. |
+| `retention.channelTranscript` | `30d` | Third-party group-chat text recorded verbatim by an [observe-mode](#telegram-bots) channel, in `~/.ethos/channel-transcript.db`. Pruned against when Ethos saw the message, not when the platform says it was sent, so a backdated message cannot outlive the window. Short by design: the corpus grows with the room's traffic rather than with your use of the agent, and only the last digest window is ever read. |
 | `retention.events.error` | `90d` | Error events from `errors.jsonl`. |
 | `retention.events.audit` | `365d` | Audit events (key rotation, personality writes, approvals). |
 | `retention.events.channel` | `365d` | Channel-adapter events (pairing, dedup). |
@@ -412,9 +417,17 @@ Per-category TTLs for the observability store. Values accept duration strings �
 ```yaml
 retention.messages: 365d
 retention.traces: 90d
+retention.channelTranscript: 7d
 retention.events.error: 90d
 retention.events.install: forever
 ```
+
+Notes:
+
+- **`retention.channelTranscript` can only be set by hand-editing this file.** `ethos retention set` rejects it as an unknown category, and the web Settings page does not list it. Every other field above is settable through both.
+- **Pruning runs once a night, at 03:00 local time, and a missed run is not made up.** All retention categories are aged out by a single system cron job (`observability-prune`) on a fixed `0 3 * * *` schedule that no config key changes. That job is created with `missedRunPolicy: skip`, so a machine that was asleep or powered off at 03:00 rolls the run forward rather than executing it late — a laptop that is never awake at 03:00 never prunes anything, indefinitely and silently. There is no prune at startup. Run Ethos on a machine that is up at 03:00 if a window here matters to you.
+- **`ethos data prune` does not cover `retention.channelTranscript`.** It prunes the observability store only. The channel transcript is a separate database with no manual prune command; the nightly job is the only thing that ages it out.
+- **Per-message audit events outlive the transcript text they describe.** Every message an observe-mode channel records also emits a `channel.observed` audit event carrying the platform, chat id and sender id — no message text, but a durable record of who spoke where and when. That event is in the `audit` category (`365d`) and in a different database, so it survives the transcript's `30d` window by roughly 12×. Lowering `retention.channelTranscript` does not lower it; set `retention.events.audit` too if that matters to you.
 
 ## personalities.\<id\>.retention.* {#personalities-retention}
 

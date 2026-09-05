@@ -72,6 +72,11 @@ The main session does not write or edit files. Every code or doc change — even
 
 Why: the main session's context fills with conversation; sub-agents get clean, scoped context for the actual change. Mistakes contained to a sub-agent do not pollute the main session's understanding of the codebase.
 
+12. Cite what enforces a guarantee
+A comment or doc sentence asserting a guarantee — "X is refused", "Y is validated", "Z never happens" — names the file and symbol that enforces it, or the test that pins it. Add a line number only when the symbol alone would not find it, and expect it to drift.
+
+This repo's most confident prose has described intent the adjacent code did not implement: a refusal attributed to an attestation nothing on the composition path reads, a fallback that actually failed closed, a duration grammar validated nowhere. Each read as fact for months. If you cannot name the enforcer, you have found a limitation — write it down as one. Do not add a linter for this.
+
 What this is
 Ethos is a TypeScript agent framework where personality is architecture. A personality (SOUL.md + toolset.yaml + config.yaml) is a structural component — not a system prompt string — that shapes tool access, memory filtering, model routing, and communication style simultaneously.
 
