@@ -1,23 +1,63 @@
 {
   "version": 1,
-  "updatedAt": "2026-09-02T18:37:57.529Z",
+  "updatedAt": "2026-09-05T03:49:53.563Z",
   "providers": {
     "anthropic": {
       "models": [
         {
-          "id": "claude-opus-4-7",
+          "id": "claude-fable-5-1",
           "label": "most capable",
+          "contextWindow": 1000000
+        },
+        {
+          "id": "claude-opus-5",
+          "label": "frontier, complex work",
+          "contextWindow": 1000000
+        },
+        {
+          "id": "claude-sonnet-5",
+          "label": "fast, balanced",
+          "contextWindow": 1000000,
+          "default": true
+        },
+        {
+          "id": "claude-haiku-4-5",
+          "label": "cheapest, fast",
+          "contextWindow": 200000
+        },
+        {
+          "id": "claude-fable-5",
+          "label": "prior gen",
+          "contextWindow": 1000000
+        },
+        {
+          "id": "claude-opus-4-8",
+          "label": "prior gen",
+          "contextWindow": 200000
+        },
+        {
+          "id": "claude-opus-4-7",
+          "label": "prior gen",
+          "contextWindow": 200000
+        },
+        {
+          "id": "claude-opus-4-6",
+          "label": "prior gen",
           "contextWindow": 200000
         },
         {
           "id": "claude-sonnet-4-6",
-          "label": "fast, balanced",
-          "contextWindow": 200000,
-          "default": true
+          "label": "prior gen",
+          "contextWindow": 200000
         },
         {
-          "id": "claude-haiku-4-5-20251001",
-          "label": "cheapest, fast",
+          "id": "claude-sonnet-4-5-20250929",
+          "label": "prior gen",
+          "contextWindow": 200000
+        },
+        {
+          "id": "claude-opus-4-5-20251101",
+          "label": "prior gen",
           "contextWindow": 200000
         }
       ]
@@ -25,81 +65,101 @@
     "openai-compat": {
       "models": [
         {
-          "id": "gpt-5.4",
-          "label": "frontier, complex work",
-          "contextWindow": 200000,
+          "id": "gpt-6-astra",
+          "label": "top reasoning",
+          "contextWindow": 1050000
+        },
+        {
+          "id": "gpt-5.6-sol",
+          "label": "flagship, complex work",
+          "contextWindow": 1050000
+        },
+        {
+          "id": "gpt-5.6-terra",
+          "label": "everyday, balanced",
+          "contextWindow": 1050000,
           "default": true
         },
         {
-          "id": "gpt-5.4-pro",
-          "label": "most capable frontier",
-          "contextWindow": 200000
+          "id": "gpt-5.6-luna",
+          "label": "fast, cheap",
+          "contextWindow": 1050000
+        },
+        {
+          "id": "gpt-5.5",
+          "label": "prior gen",
+          "contextWindow": 1050000
+        },
+        {
+          "id": "gpt-5.4",
+          "label": "prior gen",
+          "contextWindow": 1050000
         },
         {
           "id": "gpt-5.4-mini",
-          "label": "compact, cost-efficient",
-          "contextWindow": 200000
+          "label": "prior gen, compact",
+          "contextWindow": 400000
         },
         {
-          "id": "gpt-5.4-nano",
-          "label": "ultra-efficient at scale",
-          "contextWindow": 200000
+          "id": "gpt-5.3-codex",
+          "label": "prior gen, code-specialized",
+          "contextWindow": 400000
         },
         {
-          "id": "o3",
-          "label": "reasoning",
-          "contextWindow": 200000
-        },
-        {
-          "id": "o3-pro",
-          "label": "reasoning, most capable",
-          "contextWindow": 200000
-        },
-        {
-          "id": "o3-mini",
-          "label": "reasoning, fast",
-          "contextWindow": 200000
-        },
-        {
-          "id": "o1",
-          "label": "reasoning, prior gen",
-          "contextWindow": 200000
-        },
-        {
-          "id": "o1-mini",
-          "label": "reasoning, prior gen mini",
-          "contextWindow": 200000
-        },
-        {
-          "id": "o1-preview",
-          "label": "reasoning, preview",
-          "contextWindow": 200000
-        },
-        {
-          "id": "gpt-4o",
-          "label": "GPT-4o",
-          "contextWindow": 128000
-        },
-        {
-          "id": "gpt-4o-mini",
-          "label": "fast, cheap",
-          "contextWindow": 128000
-        },
-        {
-          "id": "anthropic/claude-sonnet-4-6",
+          "id": "anthropic/claude-sonnet-5",
           "label": "Claude Sonnet (OR)",
-          "contextWindow": 200000,
+          "contextWindow": 1000000,
           "default": true
         },
         {
-          "id": "anthropic/claude-opus-4-7",
+          "id": "anthropic/claude-opus-5",
           "label": "Claude Opus (OR)",
-          "contextWindow": 200000
+          "contextWindow": 1000000
+        },
+        {
+          "id": "openai/gpt-5.6-terra",
+          "label": "GPT-5.6 Terra (OR)",
+          "contextWindow": 1050000
+        },
+        {
+          "id": "openai/gpt-6-astra",
+          "label": "GPT-6 Astra (OR)",
+          "contextWindow": 1050000
         },
         {
           "id": "google/gemini-2.5-pro",
           "label": "Gemini 2.5 Pro (OR)",
           "contextWindow": 1000000
+        },
+        {
+          "id": "deepseek/deepseek-v4-flash-0731",
+          "label": "DeepSeek V4 Flash, cheapest (OR)",
+          "contextWindow": 1310000
+        },
+        {
+          "id": "deepseek/deepseek-v4-pro-0813",
+          "label": "DeepSeek V4 Pro (OR)",
+          "contextWindow": 1310000
+        },
+        {
+          "id": "qwen/qwen3.8-27b",
+          "label": "Qwen 3.8 27B (OR)",
+          "contextWindow": 262144
+        },
+        {
+          "id": "qwen/qwen3.8-max",
+          "label": "Qwen 3.8 Max (OR)",
+          "contextWindow": 262144
+        },
+        {
+          "id": "meta-llama/llama-4-maverick",
+          "label": "Llama 4 Maverick (OR)",
+          "contextWindow": 1000000
+        },
+        {
+          "id": "openai/gpt-oss-120b",
+          "label": "GPT-OSS 120B, open weights (OR)",
+          "contextWindow": 131072
         },
         {
           "id": "moonshotai/kimi-k2.6",
@@ -111,34 +171,54 @@
     "azure": {
       "models": [
         {
-          "id": "gpt-5.4",
-          "label": "frontier, complex work",
-          "contextWindow": 200000,
+          "id": "gpt-6-astra",
+          "label": "top reasoning",
+          "contextWindow": 1050000
+        },
+        {
+          "id": "gpt-5.6-sol",
+          "label": "flagship, complex work",
+          "contextWindow": 1050000
+        },
+        {
+          "id": "gpt-5.6-terra",
+          "label": "everyday, balanced",
+          "contextWindow": 1050000,
           "default": true
         },
         {
-          "id": "gpt-5.4-pro",
-          "label": "most capable frontier",
-          "contextWindow": 200000
+          "id": "gpt-5.6-luna",
+          "label": "fast, cheap",
+          "contextWindow": 1050000
+        },
+        {
+          "id": "gpt-5.5",
+          "label": "prior gen",
+          "contextWindow": 1050000
+        },
+        {
+          "id": "gpt-5.4",
+          "label": "prior gen",
+          "contextWindow": 1050000
         },
         {
           "id": "gpt-5.4-mini",
-          "label": "compact, cost-efficient",
-          "contextWindow": 128000
+          "label": "prior gen, compact",
+          "contextWindow": 400000
         },
         {
-          "id": "gpt-5.4-nano",
-          "label": "ultra-efficient at scale",
-          "contextWindow": 128000
+          "id": "gpt-5.3-codex",
+          "label": "prior gen, code-specialized",
+          "contextWindow": 400000
         },
         {
           "id": "claude-opus-4-6",
-          "label": "Claude Opus on Azure",
+          "label": "Claude Opus on Azure, prior gen",
           "contextWindow": 1000000
         },
         {
           "id": "claude-sonnet-4-6",
-          "label": "Claude Sonnet on Azure",
+          "label": "Claude Sonnet on Azure, prior gen",
           "contextWindow": 1000000
         },
         {

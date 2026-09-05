@@ -30,11 +30,17 @@ import {
 } from '@ethosagent/config';
 import { resolveSttProvider, resolveTtsProvider } from '@ethosagent/core';
 import {
+  CodexTokenStore,
+  discoverModels,
+  type ModelDiscovery,
+  unsupportedModelMessage,
+} from '@ethosagent/llm-codex';
+import {
   type CallCaptureDependencyCheckResult,
   callCaptureHealthPath,
 } from '@ethosagent/platform-callcapture';
 import { bundledSkillsSource, UniversalScanner } from '@ethosagent/skills';
-import type { Skill } from '@ethosagent/types';
+import type { SecretsResolver, Skill } from '@ethosagent/types';
 import { errorLogExists, errorLogPath, readRecentErrors } from '../error-log';
 import { type LiveKitMediaResolution, resolveLiveKitMedia } from '../livekit-media';
 import { buildVersionInfo } from '../version-info';
@@ -180,6 +186,49 @@ async function checkSecrets(config: EthosConfig | null): Promise<SecretCheckResu
     });
   }
   return results;
+}
+
+// ---------------------------------------------------------------------------
+// Codex model check — is the configured model on this ChatGPT account's roster?
+// ---------------------------------------------------------------------------
+
+export type CodexModelCheck =
+  | { status: 'skipped' }
+  | { status: 'unauthorized' }
+  | { status: 'unverified'; model: string }
+  | { status: 'ok'; model: string }
+  | { status: 'unsupported'; model: string; supported: string[] };
+
+/** `discover` is injectable so tests never reach the real models endpoint. */
+export async function checkCodexModel(
+  config: EthosConfig | null,
+  secrets: SecretsResolver,
+  deps: { discover?: (accessToken: string) => Promise<ModelDiscovery> } = {},
+): Promise<CodexModelCheck> {
+  if (config?.provider !== 'codex' || !config.model) return { status: 'skipped' };
+  const model = config.model;
+  const tokens = await new CodexTokenStore(secrets).load();
+  if (!tokens) return { status: 'unauthorized' };
+  const discovery = await (deps.discover ?? discoverModels)(tokens.accessToken);
+  // The fallback roster is a guess, not proof — only a live list can say no.
+  if (discovery.source !== 'live') return { status: 'unverified', model };
+  if (discovery.models.includes(model)) return { status: 'ok', model };
+  return { status: 'unsupported', model, supported: discovery.models };
+}
+
+function codexModelLine(check: CodexModelCheck): string | null {
+  switch (check.status) {
+    case 'skipped':
+      return null;
+    case 'unauthorized':
+      return `  ${c.yellow}⚠${c.reset}  Codex tokens missing — run ${c.cyan}ethos setup auth${c.reset}`;
+    case 'unverified':
+      return `  ${c.dim}–  Could not verify model '${check.model}' against the Codex models endpoint (offline?).${c.reset}`;
+    case 'ok':
+      return `  ${c.green}✓${c.reset}  Model '${check.model}' is available to this ChatGPT account`;
+    case 'unsupported':
+      return `  ${c.yellow}⚠${c.reset}  ${unsupportedModelMessage(check.model, check.supported)}`;
+  }
 }
 
 async function checkSdk(modulePath: string): Promise<{ ok: boolean; error?: string }> {
@@ -851,6 +900,12 @@ export async function runDoctor(args: string[] = [], options?: DoctorOptions): P
     const notices = configParseNotices(config);
     for (const err of notices.errors) console.log(`  ${c.red}✗${c.reset}  ${err}`);
     for (const warn of notices.warnings) console.log(`  ${c.yellow}⚠${c.reset}  ${warn}`);
+    // A `model:` the ChatGPT account cannot use fails every turn with a bare
+    // 400; this is the command whose job is to say so before the first turn.
+    if (process.env.ETHOS_SKIP_VALIDATION !== '1') {
+      const line = codexModelLine(await checkCodexModel(config, await getSecretsResolver()));
+      if (line) console.log(line);
+    }
   }
   console.log('');
 

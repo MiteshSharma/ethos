@@ -1,24 +1,23 @@
+import { formatContextWindow, getModelsForProvider } from '@ethosagent/wiring/model-catalog';
 import { Box, Text, useInput } from 'ink';
 import { useState } from 'react';
 
 export interface ModelEntry {
   id: string;
   provider: string;
-  cost?: string;
+  detail?: string;
 }
 
-const KNOWN_MODELS: ModelEntry[] = [
-  { provider: 'anthropic', id: 'claude-opus-4-7', cost: '$15 / $75 per 1M' },
-  { provider: 'anthropic', id: 'claude-sonnet-4-6', cost: '$3 / $15 per 1M' },
-  { provider: 'anthropic', id: 'claude-haiku-4-5-20251001', cost: '$0.25 / $1.25 per 1M' },
-  { provider: 'openrouter', id: 'anthropic/claude-opus-4-7', cost: 'varies' },
-  { provider: 'openrouter', id: 'anthropic/claude-sonnet-4-6', cost: 'varies' },
-  { provider: 'openrouter', id: 'moonshotai/kimi-k2.6', cost: 'varies' },
-  { provider: 'openrouter', id: 'google/gemini-2.5-pro', cost: 'varies' },
-  { provider: 'ollama', id: 'llama3.2', cost: 'free (local)' },
-  { provider: 'ollama', id: 'mistral', cost: 'free (local)' },
-  { provider: 'ollama', id: 'codestral', cost: 'free (local)' },
-];
+// Derived from the wiring MODEL_CATALOG so the picker never drifts from setup.
+const PICKER_PROVIDERS = ['anthropic', 'openai', 'codex', 'openrouter', 'ollama'];
+
+const KNOWN_MODELS: ModelEntry[] = PICKER_PROVIDERS.flatMap((provider) =>
+  getModelsForProvider(provider).map((m) => ({
+    provider,
+    id: m.modelId,
+    detail: `${m.label} · ${formatContextWindow(m.contextWindow)}${m.default ? ' · default' : ''}`,
+  })),
+);
 
 interface ModelPickerModalProps {
   current: string;
@@ -68,7 +67,7 @@ export function ModelPickerModal({ current, onSelect, onCancel }: ModelPickerMod
                 <Box key={m.id} gap={1} paddingLeft={1}>
                   <Text color={isSelected ? 'cyan' : undefined}>{isSelected ? '▶' : ' '}</Text>
                   <Text bold={isSelected}>{m.id}</Text>
-                  {m.cost && <Text dimColor>— {m.cost}</Text>}
+                  {m.detail && <Text dimColor>— {m.detail}</Text>}
                   {m.id === current && <Text color="green">(current)</Text>}
                 </Box>
               );

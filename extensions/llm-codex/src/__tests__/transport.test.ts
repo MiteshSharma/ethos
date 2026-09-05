@@ -94,7 +94,8 @@ describe('ResponsesApiBody optionality', () => {
       await drain(provider.complete([], [], {}));
     });
 
-    const init = vi.mocked(mockFetch).mock.calls[0]?.[1];
+    // The first turn's model-roster discovery is call 0; the request is last.
+    const init = vi.mocked(mockFetch).mock.calls.at(-1)?.[1];
     const sent = typeof init?.body === 'string' ? JSON.parse(init.body) : {};
     expect(sent.store).toBe(false);
     expect(sent.reasoning).toEqual({ effort: 'medium', summary: 'auto' });

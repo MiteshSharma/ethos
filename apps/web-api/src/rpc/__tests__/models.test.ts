@@ -14,7 +14,7 @@ describe('model catalog handler', () => {
   it('preserves the default flag only on default models', () => {
     const manifest = buildManifest();
     const anthropic = manifest.providers.anthropic;
-    const sonnet = anthropic?.models.find((m) => m.id === 'claude-sonnet-4-6');
+    const sonnet = anthropic?.models.find((m) => m.id === 'claude-sonnet-5');
     expect(sonnet?.default).toBe(true);
     const opus = anthropic?.models.find((m) => m.id === 'claude-opus-4-7');
     expect(opus).toBeDefined();

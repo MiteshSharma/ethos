@@ -4703,7 +4703,7 @@ function parseConfigYaml(src: string): EthosConfig {
   const config: EthosConfig = {
     schemaVersion: Number.isFinite(parsedSchemaVersion) ? parsedSchemaVersion : undefined,
     provider: kv.provider ?? 'anthropic',
-    model: kv.model ?? 'claude-opus-4-7',
+    model: kv.model ?? 'claude-sonnet-5',
     apiKey: kv.apiKey ?? '',
     personality: kv.personality ?? 'researcher',
     memory:

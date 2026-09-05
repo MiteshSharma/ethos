@@ -328,6 +328,9 @@ importers:
       '@ethosagent/kanban-store':
         specifier: workspace:*
         version: link:../../extensions/kanban-store
+      '@ethosagent/llm-codex':
+        specifier: workspace:*
+        version: link:../../extensions/llm-codex
       '@ethosagent/logger':
         specifier: workspace:*
         version: link:../../packages/logger
@@ -1313,6 +1316,9 @@ importers:
       '@ethosagent/types':
         specifier: workspace:*
         version: link:../../packages/types
+      zod:
+        specifier: ^4.3.6
+        version: 4.4.3
     devDependencies:
       '@ethosagent/storage-fs':
         specifier: workspace:*

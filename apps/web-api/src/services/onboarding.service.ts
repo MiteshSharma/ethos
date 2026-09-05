@@ -3,6 +3,7 @@ import type { FilePersonalityRegistry } from '@ethosagent/personalities';
 import type { SecretsResolver } from '@ethosagent/types';
 import { EthosError } from '@ethosagent/types';
 import type { OnboardingStep, ProviderId } from '@ethosagent/web-contracts';
+import { getDefaultModel } from '@ethosagent/wiring/model-catalog';
 import type { ConfigRepository } from '../repositories/config.repository';
 
 // Onboarding orchestration. Three RPCs:
@@ -88,9 +89,11 @@ export class OnboardingService {
   }
 
   async validateProvider(input: ValidateProviderInput): Promise<ValidateProviderResult> {
-    // Codex uses device auth — check tokens exist, return fallback models
+    // Codex uses device auth — check tokens exist, then ask the account which
+    // models it can use. `discoverModels` falls back to the static roster on
+    // any failure, so the picker is never empty.
     if (input.provider === 'codex') {
-      const { CodexTokenStore } = await import('@ethosagent/llm-codex');
+      const { CodexTokenStore, discoverModels } = await import('@ethosagent/llm-codex');
       const store = new CodexTokenStore(this.opts.secrets);
       const tokens = await store.load();
       if (!tokens) {
@@ -101,8 +104,8 @@ export class OnboardingService {
           completionTested: false,
         };
       }
-      const { CODEX_FALLBACK_MODELS } = await import('@ethosagent/llm-codex');
-      return { ok: true, models: CODEX_FALLBACK_MODELS, error: null, completionTested: false };
+      const { models } = await discoverModels(tokens.accessToken, this.fetchFn);
+      return { ok: true, models, error: null, completionTested: false };
     }
 
     try {
@@ -174,8 +177,12 @@ export class OnboardingService {
           models[0] ??
           null
         );
-      case 'codex':
-        return models.find((m) => m.startsWith('gpt-5')) ?? models[0] ?? null;
+      case 'codex': {
+        // Prefer the catalog default when the account's live list carries it;
+        // otherwise the first id the transport reported.
+        const preferred = getDefaultModel('codex')?.modelId;
+        return (preferred && models.includes(preferred) ? preferred : models[0]) ?? null;
+      }
       default:
         return (
           models.find(

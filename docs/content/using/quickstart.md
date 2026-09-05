@@ -78,7 +78,7 @@ ethos setup
 The wizard walks you through four prompts. Pick defaults except where you have an opinion.
 
 - **Provider** — `anthropic` (default), `openrouter`, `ollama`, or `gemini`. OpenRouter aggregates many models behind one API key; Ollama runs models locally with no API key; Gemini is Google's API.
-- **Model** — `claude-opus-4-7` is the default for Anthropic. Other providers default to their headline model. You can change this later by editing `~/.ethos/config.yaml` or running `ethos setup model`.
+- **Model** — `claude-sonnet-5` is the default for Anthropic. Other providers default to their headline model. You can change this later by editing `~/.ethos/config.yaml` or running `ethos setup model`.
 - **API key** — paste it. The wizard stores it in `~/.ethos/config.yaml` with file mode `0600` (owner read/write only).
 - **Personality** — accept `researcher` for now. The next tutorial covers switching to the other built-ins (`engineer`, `reviewer`) and writing your own.
 
@@ -95,7 +95,7 @@ ethos chat
 You should see a header like this:
 
 ```
-ethos  claude-opus-4-7 · Researcher · /help
+ethos  claude-sonnet-5 · Researcher · /help
 ```
 
 The header lists the active model, the active [personality](../getting-started/glossary.md#personality), and a reminder to type `/help` for slash commands.

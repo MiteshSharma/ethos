@@ -17,7 +17,8 @@
     "@ethosagent/oauth-core": "workspace:*",
     "@ethosagent/plugin-sdk": "workspace:*",
     "@ethosagent/pricing": "workspace:*",
-    "@ethosagent/types": "workspace:*"
+    "@ethosagent/types": "workspace:*",
+    "zod": "^4.3.6"
   },
   "devDependencies": {
     "@ethosagent/storage-fs": "workspace:*"

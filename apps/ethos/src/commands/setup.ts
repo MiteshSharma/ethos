@@ -15,6 +15,7 @@ import {
   probeServedWindowCached,
   windowProbeCachePath,
 } from '@ethosagent/wiring/local-models';
+import { getDefaultModel } from '@ethosagent/wiring/model-catalog';
 import { getProvider, PROVIDER_CATALOG } from '@ethosagent/wiring/provider-catalog';
 import { redactErrorMessage } from '../redact-error';
 import { getFunnelTracker, getSecretsResolver, getStorage } from '../wiring';
@@ -117,7 +118,7 @@ export async function runSetup(startAtStep?: WizardStepId): Promise<SetupResult 
 
     const config: EthosConfig = {
       provider,
-      model: answers.model ?? 'claude-opus-4-7',
+      model: answers.model ?? getDefaultModel(provider)?.modelId ?? 'claude-sonnet-5',
       apiKey: apiKeyRef,
       personality: answers.personality ?? 'researcher',
       memory: answers.memory,
@@ -285,12 +286,7 @@ async function runReadlineFallback({
       }
     }
   } else {
-    const defaultModel =
-      provider === 'anthropic'
-        ? 'claude-opus-4-7'
-        : provider === 'azure'
-          ? 'gpt-5.4'
-          : 'openai/gpt-4o';
+    const defaultModel = getDefaultModel(provider)?.modelId ?? 'claude-sonnet-5';
     const modelPrompt =
       provider === 'azure'
         ? `Azure deployment name (${defaultModel}): `

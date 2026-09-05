@@ -3,6 +3,7 @@ import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { FileSecretsResolver, FsStorage } from '@ethosagent/storage-fs';
+import { getDefaultModel, getModelsForProvider } from '@ethosagent/wiring/model-catalog';
 import { app, BrowserWindow, dialog, ipcMain, nativeTheme, session, shell } from 'electron';
 import type { RetentionValues } from '../shared/ipc-contract';
 import { IPC_CHANNELS } from '../shared/ipc-contract';
@@ -27,20 +28,22 @@ import {
 } from './satellite';
 import { store } from './store';
 
+/** Model ids from the wiring catalog for one provider, catalog default first. */
+function catalogModelIds(providerId: string): string[] {
+  const defaultId = getDefaultModel(providerId)?.modelId;
+  const ids = getModelsForProvider(providerId).map((m) => m.modelId);
+  return defaultId ? [defaultId, ...ids.filter((id) => id !== defaultId)] : ids;
+}
+
+const OPENAI_MODELS = catalogModelIds('openai');
+
 const PROVIDER_MODELS: Record<string, string[]> = {
-  anthropic: ['claude-sonnet-4-20250514', 'claude-haiku-4-5-20251001', 'claude-opus-4-20250514'],
-  openai: ['gpt-4o', 'gpt-4o-mini', 'o3', 'o4-mini'],
+  anthropic: catalogModelIds('anthropic'),
+  openai: OPENAI_MODELS,
   openrouter: [],
   azure: [],
   ollama: [],
-  codex: [
-    'gpt-5.4',
-    'gpt-5.4-mini',
-    'gpt-5.3-codex',
-    'gpt-5.2-codex',
-    'gpt-5.1-codex-max',
-    'gpt-5.1-codex-mini',
-  ],
+  codex: catalogModelIds('codex'),
 };
 
 function maskApiKey(value: string): string {
@@ -173,7 +176,7 @@ export function registerIpcHandlers(): void {
               'Content-Type': 'application/json',
             },
             body: JSON.stringify({
-              model: 'gpt-4o-mini',
+              model: OPENAI_MODELS[0],
               max_tokens: 1,
               messages: [{ role: 'user', content: 'hi' }],
             }),
@@ -198,7 +201,7 @@ export function registerIpcHandlers(): void {
             };
           }
 
-          return { valid: true, completionTested: true, models: ['gpt-4o', 'gpt-4o-mini', 'o3'] };
+          return { valid: true, completionTested: true, models: OPENAI_MODELS };
         }
 
         if (req.provider === 'openrouter') {

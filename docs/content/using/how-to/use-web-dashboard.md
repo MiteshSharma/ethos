@@ -67,7 +67,7 @@ Navigate to the **Personalities** tab and click **Create Personality**. The wiza
 
 **Step 2 — Soul.** Write or paste the `SOUL.md` content. This is the first-person identity document — who the personality is, how it speaks, what it values. The editor supports markdown preview.
 
-**Step 3 — Config.** Set the model (`claude-sonnet-4-20250514`, `gpt-4o`, etc.), memory scope, and optional overrides like `temperature` and `maxTokens`. These map to fields in `config.yaml`.
+**Step 3 — Config.** Set the model (`claude-sonnet-5`, `gpt-5.6-terra`, etc.), memory scope, and optional overrides like `temperature` and `maxTokens`. These map to fields in `config.yaml`.
 
 **Step 4 — Toolset.** Select which tools the personality can access. The checklist groups tools by category (file, terminal, web, memory, cron). Each selected tool is written to `toolset.yaml`.
 

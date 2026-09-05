@@ -93,6 +93,24 @@ export interface ResponsesApiBody {
 }
 
 // ---------------------------------------------------------------------------
+// ResponsesApiError
+// ---------------------------------------------------------------------------
+
+/** A non-2xx reply. Carries the status and raw body so a caller can read the
+ *  vendor's structured detail without re-parsing the message text. */
+export class ResponsesApiError extends Error {
+  readonly status: number;
+  readonly body: string;
+
+  constructor(message: string, status: number, body: string) {
+    super(message);
+    this.name = 'ResponsesApiError';
+    this.status = status;
+    this.body = body;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // streamResponsesApi
 // ---------------------------------------------------------------------------
 
@@ -129,7 +147,11 @@ export async function* streamResponsesApi(
 
   if (!response.ok) {
     const text = await response.text().catch(() => '');
-    throw new Error(`${apiLabel} error ${response.status}: ${text || response.statusText}`);
+    throw new ResponsesApiError(
+      `${apiLabel} error ${response.status}: ${text || response.statusText}`,
+      response.status,
+      text,
+    );
   }
 
   if (!response.body) {

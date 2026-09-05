@@ -20,6 +20,7 @@
 
 import { type EthosConfig, readRawConfig, writeConfig } from '@ethosagent/config';
 import { probeProvider } from '@ethosagent/wiring';
+import { getDefaultModel } from '@ethosagent/wiring/model-catalog';
 import { getProvider } from '@ethosagent/wiring/provider-catalog';
 import { redactErrorMessage } from '../redact-error';
 import { getFunnelTracker, getSecretsResolver, getStorage } from '../wiring';
@@ -50,14 +51,10 @@ interface ResolvedProviderEnv {
   envVar: string;
 }
 
-/** Default chat model per provider — no env var carries it for most providers. */
-const DEFAULT_MODEL: Record<string, string> = {
-  anthropic: 'claude-opus-4-7',
-  openai: 'gpt-4o',
-  openrouter: 'openai/gpt-4o',
-  azure: 'gpt-4o',
-  gemini: 'gemini-1.5-flash',
-};
+/** Default chat model per provider — the catalog default; no env var carries it for most providers. */
+function defaultModel(provider: string): string {
+  return getDefaultModel(provider)?.modelId ?? 'claude-sonnet-5';
+}
 
 /** Provider precedence matches the compose init script it replaces. */
 export function resolveProviderFromEnv(env: NodeJS.ProcessEnv): ResolvedProviderEnv | null {
@@ -65,7 +62,7 @@ export function resolveProviderFromEnv(env: NodeJS.ProcessEnv): ResolvedProvider
     return {
       provider: 'azure',
       apiKey: env.AZURE_API_KEY,
-      model: env.AZURE_MODEL || DEFAULT_MODEL.azure,
+      model: env.AZURE_MODEL || defaultModel('azure'),
       baseUrl: env.AZURE_ENDPOINT,
       apiVersion: env.AZURE_API_VERSION || '2024-12-01-preview',
       envVar: 'AZURE_API_KEY',
@@ -75,7 +72,7 @@ export function resolveProviderFromEnv(env: NodeJS.ProcessEnv): ResolvedProvider
     return {
       provider: 'anthropic',
       apiKey: env.ANTHROPIC_API_KEY,
-      model: DEFAULT_MODEL.anthropic,
+      model: defaultModel('anthropic'),
       envVar: 'ANTHROPIC_API_KEY',
     };
   }
@@ -83,7 +80,7 @@ export function resolveProviderFromEnv(env: NodeJS.ProcessEnv): ResolvedProvider
     return {
       provider: 'openai',
       apiKey: env.OPENAI_API_KEY,
-      model: DEFAULT_MODEL.openai,
+      model: defaultModel('openai'),
       envVar: 'OPENAI_API_KEY',
     };
   }
@@ -91,7 +88,7 @@ export function resolveProviderFromEnv(env: NodeJS.ProcessEnv): ResolvedProvider
     return {
       provider: 'openrouter',
       apiKey: env.OPENROUTER_API_KEY,
-      model: env.OPENROUTER_MODEL || DEFAULT_MODEL.openrouter,
+      model: env.OPENROUTER_MODEL || defaultModel('openrouter'),
       baseUrl: getProvider('openrouter')?.defaultBaseUrl,
       envVar: 'OPENROUTER_API_KEY',
     };
@@ -100,9 +97,18 @@ export function resolveProviderFromEnv(env: NodeJS.ProcessEnv): ResolvedProvider
     return {
       provider: 'gemini',
       apiKey: env.GOOGLE_API_KEY,
-      model: DEFAULT_MODEL.gemini,
+      model: defaultModel('gemini'),
       baseUrl: getProvider('gemini')?.defaultBaseUrl,
       envVar: 'GOOGLE_API_KEY',
+    };
+  }
+  if (env.XAI_API_KEY) {
+    // No baseUrl: the xAI provider pins https://api.x.ai/v1.
+    return {
+      provider: 'xai',
+      apiKey: env.XAI_API_KEY,
+      model: defaultModel('xai'),
+      envVar: 'XAI_API_KEY',
     };
   }
   return null;
@@ -125,7 +131,7 @@ export async function runSetupFromEnv(): Promise<void> {
   const prov = resolveProviderFromEnv(env);
   if (!prov) {
     fail(
-      'No provider API key found — set one of: AZURE_API_KEY, ANTHROPIC_API_KEY, OPENAI_API_KEY, OPENROUTER_API_KEY, GOOGLE_API_KEY in .env and re-run docker compose up.',
+      'No provider API key found — set one of: AZURE_API_KEY, ANTHROPIC_API_KEY, OPENAI_API_KEY, OPENROUTER_API_KEY, GOOGLE_API_KEY, XAI_API_KEY in .env and re-run docker compose up.',
     );
   }
 

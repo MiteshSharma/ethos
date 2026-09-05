@@ -18,99 +18,181 @@ export interface ModelCatalogEntry {
 export const MIN_CONTEXT_WINDOW = 64_000;
 
 export const MODEL_CATALOG: ModelCatalogEntry[] = [
-  // Anthropic
+  // Anthropic — source: https://platform.claude.com/docs/en/docs/about-claude/models/overview
+  {
+    providerId: 'anthropic',
+    modelId: 'claude-fable-5-1',
+    label: 'most capable',
+    contextWindow: 1_000_000,
+  },
+  {
+    providerId: 'anthropic',
+    modelId: 'claude-opus-5',
+    label: 'frontier, complex work',
+    contextWindow: 1_000_000,
+  },
+  {
+    providerId: 'anthropic',
+    modelId: 'claude-sonnet-5',
+    label: 'fast, balanced',
+    contextWindow: 1_000_000,
+    default: true,
+  },
+  {
+    providerId: 'anthropic',
+    modelId: 'claude-haiku-4-5',
+    label: 'cheapest, fast',
+    contextWindow: 200_000,
+  },
+  {
+    providerId: 'anthropic',
+    modelId: 'claude-fable-5',
+    label: 'prior gen',
+    contextWindow: 1_000_000,
+  },
+  {
+    providerId: 'anthropic',
+    modelId: 'claude-opus-4-8',
+    label: 'prior gen',
+    contextWindow: 200_000,
+  },
   {
     providerId: 'anthropic',
     modelId: 'claude-opus-4-7',
-    label: 'most capable',
+    label: 'prior gen',
+    contextWindow: 200_000,
+  },
+  {
+    providerId: 'anthropic',
+    modelId: 'claude-opus-4-6',
+    label: 'prior gen',
     contextWindow: 200_000,
   },
   {
     providerId: 'anthropic',
     modelId: 'claude-sonnet-4-6',
-    label: 'fast, balanced',
+    label: 'prior gen',
     contextWindow: 200_000,
-    default: true,
   },
   {
     providerId: 'anthropic',
-    modelId: 'claude-haiku-4-5-20251001',
-    label: 'cheapest, fast',
+    modelId: 'claude-sonnet-4-5-20250929',
+    label: 'prior gen',
     contextWindow: 200_000,
   },
-  // OpenAI
+  {
+    providerId: 'anthropic',
+    modelId: 'claude-opus-4-5-20251101',
+    label: 'prior gen',
+    contextWindow: 200_000,
+  },
+  // OpenAI — source: https://developers.openai.com/api/docs/models
   {
     providerId: 'openai',
-    modelId: 'gpt-5.4',
-    label: 'frontier, complex work',
-    contextWindow: 200_000,
+    modelId: 'gpt-6-astra',
+    label: 'top reasoning',
+    contextWindow: 1_050_000,
+  },
+  {
+    providerId: 'openai',
+    modelId: 'gpt-5.6-sol',
+    label: 'flagship, complex work',
+    contextWindow: 1_050_000,
+  },
+  {
+    providerId: 'openai',
+    modelId: 'gpt-5.6-terra',
+    label: 'everyday, balanced',
+    contextWindow: 1_050_000,
     default: true,
   },
   {
     providerId: 'openai',
-    modelId: 'gpt-5.4-pro',
-    label: 'most capable frontier',
-    contextWindow: 200_000,
+    modelId: 'gpt-5.6-luna',
+    label: 'fast, cheap',
+    contextWindow: 1_050_000,
   },
+  { providerId: 'openai', modelId: 'gpt-5.5', label: 'prior gen', contextWindow: 1_050_000 },
+  { providerId: 'openai', modelId: 'gpt-5.4', label: 'prior gen', contextWindow: 1_050_000 },
   {
     providerId: 'openai',
     modelId: 'gpt-5.4-mini',
-    label: 'compact, cost-efficient',
-    contextWindow: 200_000,
+    label: 'prior gen, compact',
+    contextWindow: 400_000,
   },
   {
     providerId: 'openai',
-    modelId: 'gpt-5.4-nano',
-    label: 'ultra-efficient at scale',
-    contextWindow: 200_000,
+    modelId: 'gpt-5.3-codex',
+    label: 'prior gen, code-specialized',
+    contextWindow: 400_000,
   },
-  { providerId: 'openai', modelId: 'o3', label: 'reasoning', contextWindow: 200_000 },
-  {
-    providerId: 'openai',
-    modelId: 'o3-pro',
-    label: 'reasoning, most capable',
-    contextWindow: 200_000,
-  },
-  { providerId: 'openai', modelId: 'o3-mini', label: 'reasoning, fast', contextWindow: 200_000 },
-  { providerId: 'openai', modelId: 'o1', label: 'reasoning, prior gen', contextWindow: 200_000 },
-  {
-    providerId: 'openai',
-    modelId: 'o1-mini',
-    label: 'reasoning, prior gen mini',
-    contextWindow: 200_000,
-  },
-  {
-    providerId: 'openai',
-    modelId: 'o1-preview',
-    label: 'reasoning, preview',
-    contextWindow: 200_000,
-  },
-  {
-    providerId: 'openai',
-    modelId: 'gpt-4o',
-    label: 'GPT-4o',
-    contextWindow: 128_000,
-  },
-  { providerId: 'openai', modelId: 'gpt-4o-mini', label: 'fast, cheap', contextWindow: 128_000 },
   // OpenRouter top picks
   {
     providerId: 'openrouter',
-    modelId: 'anthropic/claude-sonnet-4-6',
+    modelId: 'anthropic/claude-sonnet-5',
     label: 'Claude Sonnet',
-    contextWindow: 200_000,
+    contextWindow: 1_000_000,
     default: true,
   },
   {
     providerId: 'openrouter',
-    modelId: 'anthropic/claude-opus-4-7',
+    modelId: 'anthropic/claude-opus-5',
     label: 'Claude Opus',
-    contextWindow: 200_000,
+    contextWindow: 1_000_000,
+  },
+  {
+    providerId: 'openrouter',
+    modelId: 'openai/gpt-5.6-terra',
+    label: 'GPT-5.6 Terra',
+    contextWindow: 1_050_000,
+  },
+  {
+    providerId: 'openrouter',
+    modelId: 'openai/gpt-6-astra',
+    label: 'GPT-6 Astra',
+    contextWindow: 1_050_000,
   },
   {
     providerId: 'openrouter',
     modelId: 'google/gemini-2.5-pro',
     label: 'Gemini 2.5 Pro',
     contextWindow: 1_000_000,
+  },
+  {
+    providerId: 'openrouter',
+    modelId: 'deepseek/deepseek-v4-flash-0731',
+    label: 'DeepSeek V4 Flash, cheapest',
+    contextWindow: 1_310_000,
+  },
+  {
+    providerId: 'openrouter',
+    modelId: 'deepseek/deepseek-v4-pro-0813',
+    label: 'DeepSeek V4 Pro',
+    contextWindow: 1_310_000,
+  },
+  {
+    providerId: 'openrouter',
+    modelId: 'qwen/qwen3.8-27b',
+    label: 'Qwen 3.8 27B',
+    contextWindow: 262_144,
+  },
+  {
+    providerId: 'openrouter',
+    modelId: 'qwen/qwen3.8-max',
+    label: 'Qwen 3.8 Max',
+    contextWindow: 262_144,
+  },
+  {
+    providerId: 'openrouter',
+    modelId: 'meta-llama/llama-4-maverick',
+    label: 'Llama 4 Maverick',
+    contextWindow: 1_000_000,
+  },
+  {
+    providerId: 'openrouter',
+    modelId: 'openai/gpt-oss-120b',
+    label: 'GPT-OSS 120B, open weights',
+    contextWindow: 131_072,
   },
   {
     providerId: 'openrouter',
@@ -125,39 +207,53 @@ export const MODEL_CATALOG: ModelCatalogEntry[] = [
   // ~/.ethos/config.yaml. Context windows are nominal; verify per-deployment.
   {
     providerId: 'azure',
-    modelId: 'gpt-5.4',
-    label: 'frontier, complex work',
-    contextWindow: 200_000,
+    modelId: 'gpt-6-astra',
+    label: 'top reasoning',
+    contextWindow: 1_050_000,
+  },
+  {
+    providerId: 'azure',
+    modelId: 'gpt-5.6-sol',
+    label: 'flagship, complex work',
+    contextWindow: 1_050_000,
+  },
+  {
+    providerId: 'azure',
+    modelId: 'gpt-5.6-terra',
+    label: 'everyday, balanced',
+    contextWindow: 1_050_000,
     default: true,
   },
   {
     providerId: 'azure',
-    modelId: 'gpt-5.4-pro',
-    label: 'most capable frontier',
-    contextWindow: 200_000,
+    modelId: 'gpt-5.6-luna',
+    label: 'fast, cheap',
+    contextWindow: 1_050_000,
   },
+  { providerId: 'azure', modelId: 'gpt-5.5', label: 'prior gen', contextWindow: 1_050_000 },
+  { providerId: 'azure', modelId: 'gpt-5.4', label: 'prior gen', contextWindow: 1_050_000 },
   {
     providerId: 'azure',
     modelId: 'gpt-5.4-mini',
-    label: 'compact, cost-efficient',
-    contextWindow: 128_000,
+    label: 'prior gen, compact',
+    contextWindow: 400_000,
   },
   {
     providerId: 'azure',
-    modelId: 'gpt-5.4-nano',
-    label: 'ultra-efficient at scale',
-    contextWindow: 128_000,
+    modelId: 'gpt-5.3-codex',
+    label: 'prior gen, code-specialized',
+    contextWindow: 400_000,
   },
   {
     providerId: 'azure',
     modelId: 'claude-opus-4-6',
-    label: 'Claude Opus on Azure',
+    label: 'Claude Opus on Azure, prior gen',
     contextWindow: 1_000_000,
   },
   {
     providerId: 'azure',
     modelId: 'claude-sonnet-4-6',
-    label: 'Claude Sonnet on Azure',
+    label: 'Claude Sonnet on Azure, prior gen',
     contextWindow: 1_000_000,
   },
   {
@@ -166,19 +262,50 @@ export const MODEL_CATALOG: ModelCatalogEntry[] = [
     label: 'reasoning MoE',
     contextWindow: 1_000_000,
   },
-  // Gemini
+  // Gemini — source: https://ai.google.dev/gemini-api/docs/models
   {
     providerId: 'gemini',
-    modelId: 'gemini-2.5-pro',
-    label: 'most capable',
-    contextWindow: 1_000_000,
+    modelId: 'gemini-3.8-flash',
+    label: 'fast, balanced',
+    contextWindow: 1_048_576,
     default: true,
   },
   {
     providerId: 'gemini',
-    modelId: 'gemini-2.0-flash',
-    label: 'fast, cheap',
-    contextWindow: 1_000_000,
+    modelId: 'gemini-3.1-pro-preview',
+    label: 'most capable',
+    contextWindow: 1_048_576,
+  },
+  {
+    providerId: 'gemini',
+    modelId: 'gemini-3.5-flash-lite',
+    label: 'cheapest, fast',
+    contextWindow: 1_048_576,
+  },
+  {
+    providerId: 'gemini',
+    modelId: 'gemini-3.7-flash',
+    label: 'prior gen',
+    contextWindow: 1_048_576,
+  },
+  {
+    providerId: 'gemini',
+    modelId: 'gemini-3.5-flash',
+    label: 'prior gen',
+    contextWindow: 1_048_576,
+  },
+  { providerId: 'gemini', modelId: 'gemini-2.5-pro', label: 'prior gen', contextWindow: 1_048_576 },
+  {
+    providerId: 'gemini',
+    modelId: 'gemini-2.5-flash',
+    label: 'prior gen',
+    contextWindow: 1_048_576,
+  },
+  {
+    providerId: 'gemini',
+    modelId: 'gemini-2.5-flash-lite',
+    label: 'prior gen, cheapest',
+    contextWindow: 1_048_576,
   },
   // Groq
   {
@@ -221,23 +348,53 @@ export const MODEL_CATALOG: ModelCatalogEntry[] = [
     label: 'reasoning model',
     contextWindow: 64_000,
   },
-  // Ollama
+  // Ollama — static fallbacks; the live /api/tags list wins when reachable.
+  // contextWindow values are conservative ARCHITECTURE maxima; the Lane 0
+  // resolution caps catalog values for local runtimes at ARCH_WINDOW_CAP_TOKENS
+  // (32,768, local-models.ts) because the SERVED window is whatever num_ctx
+  // Ollama allocated — the /api/ps probe reports the truth, and these rows are
+  // only the fallback behind it.
+  {
+    providerId: 'ollama',
+    modelId: 'qwen3.8:27b',
+    label: '27B, vision',
+    contextWindow: 262_144,
+    default: true,
+  },
+  {
+    providerId: 'ollama',
+    modelId: 'gpt-oss:20b',
+    label: '20B, open weights',
+    contextWindow: 131_072,
+  },
+  {
+    providerId: 'ollama',
+    modelId: 'gpt-oss:120b',
+    label: '120B, open weights',
+    contextWindow: 131_072,
+  },
+  {
+    providerId: 'ollama',
+    modelId: 'llama4:scout',
+    label: 'Llama 4 Scout',
+    contextWindow: 1_048_576,
+  },
+  {
+    providerId: 'ollama',
+    modelId: 'deepseek-v4-flash',
+    label: 'DeepSeek V4 Flash',
+    contextWindow: 1_310_000,
+  },
   {
     providerId: 'ollama',
     modelId: 'llama3.2',
-    label: '3B, fast',
+    label: '3B, small, fast',
     // Llama 3.2 (1B/3B) supports a 128k context window. Kept realistic so the
-    // default local model clears the Phase 1d 16k agentic-tool-use floor (a
+    // small local option clears the Phase 1d 16k agentic-tool-use floor (a
     // silently-tiny Ollama num_ctx still fails loudly at provider init).
     contextWindow: 131_072,
-    default: true,
   },
   { providerId: 'ollama', modelId: 'mistral', label: '7B', contextWindow: 32_768 },
-  // Lane 0 — commonly-run Ollama models. contextWindow values are conservative
-  // ARCHITECTURE maxima; the Lane 0 resolution caps catalog values for local
-  // runtimes at ARCH_WINDOW_CAP_TOKENS (32,768, local-models.ts) because the
-  // SERVED window is whatever num_ctx Ollama allocated — the /api/ps probe
-  // reports the truth, and these rows are only the fallback behind it.
   { providerId: 'ollama', modelId: 'qwen3', label: '8B, hybrid reasoning', contextWindow: 40_960 },
   { providerId: 'ollama', modelId: 'gemma3', label: '4B, multimodal', contextWindow: 131_072 },
   { providerId: 'ollama', modelId: 'phi4', label: '14B', contextWindow: 16_384 },
@@ -355,44 +512,28 @@ export const MODEL_CATALOG: ModelCatalogEntry[] = [
     label: 'FireFunction v2',
     contextWindow: 8_192,
   },
-  // Codex (OpenAI device auth)
+  // Codex (ChatGPT OAuth transport) — source: https://developers.openai.com/codex/models
   {
     providerId: 'codex',
-    modelId: 'gpt-5.4',
-    label: 'frontier, complex work',
-    contextWindow: 200_000,
+    modelId: 'gpt-6-astra',
+    label: 'most capable',
+    contextWindow: 1_050_000,
   },
   {
     providerId: 'codex',
-    modelId: 'gpt-5.4-mini',
-    label: 'compact, cost-efficient',
-    contextWindow: 200_000,
+    modelId: 'gpt-5.6-sol',
+    label: 'flagship, complex work',
+    contextWindow: 1_050_000,
+  },
+  {
+    providerId: 'codex',
+    modelId: 'gpt-5.6-terra',
+    label: 'everyday, balanced',
+    contextWindow: 1_050_000,
     default: true,
   },
-  {
-    providerId: 'codex',
-    modelId: 'gpt-5.3-codex',
-    label: 'code-specialized',
-    contextWindow: 200_000,
-  },
-  {
-    providerId: 'codex',
-    modelId: 'gpt-5.2-codex',
-    label: 'code-specialized, prior gen',
-    contextWindow: 200_000,
-  },
-  {
-    providerId: 'codex',
-    modelId: 'gpt-5.1-codex-max',
-    label: 'max context, prior gen',
-    contextWindow: 200_000,
-  },
-  {
-    providerId: 'codex',
-    modelId: 'gpt-5.1-codex-mini',
-    label: 'compact, prior gen',
-    contextWindow: 200_000,
-  },
+  { providerId: 'codex', modelId: 'gpt-5.6-luna', label: 'fast', contextWindow: 1_050_000 },
+  { providerId: 'codex', modelId: 'gpt-5.5', label: 'prior gen', contextWindow: 1_050_000 },
   // xAI Grok — direct API. baseUrl: https://api.x.ai/v1
   // No sampling `profile` on any of these rows, deliberately: whether Grok
   // accepts `temperature`, `top_p` and `seed` is unverified against a live

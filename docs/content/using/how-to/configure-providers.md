@@ -52,7 +52,7 @@ Open `~/.ethos/config.yaml` and set four keys. The shape is plain `key: value` �
 
 ```yaml
 provider: anthropic
-model: claude-opus-4-7
+model: claude-sonnet-5
 apiKey: sk-ant-XXXXXXXXXXXX
 personality: researcher
 ```
@@ -61,7 +61,7 @@ For OpenAI-compatible providers (`openai`, `openrouter`, `xai`, `ollama`, `vllm`
 
 ```yaml
 provider: openrouter
-model: anthropic/claude-3.5-sonnet
+model: anthropic/claude-sonnet-5
 apiKey: sk-or-XXXXXXXXXXXX
 baseUrl: https://openrouter.ai/api/v1
 personality: researcher
@@ -83,7 +83,7 @@ personality: researcher
 | `provider` | Default base URL | Where to get a key | Notes |
 |---|---|---|---|
 | `anthropic` | n/a (SDK default) | [console.anthropic.com](https://console.anthropic.com) | Best fit for `claude-*` models; supports key rotation via `ethos keys`. |
-| `openai` | `https://api.openai.com/v1` | [platform.openai.com](https://platform.openai.com/api-keys) | Use for `gpt-4o`, `o1`, etc. |
+| `openai` | `https://api.openai.com/v1` | [platform.openai.com](https://platform.openai.com/api-keys) | Use for `gpt-5.6-terra`, `gpt-6-astra`, etc. |
 | `codex` | n/a — device auth | [openai.com](https://openai.com) (ChatGPT account) | Experimental; authenticates via device code, no API key. See [Use a ChatGPT subscription for coding work](use-chatgpt-subscription-via-codex). |
 | `openrouter` | `https://openrouter.ai/api/v1` | [openrouter.ai/keys](https://openrouter.ai/keys) | One key for Claude, GPT, Gemini, Llama, and 200+ more. |
 | `azure` | `https://<your-resource>.openai.azure.com` | [portal.azure.com](https://portal.azure.com) | `model:` is the deployment name; `apiVersion:` required (default `2024-10-21`). |
@@ -125,17 +125,17 @@ Stack two providers so Ethos fails over automatically when the first one rate-li
 
 ```yaml
 provider: anthropic
-model: claude-opus-4-7
+model: claude-sonnet-5
 apiKey: sk-ant-XXXXXXXXXXXX
 personality: researcher
 
 providers.0.provider: anthropic
 providers.0.apiKey: sk-ant-XXXXXXXXXXXX
-providers.0.model: claude-opus-4-7
+providers.0.model: claude-sonnet-5
 
 providers.1.provider: openrouter
 providers.1.apiKey: sk-or-XXXXXXXXXXXX
-providers.1.model: anthropic/claude-3.5-sonnet
+providers.1.model: anthropic/claude-sonnet-5
 ```
 
 The top-level `provider`, `model`, and `apiKey` keys stay in place — they're used when the chain has fewer than two entries.
@@ -166,7 +166,7 @@ A streamed `ok` and a non-zero `usage` line means the provider, key, and model r
 
 **`ECONNREFUSED 127.0.0.1:11434` with `provider: ollama`.** — `ollama serve` is not running. Start it in another terminal or check `lsof -i :11434`.
 
-**`model not found` from OpenRouter.** — OpenRouter model ids are namespaced (`anthropic/claude-3.5-sonnet`, not `claude-3.5-sonnet`). Copy the exact id from the OpenRouter model page.
+**`model not found` from OpenRouter.** — OpenRouter model ids are namespaced (`anthropic/claude-sonnet-5`, not `claude-sonnet-5`). Copy the exact id from the OpenRouter model page.
 
 **Empty stream, no error.** — The base URL points at an endpoint that accepts requests but returns nothing useful (common with custom OpenAI-compatible gateways). Run `ethos doctor` and compare `baseUrl` against the provider's docs.
 
