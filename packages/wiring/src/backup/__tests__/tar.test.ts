@@ -144,10 +144,10 @@ describe('tar writer — long paths', () => {
     const sink = new MemorySink();
     const writer = new TarWriter(sink);
     await expect(writer.addFile('a/b\0c.md', Buffer.from('x'))).rejects.toThrow(
-      'Malicious tar entry rejected',
+      'the name holds a NUL',
     );
     await expect(writer.addFile('a/b\nc.md', Buffer.from('x'))).rejects.toThrow(
-      'a newline terminates a PAX record',
+      'the name holds a newline',
     );
   });
 
@@ -276,11 +276,73 @@ describe('tar parser — security guards', () => {
 
   it('refuses to WRITE a path that is not a strict POSIX relative path', async () => {
     const writer = new TarWriter(new MemorySink());
-    for (const path of ['C:/x.md', 'a\\b.md', 'a/./b.md', 'a//b.md', 'a/b/']) {
+    for (const path of ['C:/x.md', 'a\\b.md', 'a/./b.md', 'a//b.md', 'a/b/', 'a/../b.md']) {
       await expect(writer.addFile(path, Buffer.from('x')), path).rejects.toThrow(
-        'Malicious tar entry rejected',
+        `Cannot archive "${path}"`,
       );
     }
+  });
+
+  // The defect this suite exists for: `..` used to be a SUBSTRING check on both
+  // sides, so an ordinary date-range filename was called malicious and took the
+  // whole archive — and after T4, every nightly backup — down with it.
+  it('round-trips a legal filename containing ".." inside a segment', async () => {
+    const path = 'skills/pdf/2026-01-01..2026-02-01.md';
+    const buf = await archive([[path, Buffer.from('report')]]);
+    const entries = await parseTarBuffer(buf);
+    expect(entries).toEqual([[path, Buffer.from('report')]]);
+  });
+
+  it('still refuses a ".." SEGMENT on the write path', async () => {
+    // Unreachable through a normal filesystem call, so it is built at the
+    // writer level — the layer that would have to encode it.
+    const writer = new TarWriter(new MemorySink());
+    for (const path of ['../etc/passwd', 'skills/../../etc/passwd', 'a/..']) {
+      await expect(writer.addFile(path, Buffer.from('x')), path).rejects.toThrow(
+        'the name has a ".." path segment',
+      );
+    }
+  });
+
+  it('never truncates a PAX name into a trailing ".." segment', async () => {
+    // The naive-reader hazard the read guard's old substring check stood in
+    // for. The cut lands inside `..evil`, which must not become `/..`.
+    // Byte 100 of this path lands exactly after the `/..` of `..evil`, and no
+    // `/` split fits the 100-byte name field, so it takes the PAX branch.
+    const path = `skills/${'p'.repeat(90)}/..${'e'.repeat(120)}.md`;
+    const buf = await archive([[path, Buffer.from('x')]]);
+    expect(buf[156]).toBe(0x78); // PAX header first
+    const dataName = buf
+      .subarray(BLOCK * 2, BLOCK * 2 + 100)
+      .toString('utf8')
+      .replace(/\0.*/s, '');
+    expect(dataName.endsWith('/..')).toBe(false);
+    expect(dataName).toBe(`skills/${'p'.repeat(90)}`);
+    expect(await parseTarBuffer(buf)).toEqual([[path, Buffer.from('x')]]);
+  });
+
+  it('skips an unarchivable file instead of failing the archive, and reports it', async () => {
+    const sink = new MemorySink();
+    const writer = new TarWriter(sink);
+    const goodPath = join(dir, 'good.md');
+    const backslashPath = join(dir, 'back\\slash.md');
+    writeFileSync(goodPath, 'kept');
+    writeFileSync(backslashPath, 'dropped');
+
+    expect(await writer.addFileFromDisk('skills/back\\slash.md', backslashPath)).toBeNull();
+    const kept = await writer.addFileFromDisk('skills/good.md', goodPath);
+    await writer.finish();
+
+    expect(kept?.path).toBe('skills/good.md');
+    expect(writer.skipped).toEqual([
+      {
+        path: 'skills/back\\slash.md',
+        reason:
+          'the name holds a backslash, which a restore must refuse as a Windows path separator',
+      },
+    ]);
+    // The rest of the archive exists and reads back cleanly.
+    expect(await parseTarBuffer(sink.buffer())).toEqual([['skills/good.md', Buffer.from('kept')]]);
   });
 
   it('accepts a normal entry', async () => {
@@ -323,8 +385,8 @@ describe('tar writer — streaming', () => {
     const sawDataBeforeFinish = sink.bytes;
     await writer.finish();
 
-    expect(record.size).toBe(SIZE);
-    expect(record.sha256).toBe(bigSha);
+    expect(record?.size).toBe(SIZE);
+    expect(record?.sha256).toBe(bigSha);
     // Data reached the destination before the archive was closed, in chunks no
     // larger than one read buffer — the archive is never assembled in memory.
     expect(sawDataBeforeFinish).toBeGreaterThanOrEqual(SIZE);
@@ -337,7 +399,7 @@ describe('tar writer — streaming', () => {
     const writer = createTarGzWriter(archivePath);
     const record = await writer.addFileFromDisk('state/big.bin', bigPath);
     await writer.finish();
-    expect(record.sha256).toBe(bigSha);
+    expect(record?.sha256).toBe(bigSha);
 
     const hash = createHash('sha256');
     let size = 0;

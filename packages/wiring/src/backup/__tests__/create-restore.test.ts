@@ -721,7 +721,11 @@ describe('restore sentinel', () => {
   it('refuses to start while another restore holds the data directory', async () => {
     await createBackup({ dataDir, outPath: out, snapshot: 'vacuum' });
     write('config.yaml', 'provider: openai\n');
-    writeFileSync(sentinel(), '4321 2026-09-04T00:00:00.000Z\n');
+    // A LIVE pid: the sentinel is judged by the process it names, not by its
+    // age, so a fixture that means "a restore is running" has to name a process
+    // that is. `4321` was almost certainly gone, and would now be taken over
+    // straight away — correctly.
+    writeFileSync(sentinel(), `${process.pid} 2026-09-04T00:00:00.000Z\n`);
 
     const err = await restoreBackup({ dataDir, archivePath: out }).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(EthosError);
@@ -759,5 +763,53 @@ describe('restore sentinel', () => {
       holder.close();
     }
     expect(existsSync(sentinel())).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Unusual-but-legal filenames
+// ---------------------------------------------------------------------------
+
+describe('createBackup — filenames the write path must not choke on', () => {
+  it('archives and restores a file whose name contains ".." inside a segment', async () => {
+    // The reported defect: this is an ordinary date-range filename, and a
+    // substring check on `..` used to throw "Malicious tar entry rejected" out
+    // of createBackup, destroying the whole archive — every night, forever.
+    const rel = 'skills/pdf/2026-01-01..2026-02-01.md';
+    write(rel, 'january report\n');
+
+    const result = await createBackup({ dataDir, outPath: out, snapshot: 'vacuum' });
+    expect(result.skippedFiles).toEqual([]);
+
+    rmSync(dataDir, { recursive: true, force: true });
+    const report = await restoreBackup({ dataDir, archivePath: out });
+
+    expect(report.restored).toContain(rel);
+    expect(readFileSync(join(dataDir, rel), 'utf8')).toBe('january report\n');
+  });
+
+  it('skips an unarchivable file, reports it, and completes the rest', async () => {
+    // A backslash is legal on POSIX but is a separator to a Windows extractor,
+    // so `assertSafeEntryPath` refuses it on read and the file cannot
+    // round-trip. It costs itself and nothing else.
+    write('skills/pdf/back\\slash.md', 'cannot round-trip\n');
+
+    const result = await createBackup({ dataDir, outPath: out, snapshot: 'vacuum' });
+
+    expect(result.skippedFiles).toEqual([
+      {
+        path: 'skills/pdf/back\\slash.md',
+        reason:
+          'the name holds a backslash, which a restore must refuse as a Windows path separator',
+      },
+    ]);
+
+    rmSync(dataDir, { recursive: true, force: true });
+    const report = await restoreBackup({ dataDir, archivePath: out });
+
+    // The backup exists, verifies, and carries everything else.
+    expect(report.restored).toContain('skills/pdf/SKILL.md');
+    expect(report.restored).not.toContain('skills/pdf/back\\slash.md');
+    expect(count(join(dataDir, 'sessions.db'), 'messages')).toBe(120);
   });
 });

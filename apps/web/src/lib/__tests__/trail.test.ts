@@ -130,6 +130,7 @@ describe('summariseTrail', () => {
       ok: 1,
       failed: 1,
       unrecorded: 0,
+      unsettled: 0,
       totalDurationMs: 1_500,
     });
   });
@@ -152,6 +153,7 @@ describe('summariseTrail', () => {
       ok: 0,
       failed: 0,
       unrecorded: 0,
+      unsettled: 0,
       totalDurationMs: null,
     });
   });
@@ -167,6 +169,30 @@ describe('summariseTrail', () => {
     expect(summary.ok).toBe(0);
     expect(summary.failed).toBe(0);
     expect(summary.unrecorded).toBe(2);
+  });
+
+  it('counts a still-running call, and one parked on approval, as unsettled', () => {
+    // Neither reducer settles these when a turn ends (`done` leaves them be, so
+    // a `tool_end` arriving a beat late is not slandered as a failure). The
+    // count is what lets the footer withhold its ✓ instead.
+    const summary = summariseTrail([
+      action({ toolCallId: 'a', status: 'ok' }),
+      action({ toolCallId: 'b', status: 'running', durationMs: undefined }),
+      action({ toolCallId: 'c', status: 'pending-approval', durationMs: undefined }),
+    ]);
+    expect(summary.unsettled).toBe(2);
+    expect(summary.ok).toBe(1);
+    expect(summary.failed).toBe(0);
+    expect(summary.unrecorded).toBe(0);
+  });
+
+  it('a settled trail has nothing unsettled', () => {
+    const summary = summariseTrail([
+      action({ toolCallId: 'a', status: 'ok' }),
+      action({ toolCallId: 'b', status: 'failed' }),
+      action({ toolCallId: 'c', status: 'unrecorded', durationMs: undefined }),
+    ]);
+    expect(summary.unsettled).toBe(0);
   });
 
   it('a live tool_end on a reloaded row moves it out of unrecorded', () => {

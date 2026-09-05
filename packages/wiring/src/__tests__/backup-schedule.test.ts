@@ -14,11 +14,12 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import type { EthosConfig } from '@ethosagent/config';
 import Database from '@ethosagent/sqlite';
 import { FsStorage } from '@ethosagent/storage-fs';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { currentBootId } from '../backup/holder-identity';
 import {
   acquireBackupLock,
   backupLockPath,
@@ -27,7 +28,9 @@ import {
   resolveBackupSettings,
   rotateBackups,
   runScheduledBackup,
+  SCHEDULED_ARCHIVE_RE,
   scheduledArchiveName,
+  summarizeScheduledBackup,
 } from '../backup-schedule';
 
 let root: string;
@@ -54,6 +57,20 @@ afterEach(() => {
 
 function makeConfig(over: Partial<EthosConfig> = {}): EthosConfig {
   return { provider: 'anthropic', model: 'm', apiKey: 'sk', personality: 'researcher', ...over };
+}
+
+/**
+ * A boot identity of the same SHAPE this machine writes, naming a different
+ * boot. Built from the real one because the shape is platform-specific, and a
+ * mismatched shape is deliberately read as "cannot prove a different boot".
+ * `null` where the platform has no boot identity at all.
+ */
+function foreignBootId(): string | null {
+  const current = currentBootId();
+  if (current === null) return null;
+  if (current.startsWith('boot-id:')) return 'boot-id:00000000-0000-0000-0000-000000000000';
+  const [kind = '', value = ''] = current.split(':');
+  return `${kind}:${Number(value) - 24 * 60 * 60}`;
 }
 
 /** A pid that is definitely not running, so a lock naming it is provably stale. */
@@ -151,6 +168,11 @@ describe('rotateBackups', () => {
     archive('before-upgrade.tar.gz');
     archive('ethos-scheduled-manual.tar.gz');
     archive('ethos-scheduled-2026-09-01T04-00-00Z.tar.gz.bak');
+    // And two that sit against the uniqueness suffix specifically: a word where
+    // the hex goes, and hex of the wrong length. The suffix widened the shape
+    // rotation accepts, so it has to be as literal as the timestamp is.
+    archive('ethos-scheduled-2026-09-01T04-00-00Z-final.tar.gz');
+    archive('ethos-scheduled-2026-09-01T04-00-00Z-a1b2c3d4e5.tar.gz');
     writeFileSync(backupLockPath(dir), '');
     mkdirSync(join(dir, 'ethos-scheduled-2026-01-01T00-00-00Z.tar.gz-dir'));
 
@@ -161,6 +183,8 @@ describe('rotateBackups', () => {
       'before-upgrade.tar.gz',
       'ethos-backup-2026-09-01T04-00-00-a1b2c3d4.tar.gz',
       'ethos-scheduled-2026-01-01T00-00-00Z.tar.gz-dir',
+      'ethos-scheduled-2026-09-01T04-00-00Z-a1b2c3d4e5.tar.gz',
+      'ethos-scheduled-2026-09-01T04-00-00Z-final.tar.gz',
       'ethos-scheduled-2026-09-01T04-00-00Z.tar.gz.bak',
       'ethos-scheduled-2026-09-02T04-00-00Z.tar.gz',
       'ethos-scheduled-manual.tar.gz',
@@ -175,12 +199,47 @@ describe('rotateBackups', () => {
 
   it('names an archive in the shape rotation recognises', async () => {
     const name = scheduledArchiveName(new Date('2026-09-04T04:00:00.000Z'));
-    expect(name).toBe('ethos-scheduled-2026-09-04T04-00-00Z.tar.gz');
+    // The timestamp is still literal and still leads; the suffix follows it.
+    // Asserted as a pattern rather than a constant because the suffix is random
+    // — which is the whole point of it.
+    expect(name).toMatch(/^ethos-scheduled-2026-09-04T04-00-00Z-[0-9a-f]{8}\.tar\.gz$/);
+    expect(name).toMatch(SCHEDULED_ARCHIVE_RE);
     archive(name);
     expect(await rotateBackups(storage, dir, 0)).toEqual([]);
     expect(await rotateBackups(storage, dir, 1)).toEqual([]);
-    archive('ethos-scheduled-2026-09-05T04-00-00Z.tar.gz');
+    archive(scheduledArchiveName(new Date('2026-09-05T04:00:00.000Z')));
     expect(await rotateBackups(storage, dir, 1)).toEqual([name]);
+  });
+
+  it('gives two names in the same second different suffixes', () => {
+    const now = new Date('2026-09-04T04:00:00.000Z');
+    expect(scheduledArchiveName(now)).not.toBe(scheduledArchiveName(now));
+  });
+
+  it('orders by the timestamp across a second boundary, whatever the suffixes', async () => {
+    // The suffix must never get a vote on which archive is older. These two are
+    // one second apart and their suffixes are the extremes of the hex range, so
+    // a sort that reached the suffix at all would invert them and rotation
+    // would delete the NEWER archive.
+    const older = 'ethos-scheduled-2026-09-04T04-00-00Z-ffffffff.tar.gz';
+    const newer = 'ethos-scheduled-2026-09-04T04-00-01Z-00000000.tar.gz';
+    archive(newer);
+    archive(older);
+    expect(await rotateBackups(storage, dir, 1)).toEqual([older]);
+    expect(names()).toEqual([newer]);
+  });
+
+  it('still rotates un-suffixed archives written before the suffix existed', async () => {
+    // An upgraded deployment's backup directory holds both shapes. If rotation
+    // stopped recognising the old one, the pre-upgrade set would sit there for
+    // good — bounded, but never collected, and these are whole-state tarballs.
+    archive('ethos-scheduled-2026-09-04T04-00-00Z.tar.gz');
+    const suffixed = scheduledArchiveName(new Date('2026-09-05T04:00:00.000Z'));
+    archive(suffixed);
+    expect(await rotateBackups(storage, dir, 1)).toEqual([
+      'ethos-scheduled-2026-09-04T04-00-00Z.tar.gz',
+    ]);
+    expect(names()).toEqual([suffixed]);
   });
 });
 
@@ -230,6 +289,74 @@ describe('the .lock sentinel', () => {
   it('respects a fresh unreadable lock — age is the only signal left', async () => {
     writeFileSync(backupLockPath(dir), 'garbage, not json');
     await expect(acquireBackupLock(dir, { timeoutMs: 50 })).rejects.toThrow(/already in progress/);
+  });
+
+  // --- the recycled-pid guard: a live pid holds, but not forever -------------
+
+  it('holds a lock naming a live pid well past the unreadable-lock clock', async () => {
+    // `process.pid` is this very worker, so the holder is provably alive. Two
+    // hours is past LOCK_STALE_MS and nowhere near the abandoned bound: the
+    // clock must not get a vote while a pid answers the question.
+    const lock = backupLockPath(dir);
+    writeFileSync(lock, JSON.stringify({ token: 'live', pid: process.pid }));
+    const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000);
+    utimesSync(lock, twoHoursAgo, twoHoursAgo);
+    await expect(acquireBackupLock(dir, { timeoutMs: 50 })).rejects.toThrow(/already in progress/);
+    expect(existsSync(lock)).toBe(true);
+  });
+
+  it('never reclaims a live pid, however old the lock is', async () => {
+    // This replaces a test that asserted the opposite: past a 36-hour bound the
+    // lock used to be taken over whatever its pid said. Being wrong about that
+    // guess puts two writers on the same databases and two rotations deleting
+    // against each other's archives. The recycled pid the bound existed for is
+    // answered by boot identity below instead.
+    const lock = backupLockPath(dir);
+    writeFileSync(lock, JSON.stringify({ token: 'live', pid: process.pid, boot: currentBootId() }));
+    const longAgo = new Date(Date.now() - 37 * 60 * 60 * 1000);
+    utimesSync(lock, longAgo, longAgo);
+
+    await expect(acquireBackupLock(dir, { timeoutMs: 50 })).rejects.toThrow(/already in progress/);
+    expect(existsSync(lock)).toBe(true);
+  });
+
+  it.skipIf(foreignBootId() === null)(
+    'reclaims a lock whose pid belongs to an earlier boot',
+    async () => {
+      // Power fails at 04:00 with the lock held, the box reboots, and the pid in
+      // the body now belongs to something unrelated and alive — here, this
+      // worker. The body says which boot wrote it, so the pid it names cannot be
+      // the process holding the lock, whatever `kill(pid, 0)` answers.
+      const lock = backupLockPath(dir);
+      writeFileSync(
+        lock,
+        JSON.stringify({ token: 'recycled', pid: process.pid, boot: foreignBootId() }),
+      );
+
+      (await acquireBackupLock(dir, { timeoutMs: 50 }))();
+      expect(names()).toEqual([]);
+    },
+  );
+
+  it('tells the operator how to check the pid before clearing the lock', async () => {
+    // Clearing the lock by hand is now the ONLY way past a live holder, so the
+    // refusal has to say how to be sure it is safe.
+    const release = await acquireBackupLock(dir);
+    const err = await acquireBackupLock(dir, { timeoutMs: 50 }).catch((e: unknown) => e);
+    release();
+    expect(err).toBeInstanceOf(Error);
+    if (!(err instanceof Error)) return;
+    expect(err.message).toMatch(new RegExp(`ps -p ${process.pid}`));
+    expect(err.message).toContain(backupLockPath(dir));
+  });
+
+  it('names the holding pid when it refuses', async () => {
+    // "Is anything actually running?" has to be answerable from the message.
+    const release = await acquireBackupLock(dir);
+    await expect(acquireBackupLock(dir, { timeoutMs: 50 })).rejects.toThrow(
+      new RegExp(`held by process ${process.pid}\\.`),
+    );
+    release();
   });
 
   // --- FIX B: the lock is owned, so no unlink is unconditional --------------
@@ -420,6 +547,76 @@ describe('runScheduledBackup', () => {
     expect(names()).toHaveLength(2);
     // The lock is released even on the happy path.
     expect(names()).not.toContain('.lock');
+  });
+
+  // A file the writer cannot encode is skipped rather than fatal. On the
+  // scheduled path that trade is the whole risk: nobody is watching, `origin`
+  // is unset so nothing is delivered, and `lastError` has no reader — the
+  // persisted `cron/output/backup/<ts>.md` body is the only surface a skip can
+  // reach. If it is not in the summary string, it is invisible forever.
+  it('carries a skipped file into the summary the cron output file keeps', async () => {
+    writeFileSync(join(dataDir, 'config.yaml'), 'provider: anthropic\n');
+    mkdirSync(join(dataDir, 'skills', 'greet'), { recursive: true });
+    // Legal on POSIX, a path separator to a Windows extractor — cannot round-trip.
+    writeFileSync(join(dataDir, 'skills', 'greet', 'back\\slash.md'), 'nope\n');
+
+    const settings = resolveBackupSettings(makeConfig({ backup: { dir } }));
+    const result = await runScheduledBackup({ dataDir, settings, storage });
+
+    expect(result.skippedFiles).toEqual([
+      {
+        path: 'skills/greet/back\\slash.md',
+        reason:
+          'the name holds a backslash, which a restore must refuse as a Windows path separator',
+      },
+    ]);
+
+    const summary = summarizeScheduledBackup(result);
+    // Not a failure — the archive is real and named. But the first line must
+    // stop it reading as a clean run, and the file must be named with its reason.
+    expect(summary).toContain('Backup INCOMPLETE — 1 file(s) could not be archived');
+    expect(summary).toContain(`Backup written to ${result.path}`);
+    expect(summary).toContain(
+      '⚠ skills/greet/back\\slash.md — the name holds a backslash, which a restore must refuse as a Windows path separator',
+    );
+  });
+
+  it('says nothing about skips when there were none', async () => {
+    writeFileSync(join(dataDir, 'config.yaml'), 'provider: anthropic\n');
+    const settings = resolveBackupSettings(makeConfig({ backup: { dir } }));
+    const result = await runScheduledBackup({ dataDir, settings, storage });
+
+    expect(result.skippedFiles).toEqual([]);
+    const summary = summarizeScheduledBackup(result);
+    expect(summary).toBe(
+      `Backup written to ${result.path} (${result.fileCount} files, ${result.bytes} bytes, scopes: identity+state)`,
+    );
+    expect(summary).not.toContain('INCOMPLETE');
+  });
+
+  it('writes two archives when two runs land in the same second', async () => {
+    // The collision this suffix exists for: two schedulers sharing one backup
+    // directory — `ethos serve` and `ethos gateway` on one machine, both
+    // ticking at 04:00 — where the second takes the `.lock` inside the same
+    // second the first released it. The name is computed after the lock, so
+    // the lock does not separate them; only the name does. `now` is pinned to
+    // one instant to make that second deterministic.
+    writeFileSync(join(dataDir, 'config.yaml'), 'provider: anthropic\n');
+    const now = new Date('2026-09-04T04:00:00.000Z');
+    const settings = resolveBackupSettings(makeConfig({ backup: { dir } }));
+
+    const first = await runScheduledBackup({ dataDir, settings, storage, now });
+    const second = await runScheduledBackup({ dataDir, settings, storage, now });
+
+    // Without the suffix these are one path, and the second `createBackup`
+    // renames its archive over the first — silently, because POSIX `rename`
+    // replaces its destination.
+    expect(second.path).not.toBe(first.path);
+    expect(first.rotated).toEqual([]);
+    expect(second.rotated).toEqual([]);
+    expect(names()).toEqual([basename(first.path), basename(second.path)].sort());
+    expect(names()).toHaveLength(2);
+    for (const name of names()) expect(name).toMatch(SCHEDULED_ARCHIVE_RE);
   });
 
   it('releases the lock when the backup fails', async () => {

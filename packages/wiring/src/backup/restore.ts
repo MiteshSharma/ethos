@@ -58,9 +58,12 @@
 //      `openJournal` and `recoverFromJournal`.
 //
 // For the duration, a `.restore-in-progress` sentinel sits in the data
-// directory (exclusive `wx` create, stale after an hour, removed on the way
-// out). A restore that finds a STALE sentinel rolls the dead restore back from
-// its journal before taking over — see `claimRestore`. Nothing else consumes
+// directory (exclusive `wx` create, taken over only when the process it names
+// is gone or belongs to an earlier boot, removed on the way out). The sentinel is mutual exclusion and nothing more — it is NOT what
+// triggers recovery. Every real restore replays whatever unfinished journals it
+// finds before it touches the tree, however the sentinel was resolved: absent,
+// taken over as stale, or deleted by an operator following the refusal's own
+// advice — see `recoverAbandonedRestores`. Nothing else consumes
 // the sentinel yet: every Ethos entry point lives in `apps/`, outside this
 // package, so a running agent is not refused by it today. It is the seam those
 // entry points get wired into.
@@ -98,6 +101,7 @@ import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import Database from '@ethosagent/sqlite';
 import { EthosError } from '@ethosagent/types';
+import { classifyHolder, currentBootId } from './holder-identity';
 import { MANIFEST_PATH, MANIFEST_VERSION, verifyArchive } from './manifest';
 import { ALL_SCOPES, classifyPath, isDatabasePath, type ScopeName } from './scopes';
 import { SECRETS_MANIFEST_PATH } from './secrets-manifest';
@@ -121,6 +125,13 @@ const MAX_SYMLINK_HOPS = 32;
 /** Where displaced files and the staging tree live, `dataDir`-relative. */
 const PRE_RESTORE_DIR = '.pre-restore';
 
+/**
+ * What marks a `.pre-restore/` entry as a staging tree rather than a set of
+ * recovery copies. One constant because `recoverAbandonedRestores` has to
+ * recognise from the name alone what the restore that made it can no longer say.
+ */
+const STAGING_SUFFIX = '-staging';
+
 /** The restore-in-progress sentinel, `dataDir`-relative. */
 const RESTORE_SENTINEL = '.restore-in-progress';
 
@@ -128,9 +139,11 @@ const RESTORE_SENTINEL = '.restore-in-progress';
 const JOURNAL_NAME = 'journal.jsonl';
 
 /**
- * A sentinel older than this was left by a restore that died: nothing that
- * only renames staged files runs for an hour, and the alternative to a stale
- * rule is a crashed restore locking the data directory forever.
+ * The clock fallback, used only when a sentinel carries no readable pid (a
+ * truncated write, or a file some other tool put there). A sentinel that names
+ * a live process from THIS boot is not stale at any age, however long it has
+ * been held — see `holder-identity.ts` for why there is no outer clock any
+ * more.
  */
 const SENTINEL_STALE_MS = 60 * 60 * 1000;
 
@@ -467,8 +480,9 @@ function openJournal(dir: string): { record: (entry: JournalRecord) => void; clo
  *
  * A torn final line is expected, not exceptional: a power cut can interrupt the
  * write of the very record that was about to be fsynced, and the whole point of
- * writing the record first is that losing THAT one costs nothing. Anything
- * unparseable is dropped for the same reason.
+ * writing the record first is that losing THAT one costs nothing. Whether an
+ * unparseable line is tolerated is `recoverFromJournal`'s call, not this one's —
+ * it depends on the line's POSITION, which only the caller can see.
  */
 function parseJournalLine(line: string): JournalRecord | null {
   let value: unknown;
@@ -492,7 +506,7 @@ function unusableJournal(dirRel: string, detail: string): EthosError {
   return new EthosError({
     code: 'IMPORT_BLOCKED',
     cause: `A previous restore in this Ethos data directory died part-way, and its record of what it moved is unusable: ${detail}. This installation may be HALF-RESTORED — the files it displaced are under "${dirRel}/".`,
-    action: `Move the files under "${dirRel}/" back over the data directory by hand, delete "${RESTORE_SENTINEL}" and "${join(dirRel, JOURNAL_NAME)}", then run the restore again.`,
+    action: `Move the files under "${dirRel}/" back over the data directory by hand, then delete "${join(dirRel, JOURNAL_NAME)}" — until that record is gone, every restore in this data directory refuses. Delete "${RESTORE_SENTINEL}" too if it is still there, then run the restore again.`,
     details: { preRestore: dirRel },
   });
 }
@@ -527,11 +541,61 @@ function unusableJournal(dirRel: string, detail: string): EthosError {
  * other, and gate 3 does not stop applying because the paths came from one.
  */
 function recoverFromJournal(root: string, dirRel: string, journalPath: string): void {
+  // POSITIONS ARE THE EVIDENCE, so nothing may be dropped before they are read.
+  // `record()` terminates every line with `\n`, so a file whose last write
+  // completed ends in one and `split` yields a trailing '' that is the
+  // DELIMITER, not a line. Exactly one comes off. A second empty element is a
+  // real blank line, and a blank line is not something this writer can produce
+  // — it is corruption, and it has to be seen as such by the rule below.
+  // Filtering empties out first computed every position over a compacted array,
+  // which is how a blank line in the MIDDLE of a journal read as the tolerated
+  // final one and got the rest replayed and deleted underneath it.
+  const lines = readFileSync(journalPath, 'utf8').split('\n');
+  if (lines[lines.length - 1] === '') lines.pop();
+
+  // Where an unreadable line SITS is the whole of what makes it tolerable.
+  //
+  // Tornness has exactly one shape: the write that was in flight when the power
+  // went out, which is the last one. A line that will not parse — empty
+  // included — with lines after it was not torn: the journal is corrupt, or was
+  // written by something else, and this pass cannot tell which of the moves it
+  // names are missing from what it can read. Dropping it and replaying the rest
+  // is a PARTIAL rollback that then deletes the only surviving record of the
+  // move it left undone, so the tree keeps a file nothing will ever put back and
+  // nothing on disk says so. Refuse instead: the journal stays, and
+  // `unusableJournal` tells the operator where the displaced copies are.
   const records: JournalRecord[] = [];
-  for (const line of readFileSync(journalPath, 'utf8').split('\n')) {
-    if (line === '') continue;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i] ?? '';
     const record = parseJournalLine(line);
-    if (record !== null) records.push(record);
+    if (record !== null) {
+      records.push(record);
+      continue;
+    }
+    if (i < lines.length - 1) {
+      throw unusableJournal(
+        dirRel,
+        `line ${i + 1} of ${lines.length} is ${line === '' ? 'blank' : 'not a record this wrote'}, ` +
+          'and it is not the last one — only the final write can be torn, so the rest of this ' +
+          'file cannot be trusted either',
+      );
+    }
+  }
+
+  // Nothing usable, and at most one line to account for it: a zero-length
+  // journal (the file is created by `openJournal`'s `wx` a moment before the
+  // `begin` record is fsynced into it — it leaves no line at all once the
+  // terminal delimiter is off) or one holding a single torn partial line. Every record is fsynced BEFORE the rename it describes, so a journal
+  // that names no rename describes none — there is nothing to undo, and the
+  // file goes. Refusing instead would brick the data directory over a record
+  // that says nothing happened, which was survivable while only a stale
+  // takeover read journals and is not now that every restore does.
+  //
+  // A journal whose `begin` names another directory still falls through to the
+  // refusal below — being in the wrong place is not being incomplete.
+  if (records.length === 0 && lines.length <= 1) {
+    unlinkSync(journalPath);
+    return;
   }
 
   const begin = records[0];
@@ -564,21 +628,45 @@ function recoverFromJournal(root: string, dirRel: string, journalPath: string): 
 }
 
 /**
- * Roll back every install this data directory has a journal for.
+ * Roll back every unfinished install this data directory has a journal for, and
+ * reclaim the staging trees abandoned beside them.
  *
- * Called on the one path that used to make a crashed restore permanent: taking
- * over a stale sentinel. A journal is left behind only by an install that did
- * not finish, so finding one IS the evidence — no pointer from the sentinel is
- * needed, and a stale sentinel with no journal (a restore that died before the
- * install phase, which is most of them) correctly finds nothing and leaves the
- * tree alone.
+ * Keyed off the JOURNAL, not off the sentinel. A journal exists if and only if
+ * an install phase started and did not reach its own end, so it is the evidence
+ * that the tree may be half-rewritten. The sentinel is a mutual-exclusion
+ * device, and `restoreInProgress` tells an operator who is sure nothing is
+ * running to delete it — which is exactly what they do when a crashed restore
+ * makes the next one refuse inside the stale hour. Keying recovery off the
+ * sentinel meant that path skipped recovery entirely: the new restore ran on
+ * top of a half-rewritten tree, and the dead restore's journal stayed on disk
+ * armed, for an unrelated restore weeks later to replay over live files.
+ *
+ * Called once per real restore, immediately after the sentinel is claimed and
+ * before a lock is taken or a byte moves. Claiming FIRST is also what tells a
+ * dead restore's journal from a live one's: a running restore holds the
+ * sentinel across its whole install phase, so a process that got the sentinel
+ * knows every journal it can see was left by a restore that is gone. A dry run
+ * claims nothing and changes nothing, so it does not recover.
  *
  * Newest directory first: the names begin with a timestamp, so they sort into
  * the order the restores ran, and undoing two crashed installs that touched the
  * same file in any other order would put back the wrong copy.
  *
  * A failure here is not something to restore on top of, so it is not swallowed:
- * `recoverFromJournal` throws, and the caller refuses to start.
+ * `recoverFromJournal` throws, and `restoreBackup` refuses to start. The
+ * journal outlives that failure — it is unlinked only once its last record has
+ * been undone — so the next attempt refuses on the same evidence instead of
+ * proceeding over a tree nothing has repaired.
+ *
+ * Staging trees go last, and only once every journal has been dealt with.
+ * `<ts>-<uniq>-staging/` is a full extracted copy of an archive, conversation
+ * history included, removed by a `finally` that a `SIGKILL` never runs and that
+ * nothing else has ever reclaimed. By the time this runs no live restore can
+ * own one (the sentinel is held) and this restore has not made its own yet, so
+ * every one of them is garbage. A staging tree is skipped by the journal loop
+ * above rather than merely failing to contain a `journal.jsonl`: an archive is
+ * someone else's data, and one carrying an entry called `journal.jsonl` must
+ * not be able to plant a journal that blocks every future restore.
  */
 function recoverAbandonedRestores(root: string): void {
   const preRestoreRoot = containedPath(root, PRE_RESTORE_DIR);
@@ -589,6 +677,7 @@ function recoverAbandonedRestores(root: string): void {
     .sort()
     .reverse();
   for (const name of names) {
+    if (name.endsWith(STAGING_SUFFIX)) continue;
     const dirRel = join(PRE_RESTORE_DIR, name);
     const journalPath = join(containedPath(root, dirRel), JOURNAL_NAME);
     if (!existsSync(journalPath)) continue;
@@ -598,6 +687,10 @@ function recoverAbandonedRestores(root: string): void {
       if (err instanceof EthosError) throw err;
       throw unusableJournal(dirRel, err instanceof Error ? err.message : String(err));
     }
+  }
+  for (const name of names) {
+    if (!name.endsWith(STAGING_SUFFIX)) continue;
+    rmSync(containedPath(root, join(PRE_RESTORE_DIR, name)), { recursive: true, force: true });
   }
 }
 
@@ -615,12 +708,89 @@ function timestampName(): string {
   return new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
 }
 
-function restoreInProgress(path: string): EthosError {
+/**
+ * The pid a sentinel body opens with, or null when there is not one to read.
+ *
+ * The body is `<pid> <ISO timestamp> [boot id]` — written by `claimRestore` and
+ * by nothing else — so the pid is the first whitespace-delimited token.
+ * Anything else (a truncated write, a foreign writer, a hand-made file) is not
+ * a pid, and the caller falls back to the clock rather than guessing.
+ */
+function readSentinelPid(body: string): number | null {
+  const [first = ''] = body.trim().split(/\s+/);
+  if (!/^\d+$/.test(first)) return null;
+  const pid = Number(first);
+  return Number.isSafeInteger(pid) && pid > 0 ? pid : null;
+}
+
+/**
+ * The boot the sentinel's pid belongs to — the third token — or null when the
+ * body does not carry one. A sentinel written before this field existed, or on
+ * a platform with no boot identity to record, lands here; `classifyHolder`
+ * reads that as "cannot prove a different boot" and the live pid holds.
+ */
+function readSentinelBoot(body: string): string | null {
+  const [, , third] = body.trim().split(/\s+/);
+  return third === undefined || third === '' ? null : third;
+}
+
+/** The sentinel's exact bytes, or null when it is not there any more. */
+function readSentinelBody(path: string): string | null {
+  try {
+    return readFileSync(path, 'utf8');
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Was this sentinel left behind by a restore that is gone?
+ *
+ * Age alone was the whole rule, and a one-hour wall clock is not one: a large
+ * archive on slow storage overruns it, and taking a live restore over now
+ * replays its journal underneath it. The pid the sentinel already carried and
+ * nothing read answers the question directly:
+ *
+ * - a holder from another BOOT — abandoned, whatever its pid answers now. That
+ *   pid cannot refer to the same process, so this is the recycled-pid case, and
+ *   it is settled by identity rather than by a guess about elapsed time. See
+ *   `holder-identity.ts`.
+ * - a pid that is gone — abandoned NOW, without waiting out a clock that only
+ *   ever existed because there was nothing better to ask.
+ * - a pid that is alive, from this boot — HELD, at any age. There is no outer
+ *   bound any more: an old sentinel naming a live process is exactly the case
+ *   where taking over means replaying a running restore's journal underneath
+ *   it, and no wall clock can tell that apart from a dead one. It is refused,
+ *   loudly, with the pid to check and what to do about it.
+ * - no readable pid — the clock, as before.
+ */
+function sentinelIsStale(body: string | null, ageMs: number): boolean {
+  const pid = body === null ? null : readSentinelPid(body);
+  if (pid !== null && body !== null) return classifyHolder(pid, readSentinelBoot(body)) !== 'live';
+  return ageMs > SENTINEL_STALE_MS;
+}
+
+/**
+ * The refusal an operator meets when a live restore holds the directory.
+ *
+ * This is now the ONLY way out of a sentinel naming a live pid — nothing
+ * expires it on its own any more — so the message has to carry the whole
+ * recovery: which process, how to check it is really gone, and what deleting
+ * the file costs if it is not.
+ */
+function restoreInProgress(path: string, pid: number | null = null): EthosError {
   return new EthosError({
     code: 'IMPORT_BLOCKED',
-    cause: 'Another restore is already running in this Ethos data directory',
-    action: `Wait for it to finish. If nothing is running, delete "${RESTORE_SENTINEL}" in the Ethos data directory and retry.`,
-    details: { path },
+    cause:
+      pid === null
+        ? 'Another restore is already running in this Ethos data directory'
+        : `Another restore is already running in this Ethos data directory (process ${pid})`,
+    action:
+      (pid === null
+        ? `Wait for it to finish. If you are certain no restore is running, delete "${RESTORE_SENTINEL}" in the Ethos data directory and retry`
+        : `Wait for it to finish. Check with \`ps -p ${pid}\`: if process ${pid} is genuinely not running, delete "${RESTORE_SENTINEL}" in the Ethos data directory and retry. Deleting it while that process IS restoring lets a second restore roll the first one's renames back underneath it, so only do this once you have confirmed it is gone`) +
+      ' — the next restore rolls any unfinished install back from its journal before it touches anything, so this is not a way past that.',
+    details: { path, ...(pid !== null ? { pid } : {}) },
   });
 }
 
@@ -628,18 +798,17 @@ function restoreInProgress(path: string): EthosError {
  * Claim the data directory for this restore and return the release.
  *
  * Exclusive create (`wx`), so two restores cannot both believe they own the
- * directory; a sentinel past `SENTINEL_STALE_MS` was left by a restore that
- * died and is taken over. The single retry covers the two ways the create can
- * lose a race it should win: the holder finished between the create and the
- * stat, or a stale sentinel was cleaned up by someone else first.
+ * directory; a sentinel `sentinelIsStale` judges abandoned — the pid it carries
+ * is gone, or it is old enough that no pid saves it — is taken over. The single
+ * retry covers the two ways the create can lose a race it should win: the
+ * holder finished between the create and the stat, or a stale sentinel was
+ * cleaned up by someone else first.
  *
- * Taking over is a ROLLBACK, not a deletion. The dead restore may have got
- * part-way through the install phase, and unlinking its sentinel and carrying
- * on would start a fresh restore on top of a tree it had already half-rewritten,
- * with its recovery copies orphaned under `.pre-restore/` and nothing left
- * pointing at them. So the journal is replayed first and the sentinel is taken
- * only once the tree is back to what the dead restore found; if that fails,
- * this refuses rather than restoring onto an unknown state.
+ * Mutual exclusion is ALL this does. Undoing what a dead restore half-applied
+ * is `recoverAbandonedRestores`, and it runs on the caller's side of this
+ * function for every restore that claims the directory — not here, in the
+ * takeover branch, where an operator who deleted the sentinel on this
+ * function's own advice would walk straight past it.
  *
  * NOTHING ELSE READS THIS YET. Every Ethos entry point — `chat`, `serve`,
  * `gateway`, the desktop app — lives in `apps/`, which this package may not
@@ -650,7 +819,16 @@ function claimRestore(root: string): () => void {
   const path = join(root, RESTORE_SENTINEL);
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
-      writeFileSync(path, `${process.pid} ${new Date().toISOString()}\n`, { flag: 'wx' });
+      // `<pid> <ISO timestamp> [boot id]`. The boot id is what lets a later
+      // restore tell a recycled pid from the process that actually wrote this;
+      // it is omitted on a platform that cannot supply one, and a body without
+      // it is read as "same boot" — refused rather than taken over.
+      const boot = currentBootId();
+      writeFileSync(
+        path,
+        `${process.pid} ${new Date().toISOString()}${boot === null ? '' : ` ${boot}`}\n`,
+        { flag: 'wx' },
+      );
       return () => {
         try {
           unlinkSync(path);
@@ -662,8 +840,10 @@ function claimRestore(root: string): () => void {
       if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
       const stat = lstatSync(path, { throwIfNoEntry: false });
       if (stat === undefined) continue; // vanished between the create and the stat
-      if (Date.now() - stat.mtimeMs <= SENTINEL_STALE_MS) throw restoreInProgress(path);
-      recoverAbandonedRestores(root);
+      const body = readSentinelBody(path);
+      if (!sentinelIsStale(body, Date.now() - stat.mtimeMs)) {
+        throw restoreInProgress(path, body === null ? null : readSentinelPid(body));
+      }
       try {
         unlinkSync(path);
       } catch {
@@ -767,7 +947,7 @@ export async function restoreBackup(opts: RestoreOptions): Promise<RestoreReport
   // shape the real restore would use. Every other path here is the real one,
   // made below by `mkdtempSync` once the gates have passed.
   let preRestore = join(PRE_RESTORE_DIR, timestampName());
-  let stagingRel = `${preRestore}-staging`;
+  let stagingRel = `${preRestore}${STAGING_SUFFIX}`;
   let stagingRoot: string | undefined;
   const displaced: string[] = [];
   const lockedDatabases: string[] = [];
@@ -790,6 +970,14 @@ export async function restoreBackup(opts: RestoreOptions): Promise<RestoreReport
   const releaseRestore = opts.dryRun ? () => {} : claimRestore(root);
 
   try {
+    // Gate 0 — an install that never finished is undone before this one starts.
+    // Inside the claim, so no live restore's journal can be replayed out from
+    // under it; before gate 4, so the databases the in-use check locks are the
+    // recovered ones and not a half-rewritten mixture. Throws if it cannot,
+    // and a refusal here is the point: there is no restoring on top of a tree
+    // nothing has put back. A dry run changes nothing, recovery included.
+    if (!opts.dryRun) recoverAbandonedRestores(root);
+
     // Gate 4 — every live database about to be replaced must be idle, and
     // must stay idle until the last one has been moved aside. The hold does
     // not extend to the file that replaces it; `lockDatabase` says why.
@@ -815,7 +1003,7 @@ export async function restoreBackup(opts: RestoreOptions): Promise<RestoreReport
       mkdirSync(join(root, PRE_RESTORE_DIR), { recursive: true });
       const dir = mkdtempSync(join(root, PRE_RESTORE_DIR, `${timestampName()}-`));
       preRestore = join(PRE_RESTORE_DIR, basename(dir));
-      stagingRel = `${preRestore}-staging`;
+      stagingRel = `${preRestore}${STAGING_SUFFIX}`;
       stagingRoot = join(root, stagingRel);
       mkdirSync(stagingRoot);
       for (const rel of replaceable) containedPath(root, join(preRestore, rel));
@@ -1048,6 +1236,8 @@ function install(args: {
   const installed: string[] = [];
   const journal = openJournal(containedPath(root, preRestore));
   journal.record({ op: 'begin', dir: preRestore });
+  /** Set when `rollback` failed: the journal is the only record of what moved. */
+  let halfRestored = false;
 
   try {
     for (const isDatabase of [false, true]) {
@@ -1076,6 +1266,7 @@ function install(args: {
     }
   } catch (err) {
     const rollbackFailure = rollback(installed, moved);
+    halfRestored = rollbackFailure !== null;
     const detail = err instanceof Error ? err.message : String(err);
     displaced.length = 0;
     throw new EthosError({
@@ -1083,22 +1274,31 @@ function install(args: {
       cause:
         rollbackFailure === null
           ? `Restore failed while installing files (${detail}). Every file it had already moved was put back from "${preRestore}/", so this installation is exactly as it was before the restore.`
-          : `Restore failed while installing files (${detail}), and rolling back failed too (${rollbackFailure}). This installation is HALF-RESTORED: what was displaced is under "${preRestore}/" in the Ethos data directory and has to be moved back by hand.`,
+          : `Restore failed while installing files (${detail}), and rolling back failed too (${rollbackFailure}). This installation is HALF-RESTORED: what was displaced is under "${preRestore}/" in the Ethos data directory, and the record of every move it made is in "${join(preRestore, JOURNAL_NAME)}".`,
       action:
         rollbackFailure === null
           ? 'Fix the underlying failure (disk space, permissions) and run the restore again.'
-          : `Move the files under "${preRestore}/" back over the data directory by hand, then run the restore again.`,
+          : `Fix the underlying failure (disk space, permissions) and run the restore again — it replays "${join(preRestore, JOURNAL_NAME)}" first and puts the files under "${preRestore}/" back before it starts. Until it succeeds every restore in this data directory refuses, so move them back by hand only if that replay cannot be made to work.`,
       details: { preRestore, rolledBack: rollbackFailure === null },
     });
   } finally {
-    // The journal covers PROCESS DEATH, and nothing here is that: whether the
-    // install finished or `rollback` undid it, this process reached the end of
-    // the phase and has said exactly what state the tree is in. Leaving the
-    // record behind would let some later takeover replay it against a tree the
-    // operator has since repaired by hand, which is worse than the automatic
-    // retry it would buy on a path that already asks for intervention.
+    // The journal covers a tree this process can no longer describe. Two of the
+    // three ways out of the phase are not that: a finished install and a
+    // successful rollback both leave the tree in a state named exactly, so
+    // their record goes, and no later restore replays it.
+    //
+    // The third is `rollback` itself failing — the HALF-RESTORED case the throw
+    // above names — and there the journal is the ONLY machine-readable account
+    // of which files moved where. Deleting it on the single path that needs it
+    // left the operator with a directory of copies and no ordering. It is kept,
+    // which also means `recoverAbandonedRestores` refuses every later restore
+    // until the replay succeeds; that is the same answer as for a crash, and
+    // the replay decides each step from what is on disk, so a tree the operator
+    // has already repaired by hand is left alone rather than re-clobbered.
     journal.close();
-    rmSync(join(containedPath(root, preRestore), JOURNAL_NAME), { force: true });
+    if (!halfRestored) {
+      rmSync(join(containedPath(root, preRestore), JOURNAL_NAME), { force: true });
+    }
   }
 }
 

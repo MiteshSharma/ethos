@@ -995,6 +995,70 @@ describe('applyAction — UI/lifecycle transitions', () => {
     expect(s.messages).toEqual([]);
     expect(s.error).toBe('offline');
   });
+
+  it('send-failed ends the visible turn — no status line left behind the banner', () => {
+    // A send that failed is terminal, like `done`/`abort-turn`/`error`. It used
+    // to clear `isStreaming` only, and both of Chat.tsx's timers are gated on
+    // `phase` / `turnStartedAt` — so the error banner came up next to a status
+    // line still reading `received`, its elapsed clock climbing.
+    let s = applyAction(initialChatState, {
+      type: 'submit-user-message',
+      id: 'u1',
+      text: 'hi',
+      timestamp: 1,
+    });
+    expect(s.phase).toBe('received');
+    expect(s.turnStartedAt).toBe(1);
+
+    s = applyAction(s, { type: 'send-failed', userMessageId: 'u1', error: 'offline' });
+    expect(s.phase).toBeNull();
+    expect(s.turnStartedAt).toBeNull();
+    expect(s.currentOp).toBeNull();
+    expect(s.lastStreamEventAt).toBeNull();
+    expect(s.isStreaming).toBe(false);
+    expect(s.currentTurn).toBeNull();
+  });
+
+  it('a failed send never grows a stall indicator, however long the user waits', () => {
+    // Chat.tsx's rule, verbatim (`isStalled`): the 20 s `⚠ still working`
+    // notice fires on `phase !== null` and the last activity timestamp. With
+    // `phase` cleared there is no gate left to open, at any clock reading.
+    const stalled = (state: ChatState, at: number) =>
+      state.phase !== null &&
+      (state.lastStreamEventAt ?? state.turnStartedAt) !== null &&
+      at - (state.lastStreamEventAt ?? state.turnStartedAt ?? 0) > 20_000;
+
+    let s = applyAction(initialChatState, {
+      type: 'submit-user-message',
+      id: 'u1',
+      text: 'hi',
+      timestamp: 1,
+    });
+    // Before the fix this was the bug, and it is real: a live turn DOES stall.
+    expect(stalled(s, 30_000)).toBe(true);
+    s = applyAction(s, { type: 'send-failed', userMessageId: 'u1', error: 'offline' });
+    expect(stalled(s, 30_000)).toBe(false);
+    expect(stalled(s, 10_000_000)).toBe(false);
+  });
+
+  it('send-failed settles a call the dead send left running', () => {
+    // The rare order: the stream had already started when the RPC failed. The
+    // turn still ends, so its unfinished row settles and its trail survives on
+    // the finalised turn rather than being orphaned by a cleared `currentTurn`.
+    let s = applyAction(initialChatState, {
+      type: 'submit-user-message',
+      id: 'u1',
+      text: 'hi',
+      timestamp: 1,
+    });
+    s = applyEvent(s, { type: 'tool_start', toolCallId: 'tc1', toolName: 'x', args: {} }, NOW);
+    const turnId = s.currentTurn?.id ?? '';
+    s = applyAction(s, { type: 'send-failed', userMessageId: 'u1', error: 'offline' });
+    expect(s.phase).toBeNull();
+    expect(actions(trailOf(s, turnId)).map((a) => a.status)).toEqual(['failed']);
+    // The optimistic user bubble still goes; the assistant turn it produced stays.
+    expect(s.messages.map((m) => m.role)).toEqual(['assistant']);
+  });
 });
 
 describe('typed UI cards', () => {

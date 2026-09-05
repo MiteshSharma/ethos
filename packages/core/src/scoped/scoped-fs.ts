@@ -176,11 +176,22 @@ function matchAllowedPrefix(canonical: string, allowed: Iterable<string>): strin
 // only as a devDependency — ARCHITECTURE.md §II). A THIRD copy —
 // `containedPath`/`followFirstSymlink` in `packages/wiring/src/backup/restore.ts` —
 // guards the backup restore's destination paths under the Ethos data directory,
-// duplicated for the same reason: `packages/wiring` is a different layer.
-// **All three must change together:** a fix applied to one boundary and not the
+// duplicated for the same reason: `packages/wiring` is a different layer. A
+// FOURTH lives in `reachable` in `apps/web-api/src/services/documents.service.ts`,
+// guarding the operator-supplied Documents root.
+// **All four must change together:** a fix applied to one boundary and not the
 // others leaves the escape open on whichever path the caller happens to take.
 // The reciprocal notes live in `scoped-storage.ts`'s class doc and in
 // `restore.ts`'s `followFirstSymlink` doc.
+//
+// The fourth copy is NOT equivalent today, and that is why it is named here.
+// It walks with async `lstat` from `node:fs/promises`, so an `lstatSync` grep
+// does not find it, and it swallows every stat error with `.catch(() => null)`
+// and CONTINUES the walk — reading "I could not look" as "nothing to see".
+// The other three abort: `lstatSync(..., { throwIfNoEntry: false })` returns
+// `undefined` for ENOENT alone and throws on EACCES and the rest. That is the
+// same fail-open commit 69e7b26d removed from `restore.ts`. Bringing it into
+// line is a pending fix, not a discrepancy to preserve.
 
 /**
  * Walk `target` one segment at a time below `prefixRoot`, `lstat`ing each.

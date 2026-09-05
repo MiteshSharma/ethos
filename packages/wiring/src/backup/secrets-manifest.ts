@@ -33,9 +33,13 @@ const PERSONALITY_PREFIX = 'personalities/';
  * runs something else entirely. The `- key:` lines are NOT quoted: those are
  * data the importer parses back, not a command.
  *
- * The same four lines live in `apps/ethos/src/commands/backup.ts`,
- * `extensions/cron/src/index.ts` and `apps/web`'s AddMcpModal. Copied rather
- * than shared because `packages/wiring` may not import from `apps/*`.
+ * The same four lines live in five other places — `apps/ethos/src/commands/
+ * backup.ts`, `apps/ethos/src/commands/personality-export.ts`,
+ * `apps/ethos/src/lib/tui-capabilities.ts`, `extensions/cron/src/index.ts` and
+ * `apps/web`'s AddMcpModal — six copies in all. Copied rather than shared
+ * because `packages/wiring` may not import from `apps/*`. The index is spelled
+ * out in full deliberately: an incomplete one is what makes the consolidation
+ * follow-up impossible to scope.
  */
 function shellQuote(arg: string): string {
   return `'${arg.replaceAll("'", `'\\''`)}'`;

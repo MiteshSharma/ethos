@@ -19,13 +19,15 @@
 // unrelated tarball — the way a backup tool ends up eating something it did
 // not create.
 
-import { randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { mkdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { isAbsolute, join } from 'node:path';
 import { type EthosConfig, ethosDir } from '@ethosagent/config';
 import type { SecretsResolver, Storage } from '@ethosagent/types';
 import { createBackup } from './backup/create';
+import { classifyHolder, currentBootId } from './backup/holder-identity';
 import { DEFAULT_SCOPES, parseScopes, type ScopeName } from './backup/scopes';
+import type { TarSkip } from './backup/tar';
 
 /** Fired at 04:00 local by default — after the nightly pass (03:00), not with it. */
 export const DEFAULT_BACKUP_CRON = '0 4 * * *';
@@ -34,13 +36,45 @@ export const DEFAULT_BACKUP_KEEP = 7;
 
 /**
  * Filenames the scheduled job produces, and the ONLY filenames rotation will
- * delete. Anchored on both ends and fully literal about the timestamp shape.
+ * delete. Anchored on both ends and fully literal about both the timestamp
+ * shape and the suffix.
+ *
+ * The suffix group is OPTIONAL because earlier versions of this module wrote
+ * the un-suffixed name, and those archives are still sitting in the backup
+ * directories of every deployment that upgrades. Rotation's contract is "only
+ * the names this module writes" — that has to mean names it has ever written,
+ * or the pre-upgrade set is orphaned and never deleted. Nothing produces the
+ * un-suffixed name any more, so the group only ever matches history.
+ *
+ * It stays narrow in the ways that matter: eight lowercase hex digits and
+ * nothing else, so a hand-named `…Z-final.tar.gz` an operator parked here is
+ * still not ours to delete.
  */
 export const SCHEDULED_ARCHIVE_RE =
-  /^ethos-scheduled-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}Z\.tar\.gz$/;
+  /^ethos-scheduled-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}Z(?:-[0-9a-f]{8})?\.tar\.gz$/;
 
+/**
+ * `ethos-scheduled-<iso>Z-<hex>.tar.gz` — the same shape, spelled the same way,
+ * as `webArchiveName` in `apps/web-api/src/services/backup.service.ts` and
+ * `defaultArchiveName` in `apps/ethos/src/commands/backup.ts`.
+ *
+ * The random suffix is what makes the name UNIQUE. The timestamp has
+ * one-second resolution, and `createBackup` finishes by renaming its temp file
+ * onto `outPath` — POSIX `rename` replaces an existing destination silently.
+ * Two schedulers sharing one backup directory (`ethos serve` and
+ * `ethos gateway` on one machine, both ticking at 04:00) therefore only need
+ * the second to take the `.lock` within the same second as the first released
+ * it, and the second archive renames over the first. Nothing errors, the
+ * directory shows one row, and one of the two nightly backups is simply not
+ * there. Both siblings answer it this way; all three must stay the same shape.
+ *
+ * The suffix goes AFTER the timestamp, and the timestamp is fixed-width, so
+ * two names from different seconds still differ inside the timestamp — which
+ * is what rotation's lexicographic ordering rests on (see `rotateBackups`).
+ */
 export function scheduledArchiveName(now: Date): string {
-  return `ethos-scheduled-${now.toISOString().replace(/[:.]/g, '-').slice(0, 19)}Z.tar.gz`;
+  const stamp = now.toISOString().replace(/[:.]/g, '-').slice(0, 19);
+  return `ethos-scheduled-${stamp}Z-${randomBytes(4).toString('hex')}.tar.gz`;
 }
 
 /** `backup.enabled` — on unless the operator turned it off. */
@@ -98,21 +132,17 @@ export function resolveBackupSettings(config: EthosConfig): ResolvedBackupSettin
 
 const LOCK_ACQUIRE_TIMEOUT_MS = 5_000;
 const LOCK_RETRY_MS = 100;
-/** Only used when the lock body carries no readable pid. */
+/**
+ * The clock fallback, used only when the lock body carries no readable pid (a
+ * truncated write, or a file some other tool put there). A lock that names a
+ * live process from THIS boot is not stale at any age, however long it has been
+ * held — see `backup/holder-identity.ts` for why there is no outer clock any
+ * more.
+ */
 const LOCK_STALE_MS = 60 * 60 * 1000;
 
 export function backupLockPath(dir: string): string {
   return join(dir, '.lock');
-}
-
-function holderIsAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (err) {
-    // EPERM means the process exists and belongs to someone else — alive.
-    return (err as NodeJS.ErrnoException).code === 'EPERM';
-  }
 }
 
 /** The lock file's exact bytes, or `null` when it is not there. */
@@ -124,28 +154,62 @@ function readLockBody(lockPath: string): string | null {
   }
 }
 
-/** True when `body` was left behind by a process that is gone. */
+/**
+ * Was this lock left behind by a backup that is gone?
+ *
+ * A readable pid alone is not an identity: a pid the OS recycled after a crash
+ * reads as alive, and the lock would then never expire. That was capped with a
+ * wall clock, which cured the wedge by introducing a worse failure — past the
+ * bound a demonstrably LIVE holder was preempted, putting two writers on the
+ * same databases. The pid is now qualified by the BOOT it belongs to instead,
+ * which answers the recycled-pid case exactly rather than by elapsed time. The
+ * rule, in order:
+ *
+ * - a holder from another boot — abandoned, whatever its pid answers now. Its
+ *   pid cannot refer to the same process. See `backup/holder-identity.ts`.
+ * - a pid that is gone — abandoned NOW, without waiting out a clock that only
+ *   ever existed because there was nothing better to ask.
+ * - a pid that is alive, from this boot — HELD, at any age. Nothing expires it;
+ *   the refusal names it and says how to clear it by hand.
+ * - no readable pid (truncated write, foreign writer) — the clock, as before.
+ */
 function lockIsStale(lockPath: string, body: string): boolean {
   const pid = readPid(body);
-  if (pid !== null) return !holderIsAlive(pid);
-  // No usable pid (truncated write, foreign writer): fall back to age.
+  if (pid !== null) return classifyHolder(pid, readBoot(body)) !== 'live';
+  let ageMs: number;
   try {
-    return Date.now() - statSync(lockPath).mtimeMs > LOCK_STALE_MS;
+    ageMs = Date.now() - statSync(lockPath).mtimeMs;
   } catch {
-    return true;
+    return true; // no mtime to judge by — the lock is gone or unreadable
+  }
+  return ageMs > LOCK_STALE_MS;
+}
+
+function readLockField(body: string, field: 'pid' | 'boot'): unknown {
+  try {
+    const parsed: unknown = JSON.parse(body);
+    if (typeof parsed !== 'object' || parsed === null || !(field in parsed)) return undefined;
+    return (parsed as Record<string, unknown>)[field];
+  } catch {
+    /* not JSON — a truncated or foreign write */
+    return undefined;
   }
 }
 
 function readPid(body: string): number | null {
-  try {
-    const parsed: unknown = JSON.parse(body);
-    if (typeof parsed !== 'object' || parsed === null || !('pid' in parsed)) return null;
-    const pid = (parsed as { pid: unknown }).pid;
-    return typeof pid === 'number' && Number.isInteger(pid) && pid > 0 ? pid : null;
-  } catch {
-    /* not JSON — a truncated or foreign write */
-    return null;
-  }
+  const pid = readLockField(body, 'pid');
+  return typeof pid === 'number' && Number.isInteger(pid) && pid > 0 ? pid : null;
+}
+
+/**
+ * The boot the lock's pid belongs to, or null when the body does not carry one
+ * — a lock written before this field existed, or on a platform with no boot
+ * identity to record. `classifyHolder` reads null as "cannot prove a different
+ * boot", so the live pid holds.
+ */
+function readBoot(body: string): string | null {
+  const boot = readLockField(body, 'boot');
+  return typeof boot === 'string' && boot !== '' ? boot : null;
 }
 
 /**
@@ -172,9 +236,9 @@ function readPid(body: string): number | null {
  *     the caller a release closure for someone else's file. This is what makes
  *     "two contenders both took over the same abandoned lock" settle on one
  *     holder instead of two.
- *  3. On EEXIST, classify the incumbent. Stale (pid gone, or unreadable and
- *     past the stale window) means re-read and unlink only if the bytes are
- *     still the ones we judged. That comparison makes the losing contender
+ *  3. On EEXIST, classify the incumbent. Stale (pid gone, a holder from another
+ *     boot, or unreadable and past the stale window) means re-read and unlink
+ *     only if the bytes are still the ones we judged. That comparison makes the losing contender
  *     decline in the common case; it is NOT the guarantee. Step 2 is.
  *
  * What this does NOT do, plainly. POSIX has no atomic compare-and-delete for a
@@ -213,6 +277,7 @@ export async function acquireBackupLock(
   const body = JSON.stringify({
     token: randomUUID(),
     pid: process.pid,
+    boot: currentBootId(),
     startedAt: new Date().toISOString(),
   });
   const release = (): void => {
@@ -256,9 +321,19 @@ export async function acquireBackupLock(
     // sleeping out the retry interval first.
     if (reclaimed) continue;
     if (Date.now() >= deadline) {
+      // Name the holder, so "is anything actually running?" is answerable by
+      // the person reading this rather than a guess about a file they cannot see.
+      const holder = readLockBody(lockPath);
+      const pid = holder === null ? null : readPid(holder);
       throw new Error(
-        `another backup is already in progress — ${lockPath} is held. ` +
-          'Wait for it to finish, or remove the lock if no backup is running.',
+        `another backup is already in progress — ${lockPath} is held` +
+          `${pid === null ? '' : ` by process ${pid}`}. ` +
+          (pid === null
+            ? 'Wait for it to finish, or remove that file if no backup is running.'
+            : `Wait for it to finish. Check with \`ps -p ${pid}\`: if process ${pid} is genuinely ` +
+              `not running, delete ${lockPath} and retry. Removing it while that process IS ` +
+              'backing up puts two writers on the same databases and two rotations deleting ' +
+              "against each other's archives, so only do this once you have confirmed it is gone."),
       );
     }
     await new Promise<void>((r) => setTimeout(r, LOCK_RETRY_MS));
@@ -274,7 +349,10 @@ export async function acquireBackupLock(
  *
  * Ordered by the timestamp in the NAME rather than mtime: the name is written
  * once and is lexicographically monotonic, while an mtime is whatever the last
- * `cp -p`, rsync or restore left behind. Returns what it deleted.
+ * `cp -p`, rsync or restore left behind. The uniqueness suffix cannot disturb
+ * that — it sits behind a fixed-width timestamp, so two names from different
+ * seconds have already diverged before a comparison reaches it. Returns what it
+ * deleted.
  */
 export async function rotateBackups(
   storage: Storage,
@@ -318,13 +396,23 @@ export interface ScheduledBackupResult {
   bytes: number;
   /** Archives rotation removed, oldest first. */
   rotated: string[];
+  /**
+   * Files the writer could not encode into a tar entry, with the reason. Not
+   * fatal — one unarchivable name must not cost the whole nightly archive —
+   * and `fileCount` already excludes them, but the archive is then less than
+   * what was asked for and `summarizeScheduledBackup` must say so.
+   */
+  skippedFiles: TarSkip[];
 }
 
 /**
  * Create one scheduled archive, then rotate. Throws on any failure — the cron
- * tick turns a throw into a logged error plus `lastError` on the job, which is
- * what `ethos status` and `ethos cron list` read. A backup that fails quietly
- * is worse than no backup, because it looks like one.
+ * tick turns a throw into a logged error plus `lastError` on the job. No CLI
+ * surface reads that field: `ethos status` reports the newest archive by mtime
+ * whatever its outcome, and `ethos cron list` prints `lastRunAt`, not
+ * `lastError`. What an operator sees instead is the cron output file
+ * `summarizeScheduledBackup` writes — see its doc below. A backup that fails
+ * quietly is worse than no backup, because it looks like one.
  */
 export async function runScheduledBackup(
   opts: RunScheduledBackupOptions,
@@ -351,8 +439,40 @@ export async function runScheduledBackup(
       fileCount: result.fileCount,
       bytes: result.bytes,
       rotated,
+      skippedFiles: result.skippedFiles,
     };
   } finally {
     release();
   }
+}
+
+/**
+ * The line the cron tick persists to `~/.ethos/cron/output/backup/<ts>.md`.
+ *
+ * That file is the ONLY place a scheduled run is reported. The seeded `backup`
+ * job carries no `origin`, so nothing is delivered to a channel, and the other
+ * field a run can write — `lastError` — has no reader on any CLI surface:
+ * `ethos status` reports the newest archive by mtime whatever its outcome, and
+ * `ethos cron list` prints `lastRunAt` and not `lastError`. Its one reader
+ * anywhere is `apps/web-api`'s backup service, which no CLI-only deployment
+ * runs. A fact that is not in this string is a fact nobody ever sees.
+ *
+ * So skips lead, and they lead with the word that keeps the line below from
+ * reading as an unqualified success. The run is NOT failed — an archive minus
+ * one file is worth far more than no archive, and failing here would also cost
+ * the rotation that already ran — but it is not clean either, and an operator
+ * skimming this file must be able to tell those apart on the first line.
+ *
+ * A run with no skips returns exactly the sentence it always did.
+ */
+export function summarizeScheduledBackup(result: ScheduledBackupResult): string {
+  const rotated =
+    result.rotated.length > 0 ? `, rotated ${result.rotated.length} older archive(s)` : '';
+  const written = `Backup written to ${result.path} (${result.fileCount} files, ${result.bytes} bytes, scopes: ${result.scopes.join('+')})${rotated}`;
+  if (result.skippedFiles.length === 0) return written;
+  return [
+    `Backup INCOMPLETE — ${result.skippedFiles.length} file(s) could not be archived and are NOT in it.`,
+    written,
+    ...result.skippedFiles.map((skip) => `  ⚠ ${skip.path} — ${skip.reason}`),
+  ].join('\n');
 }

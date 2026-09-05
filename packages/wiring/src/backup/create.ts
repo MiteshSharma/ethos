@@ -28,7 +28,7 @@ import { type BackupManifest, writeManifest } from './manifest';
 import { type BackupEntry, DEFAULT_SCOPES, enumerateBackupEntries, type ScopeName } from './scopes';
 import { buildSecretsManifest, SECRETS_MANIFEST_PATH } from './secrets-manifest';
 import { type SnapshotMode, snapshotSqlite } from './snapshot';
-import { createTarGzWriter, type TarFileRecord, type TarWriter } from './tar';
+import { createTarGzWriter, type TarFileRecord, type TarSkip, type TarWriter } from './tar';
 
 export interface CreateBackupOptions {
   /** `~/.ethos` (or an `ETHOS_STATE_DIR` override). */
@@ -61,6 +61,13 @@ export interface BackupResult {
   bytes: number;
   /** Databases under `dataDir` that no `WAL_STORES` entry accounts for. */
   unclassifiedDatabases: string[];
+  /**
+   * Files enumerated for the archive that could not be encoded into a tar
+   * entry, with the reason. Reported rather than fatal — one unarchivable
+   * filename must not cost the whole backup — but a silent drop would be just
+   * as bad, so a caller MUST surface these.
+   */
+  skippedFiles: TarSkip[];
 }
 
 /** Where a database's snapshot lands under the staging root. */
@@ -114,6 +121,7 @@ export async function createBackup(opts: CreateBackupOptions): Promise<BackupRes
     for (const entry of entries) {
       const source = sources.get(entry.path) ?? entry.sourcePath;
       const record = await writer.addFileFromDisk(entry.path, source);
+      if (record === null) continue; // unarchivable name; reported via `skippedFiles`
       records.push(record);
       bytes += record.size;
     }
@@ -133,9 +141,10 @@ export async function createBackup(opts: CreateBackupOptions): Promise<BackupRes
       path: opts.outPath,
       scopes,
       manifest,
-      fileCount: entries.length,
+      fileCount: entries.length - writer.skipped.length,
       bytes,
       unclassifiedDatabases,
+      skippedFiles: [...writer.skipped],
     };
   } catch (err) {
     // Close the pipeline before the temp directory goes, so the descriptors

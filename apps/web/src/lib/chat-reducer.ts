@@ -459,6 +459,17 @@ export function applyEvent(state: ChatState, event: SseEvent, now: number): Chat
     }
 
     case 'done':
+      // `done` does NOT settle unfinished rows, and neither reducer does. On this
+      // stream a `tool_end` legitimately arrives AFTER `done` —
+      // `updateTrailActionAnywhere` exists for exactly that case — so a row still
+      // `running` at `done` is not evidence the call never reported back, and
+      // marking it `failed` would slander a call that answers a beat later.
+      //
+      // The honesty gap that leaves is closed in the FOOTER, not here:
+      // `summariseTrail` counts those rows as `unsettled` and `Trail` withholds
+      // its ✓ while any of them is, so a `tool_end` that never arrives reads
+      // `N actions`, never `✓ N actions`. Both reducers carry this note; changing
+      // one without the other re-creates the divergence contract §4 forbids.
       return finaliseTurn(state);
 
     case 'error': {
@@ -648,11 +659,26 @@ export function applyAction(state: ChatState, action: ChatAction): ChatState {
     }
 
     case 'send-failed': {
+      // A send that failed is a turn that ENDED before it began, so it takes
+      // the same terminal transition `done`, `abort-turn` and `error` take.
+      // Clearing `isStreaming` alone left `phase` and `turnStartedAt` set, and
+      // both of Chat.tsx's timers are gated on those — so the error banner came
+      // up beside a status line still reading `received`, its elapsed clock
+      // still climbing, and `⚠ still working` arriving at 20 s for a request
+      // that was already dead.
+      //
+      // The optimistic user bubble is removed AFTER finalising: nothing came
+      // back, so there is nothing for it to have asked. On the rare path where
+      // the RPC failed only once the stream was already running, `closeTurn`
+      // settles what it left in flight rather than dropping the turn's trail on
+      // the floor.
+      const turn = state.currentTurn;
+      const closed = turn ? { ...state, ...closeTurn(state, turn.id, 'errored') } : state;
+      const finalised = finaliseTurn(closed);
       return {
-        ...state,
-        messages: state.messages.filter((m) => m.id !== action.userMessageId),
+        ...finalised,
+        messages: finalised.messages.filter((m) => m.id !== action.userMessageId),
         error: action.error,
-        isStreaming: false,
       };
     }
 
@@ -772,8 +798,11 @@ function ensureTurn(turn: AssistantTurn | null, now: number): AssistantTurn {
  * replayed a `done` for a turn already in history) — but a TOOL-ONLY turn has
  * zero blocks and a non-empty trail, and dropping that would lose its footer.
  *
- * Callers apply their own account of WHY first (`stopTurn`, `closeTrail`) and
- * pass the resulting state in, so the trail this reads is already closed.
+ * Callers that end a turn BADLY apply their own account of why first
+ * (`stopTurn`, `closeTrail`) and pass the resulting state in, so the trail this
+ * reads is already closed. `done` deliberately does not — see the note on its
+ * case; a row still running there stays running, and the footer withholds its
+ * ✓ rather than the reducer inventing an outcome.
  */
 function finaliseTurn(state: ChatState): ChatState {
   const turn = state.currentTurn;

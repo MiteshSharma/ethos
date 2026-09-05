@@ -59,5 +59,7 @@ export {
   type TarEntryHeader,
   type TarEntryVisitor,
   type TarFileRecord,
+  type TarSkip,
   TarWriter,
+  unarchivableReason,
 } from './tar';

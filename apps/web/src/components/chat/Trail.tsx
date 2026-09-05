@@ -42,10 +42,16 @@ export function Trail({ entries, turnId, stopped }: TrailProps) {
   // which is not the same as nothing being wrong (fail-open, contract §3).
   //
   // The same rule governs the leading glyph. A ✓ is a claim that the work came
-  // back ok, so it needs at least one action that genuinely DID and none whose
-  // outcome was never recorded; a reloaded turn therefore reads `4 actions · —`,
-  // with no assurance glyph at all. A ✗ still wins whenever anything failed.
-  const assured = summary.ok > 0 && summary.unrecorded === 0;
+  // back ok, so it needs at least one action that genuinely DID, none whose
+  // outcome was never recorded, and none still WAITING for one; a reloaded turn
+  // therefore reads `4 actions · —`, with no assurance glyph at all. A ✗ still
+  // wins whenever anything failed.
+  //
+  // `unsettled` is the dropped-`tool_end` case. Neither reducer settles a row
+  // on `done` — a `tool_end` legitimately arrives after it — so a call whose
+  // end never came stays `running` for ever, and a footer that ticked over it
+  // would be the exact fabricated assurance `unrecorded` exists to prevent.
+  const assured = summary.ok > 0 && summary.unrecorded === 0 && summary.unsettled === 0;
   const count = `${summary.actions} ${actionsWord}`;
   const lead = stopped
     ? `✗ stopped · ${count}`

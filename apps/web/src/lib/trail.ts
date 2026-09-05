@@ -258,6 +258,13 @@ export interface TrailSummary {
   failed: number;
   /** Actions whose outcome was never persisted; neither a success nor a failure. */
   unrecorded: number;
+  /**
+   * Actions with no outcome YET — still `running`, or still parked on an
+   * approval. Neither reducer settles these when a turn simply ends (see the
+   * `done` note both of them carry), so the footer is what has to stay honest
+   * about them: a ✓ is withheld while any row is unsettled.
+   */
+  unsettled: number;
   /** Null when NO action carries a duration — history without durations. */
   totalDurationMs: number | null;
 }
@@ -268,6 +275,7 @@ export function summariseTrail(entries: TrailEntry[]): TrailSummary {
   let ok = 0;
   let failed = 0;
   let unrecorded = 0;
+  let unsettled = 0;
   let total: number | null = null;
   for (const entry of entries) {
     if (entry.kind === 'finding') {
@@ -278,9 +286,10 @@ export function summariseTrail(entries: TrailEntry[]): TrailSummary {
     if (entry.status === 'ok') ok++;
     if (entry.status === 'failed') failed++;
     if (entry.status === 'unrecorded') unrecorded++;
+    if (entry.status === 'running' || entry.status === 'pending-approval') unsettled++;
     if (entry.durationMs !== undefined) total = (total ?? 0) + entry.durationMs;
   }
-  return { actions, findings, ok, failed, unrecorded, totalDurationMs: total };
+  return { actions, findings, ok, failed, unrecorded, unsettled, totalDurationMs: total };
 }
 
 /** Deterministic DOM id, so a finding row can move focus to the row it cites. */

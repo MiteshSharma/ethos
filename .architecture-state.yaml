@@ -127,10 +127,16 @@ vendored:
     rationale: >-
       A synchronous shim over Node's built-in `node:sqlite` (`DatabaseSync`),
       resolved through `process.getBuiltinModule` so a bundler cannot rewrite
-      the `node:` specifier. It has zero dependencies, imports nothing from
-      `@ethosagent/*`, and contains no Ethos semantics: no contract, no
-      personality concept, no policy, no boundary decision — only parameter
-      marshalling and a `run/get/all` surface over the platform API. It exists
+      the `node:` specifier. It has exactly one `@ethosagent/*` edge —
+      `@ethosagent/types`, imported by `packages/sqlite/src/migrate.ts` for
+      `EthosError` — and no other dependencies at all. That edge does not
+      reopen the layer question: `types` is the zero-dep bottom layer every
+      package may import by construction, so an edge to it can neither create a
+      cycle nor reach across a layer, and raising a typed `EthosError` instead
+      of a bare `Error` carries no Ethos semantics INTO the shim. Beyond it the
+      package contains none: no contract, no personality concept, no policy, no
+      boundary decision — only parameter marshalling and a `run/get/all`
+      surface over the platform API. It exists
       as a workspace package rather than an npm dependency because it is
       Node-version-coupled glue we must be able to patch in the same commit as
       its caller. `packages/safety/channel` depends on it for the DM pairing
@@ -231,7 +237,7 @@ register_anchors:
     - { path: packages/core/src/fs-reach.ts, line: 136, contains: "export function deriveFsReachPaths" }
     - { path: packages/core/src/scoped/scoped-fs.ts, line: 102, contains: "private checkReach(" }
     - { path: packages/core/src/scoped/scoped-fs.ts, line: 136, contains: "through a symbolic link" }
-    - { path: packages/storage-fs/src/scoped-storage.ts, line: 84, contains: "private check(rawPath" }
+    - { path: packages/storage-fs/src/scoped-storage.ts, line: 91, contains: "private check(rawPath" }
     - { path: packages/core/src/path-boundary.ts, line: 17, contains: "export function assertWithinBase" }
 
   G-NET:

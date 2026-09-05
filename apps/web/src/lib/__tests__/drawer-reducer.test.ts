@@ -16,7 +16,7 @@ import {
   RESULT_CHARS_CAP,
   TURNS_CAP,
 } from '../drawer-reducer';
-import type { TrailEntry } from '../trail';
+import { summariseTrail, type TrailEntry } from '../trail';
 
 describe('drawer-reducer', () => {
   const initial: DrawerStreamState = emptyDrawerState('s1');
@@ -547,12 +547,16 @@ describe('drawer-reducer', () => {
     });
 
     it('leaves a running row running on done, exactly as the chat footer does', () => {
-      // DECISION: `done` does NOT settle unfinished rows. The chat reducer's
-      // `done` (`finaliseTurn`) leaves them alone, and a `tool_end` can still
-      // arrive after `done` on this stream ("resolves a call whose turn has
-      // already closed"), so `running` at `done` is not yet proof the call
-      // never reported back. Whether that gap should close is a question for
-      // BOTH reducers in one commit; diverging here would re-create the bug.
+      // DECISION: `done` does NOT settle unfinished rows, in EITHER reducer. A
+      // `tool_end` can still arrive after `done` on this stream ("resolves a
+      // call whose turn has already closed"), so `running` at `done` is not
+      // proof the call never reported back, and marking it failed would
+      // slander a call that answers a beat later.
+      //
+      // What closes the honesty gap instead is the SUMMARY both surfaces
+      // derive: the row counts as `unsettled`, and `Trail` withholds its ✓
+      // while anything is — so a `tool_end` that never comes reads
+      // `1 action`, never `✓ 1 action`. Diverging here would re-create the bug.
       const { chat, chatTurnId, drawer } = withRunningCall();
       const done: SseEvent = { type: 'done', text: '', turnCount: 1 };
       const nextDrawer = applyEvent(drawer, done, NOW + 2);
@@ -563,6 +567,33 @@ describe('drawer-reducer', () => {
         { kind: 'action', toolName: 'terminal', status: 'running', durationMs: undefined },
       ]);
       expect(nextDrawer.turns[0]?.closed).toBe(true);
+      // Both surfaces summarise it the same way, so neither can tick over it.
+      const drawerSummary = summariseTrail(newestEntries(nextDrawer));
+      expect(drawerSummary).toEqual(summariseTrail(nextChat.trail[chatTurnId] ?? []));
+      expect(drawerSummary).toMatchObject({ actions: 1, ok: 0, failed: 0, unsettled: 1 });
+    });
+
+    it('a late tool_end settles the row identically in both surfaces', () => {
+      // The path `done` must not pre-empt: the call reports back after the turn
+      // closed, and both surfaces resolve it wherever it lives — which is what
+      // makes withholding the ✓ (rather than painting a ✗) the right call.
+      const { chat, chatTurnId, drawer } = withRunningCall();
+      const tail: SseEvent[] = [
+        { type: 'done', text: '', turnCount: 1 },
+        { type: 'tool_end', toolCallId: 'c1', toolName: 'terminal', ok: true, durationMs: 7 },
+      ];
+      let nextDrawer = drawer;
+      let nextChat = chat;
+      for (const event of tail) {
+        nextDrawer = applyEvent(nextDrawer, event, NOW + 3);
+        nextChat = applyChatEvent(nextChat, event, NOW + 3);
+      }
+
+      expect(rows(newestEntries(nextDrawer))).toEqual(rows(nextChat.trail[chatTurnId] ?? []));
+      expect(rows(newestEntries(nextDrawer))).toEqual([
+        { kind: 'action', toolName: 'terminal', status: 'ok', durationMs: 7 },
+      ]);
+      expect(summariseTrail(newestEntries(nextDrawer))).toMatchObject({ ok: 1, unsettled: 0 });
     });
 
     it('ignores a stop that happened on a different session', () => {

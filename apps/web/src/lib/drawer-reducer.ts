@@ -96,14 +96,17 @@ export function applyEvent(
       // footer already called `failed`: two renderers of one trail disagreeing
       // about the same tool call, which is exactly what contract §4 forbids.
       //
-      // `done` deliberately does NOT settle rows, for two reasons. The chat
-      // reducer's `done` (`finaliseTurn`) does not either, and inventing a
-      // divergence here to close an honesty gap would trade this bug for its
-      // mirror image. And on this stream a `tool_end` legitimately arrives
-      // AFTER `done` — `updateTrailActionAnywhere` exists for that case — so a
-      // row still `running` at `done` is not yet evidence the call never
-      // reported back. If that gap is worth closing, both reducers have to
-      // close it in the same commit.
+      // `done` does NOT settle unfinished rows, and neither reducer does. On this
+      // stream a `tool_end` legitimately arrives AFTER `done` —
+      // `updateTrailActionAnywhere` exists for exactly that case — so a row still
+      // `running` at `done` is not evidence the call never reported back, and
+      // marking it `failed` would slander a call that answers a beat later.
+      //
+      // The honesty gap that leaves is closed in the FOOTER, not here:
+      // `summariseTrail` counts those rows as `unsettled` and `Trail` withholds
+      // its ✓ while any of them is, so a `tool_end` that never arrives reads
+      // `N actions`, never `✓ N actions`. Both reducers carry this note; changing
+      // one without the other re-creates the divergence contract §4 forbids.
       const trail =
         event.type === 'error' ? closeTrail(prev.trail, open.turnId, 'errored') : prev.trail;
       return { ...prev, turns, trail };

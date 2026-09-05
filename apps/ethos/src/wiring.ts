@@ -201,11 +201,15 @@ export function buildSystemTaskHandlers(
       return { output: 'Skill evolver run completed' };
     },
     // Scheduled snapshot of ~/.ethos (plan agent-state-backup §3). Failures
-    // THROW: the cron tick logs them and stamps `lastError` on the job, which
-    // is what `ethos cron list` and the status pane read. A backup that fails
-    // quietly is worse than none, because it looks like one.
+    // THROW: the cron tick logs them and stamps `lastError` on the job. Neither
+    // `ethos cron list` nor the status pane reads that field — `cron list`
+    // prints `lastRunAt`, and `ethos status` reports the newest archive by mtime
+    // whatever its outcome. The cron output file below is what an operator sees.
+    // A backup that fails quietly is worse than none, because it looks like one.
     backup: async () => {
-      const { resolveBackupSettings, runScheduledBackup } = await import('@ethosagent/wiring');
+      const { resolveBackupSettings, runScheduledBackup, summarizeScheduledBackup } = await import(
+        '@ethosagent/wiring'
+      );
       const settings = resolveBackupSettings(config);
       const result = await runScheduledBackup({
         dataDir: ethosDir(),
@@ -213,11 +217,12 @@ export function buildSystemTaskHandlers(
         storage: getStorage(),
         secrets: await getSecretsResolver(),
       });
-      const rotated =
-        result.rotated.length > 0 ? `, rotated ${result.rotated.length} older archive(s)` : '';
-      return {
-        output: `Backup written to ${result.path} (${result.fileCount} files, ${result.bytes} bytes, scopes: ${result.scopes.join('+')})${rotated}`,
-      };
+      // The wording lives next to the result shape it describes, because this
+      // string is the whole of what a scheduled run reports: it is persisted to
+      // `cron/output/backup/<ts>.md`, the job has no `origin` to deliver to, and
+      // no CLI surface reads `lastError`. A file the archive dropped has to be
+      // in here or it is invisible.
+      return { output: summarizeScheduledBackup(result) };
     },
   };
 }

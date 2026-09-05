@@ -60,8 +60,15 @@ export interface ScopedStorageScope {
  * `containedPath`/`followFirstSymlink` in
  * `packages/wiring/src/backup/restore.ts` — guards the backup restore's
  * destination paths under the Ethos data directory, duplicated for the same
- * reason: `packages/wiring` is a different layer. **All three must change
- * together.**
+ * reason: `packages/wiring` is a different layer. A FOURTH is `reachable` in
+ * `apps/web-api/src/services/documents.service.ts`, guarding the
+ * operator-supplied Documents root. **All four must change together.**
+ *
+ * The fourth is NOT equivalent today. It walks with async `lstat` from
+ * `node:fs/promises` — so an `lstatSync` grep misses it — and swallows every
+ * stat error with `.catch(() => null)`, then CONTINUES the walk, where the
+ * other three abort on anything but ENOENT. That is the fail-open commit
+ * 69e7b26d removed from `restore.ts`; bringing it into line is a pending fix.
  *
  * Prefixes are matched literally — there is no glob expansion. Pass paths
  * that end in `/` for directory scopes; ScopedStorage normalizes them so

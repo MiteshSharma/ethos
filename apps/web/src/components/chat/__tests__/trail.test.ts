@@ -6,12 +6,12 @@
 // nothing when there is nothing to say, it never fabricates assurance, and a
 // finding takes you to the evidence it cites.
 
-import type { StoredMessage } from '@ethosagent/web-contracts';
+import type { SseEvent, StoredMessage } from '@ethosagent/web-contracts';
 import { act, createElement } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { applyAction, initialChatState } from '../../../lib/chat-reducer';
+import { applyAction, applyEvent, initialChatState } from '../../../lib/chat-reducer';
 import type { TrailAction, TrailEntry } from '../../../lib/trail';
 import { Trail } from '../Trail';
 
@@ -107,6 +107,28 @@ describe('Trail footer — the count', () => {
     expect(text(html)).toContain('2 actions');
   });
 
+  it('withholds the ✓ while an action is still running', () => {
+    // A `tool_end` that never arrives — a dropped SSE frame, a server that died
+    // mid-turn. The reducers deliberately leave the row `running` at `done`
+    // (a late `tool_end` is legitimate and must not be slandered as a failure),
+    // so the footer is what has to stay honest: `2 actions`, no tick.
+    const html = markup([
+      action({ toolCallId: 'a', status: 'ok' }),
+      action({ toolCallId: 'b', status: 'running', durationMs: undefined }),
+    ]);
+    expect(text(html)).toContain('2 actions');
+    expect(html).not.toContain('✓');
+  });
+
+  it('withholds the ✓ while an action is parked on an approval', () => {
+    const html = markup([
+      action({ toolCallId: 'a', status: 'ok' }),
+      action({ toolCallId: 'b', status: 'pending-approval', durationMs: undefined }),
+    ]);
+    expect(text(html)).toContain('2 actions');
+    expect(html).not.toContain('✓');
+  });
+
   it('still leads with ✗ when an unrecorded turn also holds a failure', () => {
     const html = markup([
       action({ toolCallId: 'a', status: 'unrecorded', durationMs: undefined }),
@@ -198,6 +220,58 @@ describe('Trail — expansion', () => {
     act(() => row?.click());
     expect(container.textContent).toContain('/etc/hosts');
     expect(container.textContent).toContain('root 127.0.0.1');
+  });
+});
+
+// End to end from the LIVE stream: a `tool_start` whose `tool_end` never comes,
+// then `done`. This is the defect the `unsettled` count closes — the row reads
+// `· running` for ever, and the footer used to lead `✓ 1 action` over it.
+describe('Trail footer — fed by a turn whose tool never reported back', () => {
+  /** The footer of the turn `done` just moved into history. */
+  function liveFooter(events: SseEvent[]): string {
+    let state = applyAction(initialChatState, {
+      type: 'submit-user-message',
+      id: 'u1',
+      text: 'go',
+      timestamp: 1,
+    });
+    let turnId = '';
+    for (const event of events) {
+      state = applyEvent(state, event, 1_000);
+      turnId = state.currentTurn?.id ?? turnId;
+    }
+    return renderToStaticMarkup(
+      createElement(Trail, { entries: state.trail[turnId] ?? [], turnId }),
+    );
+  }
+
+  /** One call that came back ok, one whose `tool_end` never did. */
+  const oneOkOneLost: SseEvent[] = [
+    { type: 'tool_start', toolCallId: 'tc1', toolName: 'read_file', args: { path: '/x' } },
+    { type: 'tool_end', toolCallId: 'tc1', toolName: 'read_file', ok: true, durationMs: 40 },
+    { type: 'tool_start', toolCallId: 'tc2', toolName: 'bash', args: { command: 'ls' } },
+  ];
+
+  it('leads with the bare count, never a ✓, when a tool_end never arrived', () => {
+    // The genuine defect: one call DID come back ok, so the footer used to
+    // lead `✓ 2 actions` over a row that still reads `· running` for ever.
+    const html = liveFooter([...oneOkOneLost, { type: 'done', text: 'done', turnCount: 1 }]);
+    // The exact lead: the count, and no assurance glyph at all.
+    expect(text(html)).toContain('2 actions · 40ms');
+    expect(html).not.toContain('✓');
+    expect(html).not.toContain('✗');
+  });
+
+  it('leads with ✓ once the late tool_end lands', () => {
+    // The other half of the same rule: withholding the tick is not a verdict,
+    // it is the absence of one, and it is revoked the moment the call reports —
+    // which is why `done` must not paint a ✗ on the row in the first place.
+    const html = liveFooter([
+      ...oneOkOneLost,
+      { type: 'done', text: 'done', turnCount: 1 },
+      { type: 'tool_end', toolCallId: 'tc2', toolName: 'bash', ok: true, durationMs: 8 },
+    ]);
+    expect(text(html)).toContain('✓ 2 actions');
   });
 });
 

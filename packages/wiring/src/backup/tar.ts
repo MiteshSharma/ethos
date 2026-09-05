@@ -51,6 +51,12 @@ export interface TarEntryHeader {
   size: number;
 }
 
+/** A file the writer could not archive, and the reason an operator needs. */
+export interface TarSkip {
+  path: string;
+  reason: string;
+}
+
 /**
  * Called once per archive entry. `body` yields exactly `entry.size` bytes; a
  * visitor that stops early is fine — the reader drains the remainder.
@@ -72,54 +78,105 @@ function blocked(cause: string): EthosError {
 /** `C:` / `c:` — a drive-qualified path is absolute on the platform that reads it. */
 const DRIVE_QUALIFIED = /^[A-Za-z]:/;
 
+// TWO GUARDS, DELIBERATELY DIFFERENT. Do not "simplify" them back together.
+//
+//   READ  `assertSafeEntryPath` — an archive is untrusted input. The question
+//         is "could extracting this escape the destination?", the answer to a
+//         wrong guess is arbitrary file write, and the response is to refuse
+//         the whole archive. Maximally paranoid; refuses whole SHAPES.
+//
+//   WRITE `unarchivableReason` — these names come off the operator's own
+//         filesystem. The question is "can I encode this and hand it back
+//         under the same name?", not "is this hostile". It reports a reason
+//         instead of throwing, because a fatal error here kills an entire
+//         nightly backup over one filename, forever, and accuses the
+//         operator's own file of being malicious while doing it.
+//
+// The write guard must never be LOOSER than the read guard on any shape the
+// read guard refuses, or we would write archives our own restore rejects —
+// that round-trip constraint, not hostility, is what puts `\` on both lists.
+
 /**
- * The one path guard, run on the FINAL resolved name — after a `prefix` join
- * and after a PAX `path=` override. A PAX record is a second, easily missed
- * way to smuggle `../`, so nothing may reach a caller without passing here.
+ * The one path guard on the READ side, run on the FINAL resolved name — after
+ * a `prefix` join and after a PAX `path=` override. A PAX record is a second,
+ * easily missed way to smuggle `../`, so nothing may reach a caller without
+ * passing here.
  *
  * An archive entry path is a STRICT POSIX RELATIVE path and nothing else:
- * `/`-separated, no NUL, no `..` anywhere, no empty or `.` segment, no
- * backslash, and no leading `/` or drive letter. The last three are not
- * pedantry — `\` is a separator on Windows (so `a\..\b` is traversal there and
- * an ordinary filename here), `\\server\share` is a UNC path that resolves off
- * the machine entirely, `C:/x` is absolute wherever drives exist, and a `.`
- * segment is a path this code never writes, so an archive carrying one was
- * written by something else. Refusing the whole shape is cheaper to be sure of
- * than enumerating what each one does on each platform. `..` stays a substring
- * check rather than a per-segment one so `truncateName` cannot manufacture a
- * trailing `..` segment out of a name like `..foo` for a reader that ignores
- * our PAX header.
+ * `/`-separated, no NUL, no `..`, `.` or empty segment, no backslash, and no
+ * leading `/` or drive letter. The last three are not pedantry — `\` is a
+ * separator on Windows (so `a\..\b` is traversal there and an ordinary
+ * filename here), `\\server\share` is a UNC path that resolves off the machine
+ * entirely, `C:/x` is absolute wherever drives exist, and a `.` segment is a
+ * path this code never writes, so an archive carrying one was written by
+ * something else. Refusing the whole shape is cheaper to be sure of than
+ * enumerating what each one does on each platform.
+ *
+ * `..` is a SEGMENT check. A `..` segment is the only form that traverses; a
+ * `..` inside a segment — `2026-01-01..2026-02-01.md` — is an ordinary POSIX
+ * filename that resolves to itself. The substring form this used to be also
+ * stood in for a `truncateName` hazard, but that is a write-side concern about
+ * naive third-party readers that a read guard cannot enforce anyway; the
+ * defence now lives in `truncateName` itself, where it works.
  */
 export function assertSafeEntryPath(path: string): void {
   if (
     !path ||
     path.includes('\0') ||
-    path.includes('..') ||
     path.includes('\\') ||
     path.startsWith('/') ||
     DRIVE_QUALIFIED.test(path) ||
-    path.split('/').some((segment) => segment === '' || segment === '.')
+    path.split('/').some((segment) => segment === '' || segment === '.' || segment === '..')
   ) {
     throw blocked(`Malicious tar entry rejected: "${path}"`);
   }
 }
 
-function assertEncodable(path: string, size: number): void {
-  assertSafeEntryPath(path);
-  if (path.includes('\n')) {
-    throw new EthosError({
-      code: 'INVALID_INPUT',
-      cause: `Cannot encode tar entry path "${path}" — a newline terminates a PAX record`,
-      action: 'Rename the file so its path contains no newline.',
-    });
+/**
+ * The WRITE policy: can this file be encoded into a ustar entry that our own
+ * reader hands back under the same name? Returns the reason it cannot, or
+ * `null`. Never throws, and never calls the operator's file malicious.
+ *
+ * A backslash is legal and safe in a POSIX filename and safe inside a tar
+ * entry name, so it is here only because `assertSafeEntryPath` refuses it: the
+ * file cannot round-trip, and re-encoding it would restore under a name the
+ * operator never had. Skipping it and saying so beats archiving something a
+ * restore will reject.
+ */
+export function unarchivableReason(path: string, size: number): string | null {
+  if (!path) return 'the entry has no name';
+  if (path.includes('\0')) return 'the name holds a NUL, which terminates a tar header field';
+  if (path.includes('\n')) return 'the name holds a newline, which terminates a PAX record';
+  if (path.includes('\\')) {
+    return 'the name holds a backslash, which a restore must refuse as a Windows path separator';
+  }
+  if (path.startsWith('/') || DRIVE_QUALIFIED.test(path)) return 'the name is not a relative path';
+  const segments = path.split('/');
+  if (segments.some((segment) => segment === '..')) {
+    return 'the name has a ".." path segment, which would escape the restore directory';
+  }
+  if (segments.some((segment) => segment === '' || segment === '.')) {
+    return 'the name has an empty or "." path segment';
   }
   if (size < 0 || size > SIZE_MAX) {
-    throw new EthosError({
-      code: 'INVALID_INPUT',
-      cause: `Cannot encode tar entry "${path}" — size ${size} exceeds the ustar limit of ${SIZE_MAX} bytes`,
-      action: 'Exclude the file from the backup, or split it.',
-    });
+    return `its size ${size} exceeds the ustar limit of ${SIZE_MAX} bytes`;
   }
+  return null;
+}
+
+/**
+ * The same policy, fatal. For the entries whose names this code chooses (the
+ * manifest, the secrets manifest): those cannot be skipped and reported, since
+ * an archive missing its manifest is not an archive.
+ */
+function assertEncodable(path: string, size: number): void {
+  const reason = unarchivableReason(path, size);
+  if (reason === null) return;
+  throw new EthosError({
+    code: 'INVALID_INPUT',
+    cause: `Cannot archive "${path}" — ${reason}`,
+    action: 'Rename the file, or exclude it from the backup.',
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -147,16 +204,20 @@ function splitUstarPath(path: string): { name: string; prefix: string } | null {
 
 /**
  * Best-effort name in the data header of a PAX entry, for readers that ignore
- * the extended header. Our parser overrides it with the `path=` record. The
- * cut lands on a UTF-8 boundary; the value is a prefix of an already-validated
- * path, so it cannot introduce `..`.
+ * the extended header. Our parser overrides it with the `path=` record.
+ *
+ * The cut lands on a UTF-8 boundary. It can still land mid-segment, and a cut
+ * through `..foo` leaves a trailing `..` — traversal for a naive reader. The
+ * validated path has no `..` SEGMENT, so dropping that one partial segment is
+ * enough; what remains ends in a whole segment that is not `..`.
  */
 function truncateName(path: string): string {
   const buf = Buffer.from(path, 'utf8');
   if (buf.length <= NAME_MAX) return path;
   let end = NAME_MAX;
   while (end > 0 && ((buf[end] ?? 0) & 0xc0) === 0x80) end--;
-  return buf.subarray(0, end).toString('utf8');
+  const cut = buf.subarray(0, end).toString('utf8');
+  return cut.endsWith('/..') ? cut.slice(0, -3) : cut;
 }
 
 function encodeHeader(name: string, prefix: string, size: number, typeFlag: string): Buffer {
@@ -210,6 +271,7 @@ function padding(size: number): number {
 export class TarWriter {
   readonly #out: Writable;
   readonly #done: Promise<void>;
+  readonly #skipped: TarSkip[] = [];
   #failure: unknown;
   #finished = false;
   #aborted = false;
@@ -231,14 +293,32 @@ export class TarWriter {
     return this.addStream(path, content.length, [content]);
   }
 
-  /** Append a file from disk, streaming it in 64 KiB chunks. */
-  async addFileFromDisk(archivePath: string, sourcePath: string): Promise<TarFileRecord> {
+  /**
+   * Append a file from disk, streaming it in 64 KiB chunks.
+   *
+   * This is the ONE entry point fed by names the operator chose rather than
+   * this code, so it is the one that skips: an unarchivable name returns
+   * `null` and lands on `skipped` instead of throwing. Nothing has been
+   * written when it does, so the archive is unaffected. The alternative is a
+   * whole backup — every night, indefinitely — lost to one filename.
+   */
+  async addFileFromDisk(archivePath: string, sourcePath: string): Promise<TarFileRecord | null> {
     const size = statSync(sourcePath).size;
+    const reason = unarchivableReason(archivePath, size);
+    if (reason !== null) {
+      this.#skipped.push({ path: archivePath, reason });
+      return null;
+    }
     return this.addStream(
       archivePath,
       size,
       createReadStream(sourcePath, { highWaterMark: CHUNK }),
     );
+  }
+
+  /** Files `addFileFromDisk` could not archive. Empty in the ordinary case. */
+  get skipped(): readonly TarSkip[] {
+    return this.#skipped;
   }
 
   /**
@@ -497,6 +577,12 @@ export async function readTarStream(
       }
       const data = await reader.read(size);
       await reader.skip(padding(size));
+      // A PAX header does NOT clear a pending override: `?? paxPath` keeps the
+      // previous value when this record carries no `path=`, and the `continue`
+      // skips the clear below. So two PAX headers in a row can leave the FIRST
+      // one's path in force for the file entry that follows — the clear covers
+      // FILE entries only. That is a wrong-name hazard, not an escape: whatever
+      // path wins still faces `assertSafeEntryPath` on the final resolved name.
       paxPath = parsePaxPath(data ?? Buffer.alloc(0)) ?? paxPath;
       continue;
     }

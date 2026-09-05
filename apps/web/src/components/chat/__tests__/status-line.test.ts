@@ -13,6 +13,7 @@ import { act, createElement } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { applyAction, initialChatState } from '../../../lib/chat-reducer';
 import { ANNOUNCE_THROTTLE_MS, StatusLine, type StatusLineProps } from '../StatusLine';
 import { Trail } from '../Trail';
 
@@ -83,6 +84,34 @@ describe('StatusLine — stall', () => {
 
   it('says nothing extra while events are still arriving', () => {
     expect(markup({ stalled: false })).not.toContain('still working');
+  });
+});
+
+describe('StatusLine — a send that failed', () => {
+  it('draws nothing once the send failed, however long ago the turn started', () => {
+    // End to end from the reducer: the error banner is the whole of the
+    // feedback. `send-failed` used to clear `isStreaming` only, leaving `phase`
+    // set — so this rendered `received` beside the banner, with the elapsed
+    // clock still counting up on a request that was already dead.
+    let state = applyAction(initialChatState, {
+      type: 'submit-user-message',
+      id: 'u1',
+      text: 'hi',
+      timestamp: 1,
+    });
+    state = applyAction(state, { type: 'send-failed', userMessageId: 'u1', error: 'offline' });
+
+    const html = renderToStaticMarkup(
+      createElement(StatusLine, {
+        phase: state.phase,
+        label: state.currentOp,
+        // What Chat.tsx's clock would show if it had somehow kept running.
+        elapsedMs: 45_000,
+        stalled: false,
+      }),
+    );
+    expect(html).toBe('');
+    expect(state.error).toBe('offline');
   });
 });
 

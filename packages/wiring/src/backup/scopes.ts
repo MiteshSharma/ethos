@@ -64,8 +64,15 @@ export interface WalStoreRecord {
 
 /**
  * Every WAL store in the repo. 19 pragma sites across 18 modules, resolving to
- * 14 distinct database files — `sessions.db` has four tenants sharing one file
+ * 14 distinct database files — `sessions.db` has FIVE tenants sharing one file
  * and `pairing.db` is opened from two commands.
+ *
+ * Five, not four, and the difference is that tenants are not modules:
+ * `extensions/session-sqlite/src/index.ts` holds two of them, which is what its
+ * `sites: 2` records — `SQLiteSessionStore` and the key/value store
+ * `createKvStoreFactory` opens, both pointed at the same `sessions.db` path by
+ * `session-sqlite/src/compose.ts`. Counting the four MODULES that name the file
+ * is what makes it look like four.
  */
 export const WAL_STORES: readonly WalStoreRecord[] = [
   {
@@ -119,21 +126,24 @@ export const WAL_STORES: readonly WalStoreRecord[] = [
     sites: 2,
     database: 'sessions.db',
     scope: 'state',
-    reason: 'Conversation history. The reason a state archive is as sensitive as the machine.',
+    reason:
+      'Conversation history. The reason a state archive is as sensitive as the machine. Two ' +
+      'tenants in one module (hence `sites: 2`): the session store, and the key/value store ' +
+      '`createKvStoreFactory` opens on the same path.',
   },
   {
     source: 'extensions/session-sqlite/src/api-key-store.ts',
     sites: 1,
     database: 'sessions.db',
     scope: 'state',
-    reason: 'Second tenant of sessions.db — API key hashes, not values.',
+    reason: 'Third tenant of sessions.db — API key hashes, not values.',
   },
   {
     source: 'extensions/session-sqlite/src/context-log.ts',
     sites: 1,
     database: 'sessions.db',
     scope: 'state',
-    reason: 'Third tenant of sessions.db — what context each turn was assembled from.',
+    reason: 'Fourth tenant of sessions.db — what context each turn was assembled from.',
   },
   {
     source: 'apps/web-api/src/stores/idempotency-store.ts',
@@ -141,7 +151,7 @@ export const WAL_STORES: readonly WalStoreRecord[] = [
     database: 'sessions.db',
     scope: 'state',
     reason:
-      'Fourth tenant of sessions.db (boot.ts:516, serve.ts:870 both pass that path). The cache ' +
+      'Fifth tenant of sessions.db (boot.ts and serve.ts both pass that path). The cache ' +
       'itself is transient — 24h TTL — and would be excluded on its own merits, but it is a ' +
       'TABLE inside a state database, not a file, so excluding it would mean splitting the file.',
   },
@@ -319,9 +329,15 @@ const DB_SIDECAR = /\.db-(wal|shm|journal)$/;
 /**
  * `*.lock` is D1's always-excluded glob and it is right about lock sentinels
  * (`cron/jobs.json.lock`, `processes/registry.lock`, `backups/.lock`). It is
- * wrong about ONE file: `plugins.lock` inside a personality directory is a
- * dependency PIN, not a lock, and D1 elsewhere requires plugin pins to travel.
- * The glob wins everywhere except that name.
+ * wrong about ONE file: `plugins.lock` is a dependency PIN, not a lock, and D1
+ * elsewhere requires plugin pins to travel. The glob wins everywhere except
+ * that name.
+ *
+ * Carved out by BASENAME, not by location. `plugin-loader` only ever writes one
+ * inside `personalities/<id>/`, but the check below does not say so: a
+ * `plugins.lock` anywhere in the tree survives the glob. Surviving it is not
+ * the same as being archived — the file still has to match a rule in `RULES`,
+ * and the scope it lands in is whichever rule that is.
  */
 const PLUGIN_PIN_FILENAME = 'plugins.lock';
 
