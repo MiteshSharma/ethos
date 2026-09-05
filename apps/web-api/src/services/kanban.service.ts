@@ -729,7 +729,7 @@ function parseMentions(body: string): string[] {
 // that could resolve outside `teamsDir()`. Without it, a malicious or buggy
 // caller could feed `..` into a path and reach beyond the teams directory.
 const TEAM_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
-function assertSafeTeamName(name: string): void {
+export function assertSafeTeamName(name: string): void {
   if (name === '.' || name === '..' || !TEAM_NAME_PATTERN.test(name)) {
     throw new Error(`invalid team name: ${name}`);
   }

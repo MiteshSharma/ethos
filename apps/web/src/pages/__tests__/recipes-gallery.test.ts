@@ -67,6 +67,7 @@ const CATALOG = {
       summary: 'A digest before you wake up.',
       tags: ['daily', 'needs-channel'],
       sourceDoc: 'plan/usecases/01-morning-briefing.md',
+      attachedTo: null,
     },
     {
       id: 'link-archiver',
@@ -75,6 +76,16 @@ const CATALOG = {
       summary: 'Saves and summarizes every link you send it.',
       tags: ['zero-credentials'],
       sourceDoc: null,
+      attachedTo: null,
+    },
+    {
+      id: 'obsidian-second-brain',
+      version: 1,
+      title: 'Obsidian second brain',
+      summary: 'Gives a personality you already have your vault.',
+      tags: ['attach'],
+      sourceDoc: null,
+      attachedTo: ['writer', 'researcher'],
     },
   ],
 };
@@ -87,13 +98,25 @@ function bundleFor(id: string, personalityId: string) {
       title: id,
       summary: '',
       tags: [],
-      personality: {
-        id: personalityId,
-        name: personalityId,
-        description: '',
-        soulMd: '',
-        toolset: [],
-      },
+      personality:
+        id === 'obsidian-second-brain'
+          ? {
+              mode: 'both' as const,
+              id: personalityId,
+              name: personalityId,
+              description: '',
+              soulMd: '',
+              toolset: [],
+              attach: { soulSection: 'Vault rules.', toolset: [] },
+            }
+          : {
+              mode: 'create' as const,
+              id: personalityId,
+              name: personalityId,
+              description: '',
+              soulMd: '',
+              toolset: [],
+            },
       requires: { mcpServers: [], plugins: [], channels: [], tools: [], inputs: [] },
       cronJobs: [],
       starterPrompt: '',
@@ -146,12 +169,12 @@ describe('Recipes gallery', () => {
     await mount();
 
     const cards = container.querySelectorAll('a.recipe-card');
-    expect(cards).toHaveLength(2);
+    expect(cards).toHaveLength(3);
     expect(cards[0]?.getAttribute('href')).toBe('/recipes/morning-briefing');
     expect(cards[1]?.getAttribute('href')).toBe('/recipes/link-archiver');
     expect(container.textContent).toContain('Morning briefing');
     expect(container.textContent).toContain('Saves and summarizes every link you send it.');
-    expect(container.textContent).toContain('2 recipes');
+    expect(container.textContent).toContain('3 recipes');
   });
 
   it('renders one card grid, built from primitives rather than the Card primitive', async () => {
@@ -172,7 +195,11 @@ describe('Recipes gallery', () => {
     const statuses = [...container.querySelectorAll('.recipe-card-status')].map(
       (el) => el.textContent,
     );
-    expect(statuses).toEqual(['✓ Installed', 'Install']);
+    // A create recipe: does its personality exist. A both recipe whose own
+    // personality does not exist but whose section two others carry: attached
+    // — the server's `attachedTo` row.
+    expect(statuses).toEqual(['✓ Installed', 'Install', '✓ Attached']);
+    expect(container.textContent).toContain('attached to writer, researcher');
   });
 
   it('says so plainly when the catalog is empty', async () => {

@@ -5761,86 +5761,6 @@ button.activity-row:hover {
   padding: 16px 20px;
 }
 
-/* ── Roster — compact people list with idle / running dot ─────────── */
-
-.cc-roster-list {
-  display: flex;
-  flex-direction: column;
-}
-
-.cc-roster-row {
-  display: flex;
-  /* flex-start, not center: the row holds a two-line detail block (name +
-     stats), and centering would float the 8px mark dot against the gap
-     between the lines. The mark aligns to the name line via margin-top. */
-  align-items: flex-start;
-  gap: 8px;
-  padding: 10px 20px;
-  border-bottom: 1px solid var(--ethos-border);
-}
-.cc-roster-row:last-child {
-  border-bottom: none;
-}
-
-.cc-roster-mark {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  flex: 0 0 8px;
-  /* Center the 8px dot within the ~16px name line so it reads as aligned to
-     the member name, not the taller detail block. */
-  margin-top: 4px;
-}
-
-.cc-roster-detail {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  min-width: 0;
-}
-
-.cc-roster-name {
-  font-family: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 12px;
-  font-weight: 500;
-  letter-spacing: 0.02em;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-/* Read-only success-rate line under the roster name. Informational only. */
-.cc-roster-stats {
-  font-size: 11px;
-  color: var(--ethos-text-dim);
-  white-space: nowrap;
-  font-variant-numeric: tabular-nums;
-}
-
-.cc-roster-stats--empty {
-  font-style: italic;
-  opacity: 0.7;
-}
-
-.cc-roster-stats-breakdown {
-  opacity: 0.7;
-}
-
-.cc-roster-status-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--ethos-border-strong);
-  flex: 0 0 8px;
-  /* Row is `align-items: flex-start`; match the mark's name-line offset so the
-     status dot stays aligned to the member name rather than jumping to the top. */
-  margin-top: 4px;
-}
-.cc-roster-status-running {
-  background: var(--ethos-success);
-  box-shadow: 0 0 0 2px rgba(74, 222, 128, 0.18);
-}
-
 /* ── Skills card grid (Move 1) ── */
 
 .skills-search {
@@ -8366,4 +8286,346 @@ button.recipe-step:focus-visible {
 
 .recipe-setup-note--bad {
   color: var(--ethos-error);
+}
+
+/* ─── teams-as-a-scope T1 — the team altitude's chrome ─────────────────
+   plan/phases/teams-as-a-scope.md §1–§3, §10; pixel reference
+   plan/prototypes/teams-as-a-scope/ethos-team-scope.html (`.rail`, `.nav`,
+   `.crumbs`, `.scope`, `.dd`). Extends the P1b blocks above; team chrome is
+   neutral (D9) so nothing here reads `--accent`.
+   ─────────────────────────────────────────────────────────────────── */
+
+/* Breadcrumb root = the scope switcher button (D2; prototype `.scope`). */
+.stage-header-scope-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 4px 8px 4px 5px;
+  border: 1px solid var(--ethos-border-strong);
+  border-radius: 4px;
+  background: var(--ethos-bg-elevated);
+  color: var(--ethos-text);
+  font: inherit;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background-color 80ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.stage-header-scope-btn:hover {
+  background: var(--ethos-bg-overlay);
+}
+
+.stage-header-scope-btn:focus-visible {
+  outline: 2px solid var(--ethos-info);
+  outline-offset: 1px;
+}
+
+.stage-header-scope-caret {
+  color: var(--ethos-text-tertiary);
+  font-size: 10px;
+}
+
+/* The agent crumb is a link now (to the agent's Chat) — same accent as the
+   old static root crumb, no underline. */
+a.stage-header-scope {
+  text-decoration: none;
+}
+
+a.stage-header-scope:hover {
+  text-decoration: underline;
+}
+
+/* The Ethos annulus at breadcrumb / switcher sizes (prototype `.annulus`):
+   a hollow ring in the neutral info blue — the machine altitude, never an
+   agent's accent. */
+.scope-annulus {
+  display: inline-block;
+  flex: none;
+  border-radius: 9999px;
+  border-style: solid;
+  border-color: var(--ethos-info);
+  box-sizing: border-box;
+}
+
+/* The switcher menu (prototype `.dd`). Antd's Dropdown owns the popup; the
+   rows are plain `.ant-dropdown-menu-item`s styled to the sidebar's
+   density, with the SCOPE / TEAMS group titles in mono. */
+.scope-switcher .ant-dropdown-menu {
+  min-width: 290px;
+  padding: 6px;
+  border-radius: 8px;
+  background: var(--ethos-bg-elevated);
+  border: 1px solid var(--ethos-border-strong);
+  box-shadow: 0 12px 32px var(--ethos-shadow-overlay);
+}
+
+.scope-switcher .ant-dropdown-menu-item-group-title {
+  font-family: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  color: var(--ethos-text-tertiary);
+  padding: 6px 8px 2px;
+}
+
+.scope-switcher .ant-dropdown-menu-item {
+  padding: 7px 8px;
+  border-radius: 4px;
+  color: var(--ethos-text);
+}
+
+.scope-switcher .ant-dropdown-menu-item:hover {
+  background: var(--ethos-hover);
+}
+
+.scope-switcher .ant-dropdown-menu-item.scope-switcher-active {
+  background: rgba(74, 158, 255, 0.18);
+}
+
+.scope-switcher .ant-dropdown-menu-item-divider {
+  margin: 4px 6px;
+  background: var(--ethos-border-strong);
+}
+
+.scope-switcher-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+}
+
+.scope-switcher-text {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.3;
+}
+
+.scope-switcher-sub {
+  font-family: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  color: var(--ethos-text-tertiary);
+}
+
+.scope-switcher-count {
+  margin-left: auto;
+  font-family: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--ethos-text-tertiary);
+}
+
+.scope-switcher-new {
+  color: var(--ethos-text-dim);
+}
+
+.scope-switcher-plus {
+  width: 18px;
+  text-align: center;
+  flex: none;
+}
+
+/* Rail — team branch (prototype `.rail .av.lead::after`). The team ring
+   takes the Ethos ring's slot; the active state is the same fixed
+   `--ethos-info` ring the marks use (the rail is global chrome). */
+.altitude-rail-team-btn {
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  border: 2px solid transparent;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  transition:
+    background-color 80ms cubic-bezier(0.16, 1, 0.3, 1),
+    border-color 80ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.altitude-rail-team-btn:hover {
+  background: var(--ethos-surface-tint);
+}
+
+.altitude-rail-team-btn.active {
+  border-color: var(--ethos-info);
+}
+
+/* The coordinator's lead marker: a 7px hollow dot at the mark's top-right.
+   The mark button clips to a circle, so the marker needs the overflow back. */
+.altitude-rail-mark-btn.lead {
+  position: relative;
+  overflow: visible;
+}
+
+.altitude-rail-mark-btn.lead::after {
+  content: "";
+  position: absolute;
+  right: 2px;
+  top: 2px;
+  width: 7px;
+  height: 7px;
+  border-radius: 9999px;
+  background: var(--ethos-bg-elevated);
+  border: 1.5px solid var(--ethos-text-dim);
+  box-sizing: border-box;
+}
+
+.altitude-rail-new-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.altitude-rail-new-btn:disabled:hover {
+  border-color: var(--ethos-border);
+  color: var(--ethos-text-dim);
+}
+
+/* Column — team branch (prototype `.nav .id`, `.nav .back`, `.nav .row .via`,
+   `.nav .lbl`). */
+.scope-nav-back {
+  display: block;
+  padding: 8px 16px 0;
+  font-size: 12px;
+  color: var(--ethos-text-dim);
+  text-decoration: none;
+  flex-shrink: 0;
+}
+
+.scope-nav-back:hover {
+  color: var(--ethos-text);
+}
+
+.scope-nav-identity-team {
+  height: auto;
+  /* 12px on the right: `coordinator · 4 members` in 11px mono is 152px,
+     and the column leaves it exactly that after the 24px ring and gap. */
+  padding: 10px 12px 10px 16px;
+  align-items: center;
+}
+
+.scope-nav-identity-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  line-height: 1.3;
+}
+
+.scope-nav-identity-sub {
+  font-family: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  font-weight: 400;
+  font-variant-numeric: tabular-nums;
+  color: var(--ethos-text-tertiary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.scope-nav-team-chat {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.scope-nav-team-chat .sidebar-divider {
+  margin: 4px 4px;
+}
+
+.sidebar-nav-via {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-family: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  color: var(--ethos-text-tertiary);
+}
+
+.sidebar-section-label-mono {
+  font-family: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  opacity: 0.6;
+}
+
+/* Team pane placeholders (T1) — replaced by T2/T3 bodies. */
+.team-pane-placeholder {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* Library — the Personalities page's two groups (§10). */
+.personalities-group-label {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ethos-text);
+  padding: 16px 0 8px;
+}
+
+.personalities-group-sub {
+  font-weight: 400;
+  color: var(--ethos-text-tertiary);
+}
+
+.personalities-tab .ant-table-row.personalities-row-in-team td {
+  opacity: 0.6;
+}
+
+.personalities-tab .ant-table-row.personalities-row-in-team:hover td {
+  opacity: 1;
+}
+
+.personalities-team-chips {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.personalities-team-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 8px;
+  border: 1px solid var(--ethos-border-strong);
+  border-radius: 4px;
+  background: none;
+  color: var(--ethos-text-dim);
+  font-family: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.personalities-team-chip:hover {
+  color: var(--ethos-text);
+  background: var(--ethos-hover);
+}
+
+.personalities-open-team {
+  background: none;
+  border: none;
+  padding: 2px 4px;
+  border-radius: 4px;
+  color: var(--ethos-text-dim);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.personalities-open-team:hover {
+  color: var(--ethos-text);
+  background: var(--ethos-hover);
+}
+
+/* Library — the Teams table (§10). */
+.teams-row-name,
+.teams-row-coordinator {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.teams-row-coordinator {
+  font-family: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
 }

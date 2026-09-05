@@ -1,7 +1,6 @@
 import type {
   KanbanBoardSnapshot,
   KanbanEvent,
-  KanbanMemberStats,
   KanbanTask,
   KanbanTaskStatus,
 } from '@ethosagent/web-contracts';
@@ -17,9 +16,9 @@ import {
   Select,
   Typography,
 } from 'antd';
-import { useMemo, useState } from 'react';
-import { formatMemberSuccess } from '../../lib/member-stats';
+import { type ReactNode, useMemo, useState } from 'react';
 import { rpc } from '../../rpc';
+import { SeverityDot } from '../team/SeverityDot';
 
 export const STATUS_COLUMNS: KanbanTaskStatus[] = [
   'todo',
@@ -42,6 +41,17 @@ export const STATUS_LABEL: Record<KanbanTaskStatus, string> = {
   scheduled: 'scheduled',
   failed: 'failed',
   needs_revision: 'needs revision',
+};
+// The team Board's plain header (`headerVariant="plain"`): a shorter word
+// where the chip's doesn't fit seven columns, and a state dot for the three
+// states that mean something is happening or stuck.
+const PLAIN_HEADER_LABEL: Partial<Record<KanbanTaskStatus, string>> = {
+  needs_revision: 'revision',
+};
+const PLAIN_HEADER_DOT: Partial<Record<KanbanTaskStatus, ReactNode>> = {
+  running: <SeverityDot tone="ok" live />,
+  blocked: <SeverityDot tone="err" />,
+  needs_revision: <SeverityDot tone="warn" />,
 };
 
 export function Board({
@@ -124,6 +134,8 @@ export function BoardColumn({
   selectMode,
   selected,
   onToggleSelect,
+  reasons,
+  headerVariant = 'chip',
 }: {
   status: KanbanTaskStatus;
   tasks: KanbanTask[];
@@ -133,16 +145,32 @@ export function BoardColumn({
   selectMode: boolean;
   selected: Set<string>;
   onToggleSelect: (taskId: string) => void;
+  /** `taskReasons(recentEvents)` — the verdict / block reason line per tile. */
+  reasons?: Map<string, string>;
+  /** `chip` (default) — the Control Center's status chip. `plain` — the team
+   *  Board's 10px mono uppercase label with a state dot for running /
+   *  blocked / needs revision (prototype `.col .h`). */
+  headerVariant?: 'chip' | 'plain';
 }) {
   return (
     <div className="cc-column">
-      <header className="cc-column-header">
-        <span className={`cc-column-name cc-status-chip cc-status-${status}`}>
-          {STATUS_LABEL[status]}
-        </span>
-        <span className="cc-spacer" />
-        <span className="cc-column-count">{tasks.length}</span>
-      </header>
+      {headerVariant === 'plain' ? (
+        <header className="cc-column-header cc-column-header-plain">
+          {PLAIN_HEADER_DOT[status]}
+          <span className="cc-column-name">
+            {PLAIN_HEADER_LABEL[status] ?? STATUS_LABEL[status]}
+          </span>
+          <span className="cc-column-count">{tasks.length}</span>
+        </header>
+      ) : (
+        <header className="cc-column-header">
+          <span className={`cc-column-name cc-status-chip cc-status-${status}`}>
+            {STATUS_LABEL[status]}
+          </span>
+          <span className="cc-spacer" />
+          <span className="cc-column-count">{tasks.length}</span>
+        </header>
+      )}
       <div className="cc-column-body">
         {tasks.length === 0 ? (
           <div className="cc-column-empty">No tasks here yet</div>
@@ -152,6 +180,7 @@ export function BoardColumn({
               key={t.id}
               task={t}
               childCount={childCounts.get(t.id)}
+              reason={reasons?.get(t.id)}
               teamName={teamName}
               onSelect={onSelect}
               selectMode={selectMode}
@@ -172,6 +201,7 @@ export function BoardColumn({
 export function TaskTile({
   task,
   childCount,
+  reason,
   teamName,
   onSelect,
   selectMode,
@@ -180,6 +210,9 @@ export function TaskTile({
 }: {
   task: KanbanTask;
   childCount?: { total: number; done: number };
+  /** Second line: the verifier's verdict on `needs_revision`, the block reason on
+   *  `blocked` (plan/phases/teams-as-a-scope.md §5). Ignored in other states. */
+  reason?: string;
   teamName: string;
   onSelect: (id: string) => void;
   selectMode: boolean;
@@ -213,6 +246,8 @@ export function TaskTile({
       role="button"
       tabIndex={0}
       className="cc-task"
+      data-task={task.id}
+      data-p={task.assignee ?? undefined}
       style={{ borderLeftColor: accent }}
       onClick={() => onSelect(task.id)}
       onKeyDown={(e) => {
@@ -236,7 +271,7 @@ export function TaskTile({
         )}
         <span className="cc-task-id">{task.id.slice(0, 8)}</span>
         {task.priority !== 0 && (
-          <span className="cc-task-priority" data-p={task.priority}>
+          <span className="cc-task-priority" data-priority={task.priority}>
             p{task.priority}
           </span>
         )}
@@ -271,6 +306,11 @@ export function TaskTile({
         )}
       </div>
       <div className="cc-task-title">{task.title}</div>
+      {reason && (task.status === 'needs_revision' || task.status === 'blocked') && (
+        <div className={`cc-task-reason cc-task-reason-${task.status}`} title={reason}>
+          {reason}
+        </div>
+      )}
       <div className="cc-task-bottom">
         <span className="cc-task-assignee" style={{ color: accent }}>
           <span className="cc-task-assignee-mark" style={{ background: accent }} />
@@ -451,108 +491,25 @@ export function Activity({
   );
 }
 
-export function Roster({ snapshot }: { snapshot: KanbanBoardSnapshot }) {
-  const workingByAssignee = useMemo(() => {
-    const m = new Map<string, KanbanTask>();
-    for (const t of snapshot.tasks) {
-      if (t.status === 'running' && t.assignee !== null) m.set(t.assignee, t);
-    }
-    return m;
-  }, [snapshot.tasks]);
-
-  const statsByMember = useMemo(() => {
-    const m = new Map<string, KanbanMemberStats>();
-    for (const s of snapshot.memberStats) m.set(s.memberId, s);
-    return m;
-  }, [snapshot.memberStats]);
-
-  // Roster covers anyone who has been assigned a task OR has a recorded stat row
-  // — a member whose tasks all completed still belongs on the roster.
-  const members = useMemo(() => {
-    const s = new Set<string>();
-    for (const t of snapshot.tasks) {
-      if (t.assignee) s.add(t.assignee);
-    }
-    for (const stat of snapshot.memberStats) s.add(stat.memberId);
-    return Array.from(s).sort();
-  }, [snapshot.tasks, snapshot.memberStats]);
-
-  return (
-    <section className="cc-panel cc-roster">
-      <header className="cc-panel-header">
-        <h3 className="cc-panel-title">Roster</h3>
-      </header>
-      <div className="cc-panel-body">
-        {members.length === 0 ? (
-          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-            No assigned tasks yet.
-          </Typography.Text>
-        ) : (
-          <div className="cc-roster-list">
-            {members.map((person) => {
-              const accent = accentFor(person);
-              const running = workingByAssignee.get(person);
-              const stats = statsByMember.get(person);
-              return (
-                <div key={person} className="cc-roster-row">
-                  <span className="cc-roster-mark" style={{ background: accent }} />
-                  <div className="cc-roster-detail">
-                    <span className="cc-roster-name" style={{ color: accent }}>
-                      {person}
-                    </span>
-                    <MemberStatsLine stats={stats} />
-                  </div>
-                  <span className="cc-spacer" />
-                  <span
-                    className={`cc-roster-status-dot ${running ? 'cc-roster-status-running' : ''}`}
-                    title={running ? `working on ${running.title}` : 'idle'}
-                  />
-                </div>
-              );
-            })}
-          </div>
-        )}
-      </div>
-    </section>
-  );
-}
-
-// Read-only, informational success-rate line under a roster name. Success rate
-// is `completed / (completed + failed + orphaned)`. A member with no recorded
-// terminal outcomes shows a muted "no record yet" rather than a fake 0% or 100%.
-export function MemberStatsLine({ stats }: { stats?: KanbanMemberStats }) {
-  const success = formatMemberSuccess(stats);
-  if (success.kind === 'no-record') {
-    return <span className="cc-roster-stats cc-roster-stats--empty">no record yet</span>;
-  }
-  return (
-    <span
-      className="cc-roster-stats"
-      title={
-        stats
-          ? `${stats.ticketsCompleted} completed · ${stats.ticketsFailed} failed · ${stats.ticketsOrphaned} orphaned`
-          : undefined
-      }
-    >
-      {success.ratePercent}% success
-      <span className="cc-roster-stats-breakdown">
-        {' '}
-        ({success.completed}/{success.total})
-      </span>
-    </span>
-  );
-}
-
 export function TaskDrawer({
   task,
   board,
   teamName,
   onClose,
+  presentation = 'modal',
+  actions,
 }: {
   task: KanbanTask | null;
   board: KanbanBoardSnapshot;
   teamName: string;
   onClose: () => void;
+  /** `modal` (default) is the Control Center / Kanban page; `inline` renders the
+   *  same body as a side column for the team Board pane
+   *  (plan/phases/teams-as-a-scope.md §5). */
+  presentation?: 'modal' | 'inline';
+  /** State-specific operator actions (Approve / Unblock / Reassign / Archive, D11)
+   *  — rendered under the toolbar. Filled in by T4. */
+  actions?: ReactNode;
 }) {
   const queryClient = useQueryClient();
   const { notification } = AntApp.useApp();
@@ -635,6 +592,230 @@ export function TaskDrawer({
       .filter((t): t is KanbanTask => t !== undefined);
   }, [task, board]);
 
+  const body = task && (
+    <div className="cc-task-modal-layout">
+      <div className="cc-task-modal-main">
+        <div className="cc-task-modal-scroll">
+          <div className="cc-task-modal-toolbar">
+            <Dropdown
+              trigger={['click']}
+              menu={{
+                items: ALL_STATUSES.filter((s) => s !== task.status).map((s) => ({
+                  key: s,
+                  label: <span className={`cc-status-chip cc-status-${s}`}>{STATUS_LABEL[s]}</span>,
+                  onClick: () => updateMut.mutate(s),
+                })),
+              }}
+            >
+              <Button size="small">
+                <span className={`cc-status-chip cc-status-${task.status}`}>
+                  {STATUS_LABEL[task.status]}
+                </span>
+                <span style={{ marginLeft: 6 }}>▾</span>
+              </Button>
+            </Dropdown>
+            <Button size="small" onClick={() => setShowEvents((v) => !v)}>
+              {showEvents ? 'Hide events' : 'Events'}
+            </Button>
+          </div>
+
+          {actions && <div className="cc-task-actions">{actions}</div>}
+
+          {task.body && (
+            <Typography.Paragraph style={{ whiteSpace: 'pre-wrap' }}>
+              {task.body}
+            </Typography.Paragraph>
+          )}
+
+          <Descriptions size="small" column={1} bordered style={{ marginBottom: 16 }}>
+            <Descriptions.Item label="Assignee">
+              <Select
+                size="small"
+                value={task.assignee ?? undefined}
+                onChange={(value) => assignMut.mutate(value)}
+                placeholder="Assign to…"
+                style={{ minWidth: 180 }}
+                loading={assignMut.isPending}
+                options={(agentsQuery.data?.agents ?? []).map((a) => ({
+                  label: `${a.displayName}${a.online ? '' : ' (offline)'}`,
+                  value: a.personalityId,
+                  disabled: !a.online,
+                }))}
+              />
+            </Descriptions.Item>
+            <Descriptions.Item label="Priority">{task.priority}</Descriptions.Item>
+            <Descriptions.Item label="Workspace">{task.workspaceMode}</Descriptions.Item>
+            <Descriptions.Item label="Created">
+              {new Date(task.createdAt).toLocaleString()}
+            </Descriptions.Item>
+            <Descriptions.Item label="Updated">
+              {new Date(task.updatedAt).toLocaleString()}
+            </Descriptions.Item>
+          </Descriptions>
+
+          {parents.length > 0 && (
+            <div style={{ marginBottom: 16 }}>
+              <Typography.Text strong style={{ fontSize: 12 }}>
+                Parents
+              </Typography.Text>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 6 }}>
+                {parents.map((p) => (
+                  <span key={p.id} className={`cc-status-chip cc-status-${p.status}`}>
+                    {p.title.slice(0, 30)}
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {children.length > 0 && (
+            <div style={{ marginBottom: 16 }}>
+              <Typography.Text strong style={{ fontSize: 12 }}>
+                Children
+              </Typography.Text>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 6 }}>
+                {children.map((c) => (
+                  <span key={c.id} className={`cc-status-chip cc-status-${c.status}`}>
+                    {c.title.slice(0, 30)}
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
+
+          <div style={{ marginBottom: 16 }}>
+            <Typography.Text strong style={{ fontSize: 12 }}>
+              Runs
+            </Typography.Text>
+            <div className="cc-activity-list" style={{ marginTop: 6 }}>
+              {(taskQuery.data?.runs ?? []).length === 0 ? (
+                <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                  No runs yet.
+                </Typography.Text>
+              ) : (
+                (taskQuery.data?.runs ?? []).map((run) => (
+                  <div key={run.id} className="cc-activity-row">
+                    <span className="cc-activity-actor">
+                      {run.endedAt === null ? 'running' : (run.outcome ?? 'ended')}
+                    </span>
+                    <div>
+                      <Typography.Paragraph
+                        ellipsis={{
+                          rows: 2,
+                          expandable: true,
+                          symbol: 'show more',
+                        }}
+                        style={{ whiteSpace: 'pre-wrap', margin: 0 }}
+                      >
+                        {run.summary ?? ''}
+                      </Typography.Paragraph>
+                    </div>
+                    <span className="cc-activity-time">{formatRelative(run.startedAt)}</span>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+
+          <div>
+            <Typography.Text strong style={{ fontSize: 12 }}>
+              Comments
+            </Typography.Text>
+            <div className="cc-task-modal-composer">
+              <Input.TextArea
+                rows={2}
+                placeholder="Add a comment…"
+                value={commentBody}
+                onChange={(e) => setCommentBody(e.target.value)}
+              />
+              <Button
+                type="primary"
+                size="small"
+                loading={commentMut.isPending}
+                disabled={commentBody.trim().length === 0 || commentMut.isPending}
+                onClick={() => commentMut.mutate(commentBody.trim())}
+                style={{ alignSelf: 'flex-start' }}
+              >
+                Comment
+              </Button>
+            </div>
+            <div className="cc-activity-list" style={{ marginTop: 6 }}>
+              {comments.length === 0 ? (
+                <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                  No comments yet.
+                </Typography.Text>
+              ) : (
+                comments.map((c) => (
+                  <div key={c.id} className="cc-activity-row">
+                    <span className="cc-activity-actor" style={{ color: accentFor(c.author) }}>
+                      {c.author}
+                    </span>
+                    <div>
+                      <Typography.Paragraph
+                        ellipsis={{
+                          rows: 2,
+                          expandable: true,
+                          symbol: 'show more',
+                        }}
+                        style={{ whiteSpace: 'pre-wrap', margin: 0 }}
+                      >
+                        {c.body}
+                      </Typography.Paragraph>
+                    </div>
+                    <span className="cc-activity-time">{formatRelative(c.createdAt)}</span>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {showEvents && (
+        <div className="cc-task-modal-events">
+          <Typography.Text strong style={{ fontSize: 12 }}>
+            Recent events
+          </Typography.Text>
+          <div className="cc-activity-list" style={{ marginTop: 6 }}>
+            {events.length === 0 ? (
+              <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                No events for this task in the recent window.
+              </Typography.Text>
+            ) : (
+              events.map((e) => (
+                <div key={e.id} className="cc-activity-row">
+                  <span className="cc-activity-actor" style={{ color: accentFor(e.actor) }}>
+                    {e.actor}
+                  </span>
+                  <span className="cc-activity-text">{describeEvent(e).replace(/ on$/, '')}</span>
+                  <span className="cc-activity-time">{formatRelative(e.createdAt)}</span>
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+
+  if (presentation === 'inline') {
+    if (!task) return null;
+    return (
+      <aside className="team-drawer" data-task={task.id}>
+        <div className="team-sec">
+          Ticket
+          <button type="button" className="team-sec-more" onClick={onClose}>
+            Close
+          </button>
+        </div>
+        <div className="team-drawer-title">
+          <span className="team-mono">#{task.id.slice(0, 8)}</span> {task.title}
+        </div>
+        {body}
+      </aside>
+    );
+  }
+
   return (
     <Modal
       open={task !== null}
@@ -645,213 +826,7 @@ export function TaskDrawer({
       width="min(1100px, 92vw)"
       className="cc-task-modal"
     >
-      {task && (
-        <div className="cc-task-modal-layout">
-          <div className="cc-task-modal-main">
-            <div className="cc-task-modal-scroll">
-              <div className="cc-task-modal-toolbar">
-                <Dropdown
-                  trigger={['click']}
-                  menu={{
-                    items: ALL_STATUSES.filter((s) => s !== task.status).map((s) => ({
-                      key: s,
-                      label: (
-                        <span className={`cc-status-chip cc-status-${s}`}>{STATUS_LABEL[s]}</span>
-                      ),
-                      onClick: () => updateMut.mutate(s),
-                    })),
-                  }}
-                >
-                  <Button size="small">
-                    <span className={`cc-status-chip cc-status-${task.status}`}>
-                      {STATUS_LABEL[task.status]}
-                    </span>
-                    <span style={{ marginLeft: 6 }}>▾</span>
-                  </Button>
-                </Dropdown>
-                <Button size="small" onClick={() => setShowEvents((v) => !v)}>
-                  {showEvents ? 'Hide events' : 'Events'}
-                </Button>
-              </div>
-
-              {task.body && (
-                <Typography.Paragraph style={{ whiteSpace: 'pre-wrap' }}>
-                  {task.body}
-                </Typography.Paragraph>
-              )}
-
-              <Descriptions size="small" column={1} bordered style={{ marginBottom: 16 }}>
-                <Descriptions.Item label="Assignee">
-                  <Select
-                    size="small"
-                    value={task.assignee ?? undefined}
-                    onChange={(value) => assignMut.mutate(value)}
-                    placeholder="Assign to…"
-                    style={{ minWidth: 180 }}
-                    loading={assignMut.isPending}
-                    options={(agentsQuery.data?.agents ?? []).map((a) => ({
-                      label: `${a.displayName}${a.online ? '' : ' (offline)'}`,
-                      value: a.personalityId,
-                      disabled: !a.online,
-                    }))}
-                  />
-                </Descriptions.Item>
-                <Descriptions.Item label="Priority">{task.priority}</Descriptions.Item>
-                <Descriptions.Item label="Workspace">{task.workspaceMode}</Descriptions.Item>
-                <Descriptions.Item label="Created">
-                  {new Date(task.createdAt).toLocaleString()}
-                </Descriptions.Item>
-                <Descriptions.Item label="Updated">
-                  {new Date(task.updatedAt).toLocaleString()}
-                </Descriptions.Item>
-              </Descriptions>
-
-              {parents.length > 0 && (
-                <div style={{ marginBottom: 16 }}>
-                  <Typography.Text strong style={{ fontSize: 12 }}>
-                    Parents
-                  </Typography.Text>
-                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 6 }}>
-                    {parents.map((p) => (
-                      <span key={p.id} className={`cc-status-chip cc-status-${p.status}`}>
-                        {p.title.slice(0, 30)}
-                      </span>
-                    ))}
-                  </div>
-                </div>
-              )}
-
-              {children.length > 0 && (
-                <div style={{ marginBottom: 16 }}>
-                  <Typography.Text strong style={{ fontSize: 12 }}>
-                    Children
-                  </Typography.Text>
-                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 6 }}>
-                    {children.map((c) => (
-                      <span key={c.id} className={`cc-status-chip cc-status-${c.status}`}>
-                        {c.title.slice(0, 30)}
-                      </span>
-                    ))}
-                  </div>
-                </div>
-              )}
-
-              <div style={{ marginBottom: 16 }}>
-                <Typography.Text strong style={{ fontSize: 12 }}>
-                  Runs
-                </Typography.Text>
-                <div className="cc-activity-list" style={{ marginTop: 6 }}>
-                  {(taskQuery.data?.runs ?? []).length === 0 ? (
-                    <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                      No runs yet.
-                    </Typography.Text>
-                  ) : (
-                    (taskQuery.data?.runs ?? []).map((run) => (
-                      <div key={run.id} className="cc-activity-row">
-                        <span className="cc-activity-actor">
-                          {run.endedAt === null ? 'running' : (run.outcome ?? 'ended')}
-                        </span>
-                        <div>
-                          <Typography.Paragraph
-                            ellipsis={{
-                              rows: 2,
-                              expandable: true,
-                              symbol: 'show more',
-                            }}
-                            style={{ whiteSpace: 'pre-wrap', margin: 0 }}
-                          >
-                            {run.summary ?? ''}
-                          </Typography.Paragraph>
-                        </div>
-                        <span className="cc-activity-time">{formatRelative(run.startedAt)}</span>
-                      </div>
-                    ))
-                  )}
-                </div>
-              </div>
-
-              <div>
-                <Typography.Text strong style={{ fontSize: 12 }}>
-                  Comments
-                </Typography.Text>
-                <div className="cc-task-modal-composer">
-                  <Input.TextArea
-                    rows={2}
-                    placeholder="Add a comment…"
-                    value={commentBody}
-                    onChange={(e) => setCommentBody(e.target.value)}
-                  />
-                  <Button
-                    type="primary"
-                    size="small"
-                    loading={commentMut.isPending}
-                    disabled={commentBody.trim().length === 0 || commentMut.isPending}
-                    onClick={() => commentMut.mutate(commentBody.trim())}
-                    style={{ alignSelf: 'flex-start' }}
-                  >
-                    Comment
-                  </Button>
-                </div>
-                <div className="cc-activity-list" style={{ marginTop: 6 }}>
-                  {comments.length === 0 ? (
-                    <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                      No comments yet.
-                    </Typography.Text>
-                  ) : (
-                    comments.map((c) => (
-                      <div key={c.id} className="cc-activity-row">
-                        <span className="cc-activity-actor" style={{ color: accentFor(c.author) }}>
-                          {c.author}
-                        </span>
-                        <div>
-                          <Typography.Paragraph
-                            ellipsis={{
-                              rows: 2,
-                              expandable: true,
-                              symbol: 'show more',
-                            }}
-                            style={{ whiteSpace: 'pre-wrap', margin: 0 }}
-                          >
-                            {c.body}
-                          </Typography.Paragraph>
-                        </div>
-                        <span className="cc-activity-time">{formatRelative(c.createdAt)}</span>
-                      </div>
-                    ))
-                  )}
-                </div>
-              </div>
-            </div>
-          </div>
-
-          {showEvents && (
-            <div className="cc-task-modal-events">
-              <Typography.Text strong style={{ fontSize: 12 }}>
-                Recent events
-              </Typography.Text>
-              <div className="cc-activity-list" style={{ marginTop: 6 }}>
-                {events.length === 0 ? (
-                  <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                    No events for this task in the recent window.
-                  </Typography.Text>
-                ) : (
-                  events.map((e) => (
-                    <div key={e.id} className="cc-activity-row">
-                      <span className="cc-activity-actor" style={{ color: accentFor(e.actor) }}>
-                        {e.actor}
-                      </span>
-                      <span className="cc-activity-text">
-                        {describeEvent(e).replace(/ on$/, '')}
-                      </span>
-                      <span className="cc-activity-time">{formatRelative(e.createdAt)}</span>
-                    </div>
-                  ))
-                )}
-              </div>
-            </div>
-          )}
-        </div>
-      )}
+      {body}
     </Modal>
   );
 }
@@ -859,6 +834,31 @@ export function TaskDrawer({
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/**
+ * The reason line per task (plan/phases/teams-as-a-scope.md §5), from the
+ * board's recent events (oldest → newest, so the last write wins): the
+ * verifier's verdict rides on `status_changed → needs_revision` as
+ * `data.reason`; a block's reason is the `run_completed {outcome: 'blocked'}`
+ * summary. Tasks with neither are absent from the map.
+ */
+export function taskReasons(events: KanbanEvent[]): Map<string, string> {
+  const reasons = new Map<string, string>();
+  for (const e of events) {
+    if (e.kind === 'status_changed') {
+      const data = e.data as { to?: string; reason?: string };
+      if (data.to === 'needs_revision' && typeof data.reason === 'string' && data.reason) {
+        reasons.set(e.taskId, data.reason);
+      }
+    } else if (e.kind === 'run_completed') {
+      const data = e.data as { outcome?: string; summary?: string | null };
+      if (data.outcome === 'blocked' && typeof data.summary === 'string' && data.summary) {
+        reasons.set(e.taskId, data.summary);
+      }
+    }
+  }
+  return reasons;
+}
 
 export function buildChildCounts(
   snapshot: KanbanBoardSnapshot,

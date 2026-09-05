@@ -88,6 +88,13 @@ altitude rail is global chrome and keeps `--ethos-info` forever. The contextual
 column and the stage carry the active scope's accent. The furniture moves only
 when you have walked into a different room.
 
+**Team chrome is neutral**, because a team's identity is plural. The team panes
+(Overview, Board, Structure, Memory, Activity, Channels, Settings) run on
+`--ethos-info` like the Library. Inside a team, a member's workspace
+(`/t/:teamId/p/:id/*`) carries that member's accent exactly as `/p/:id/*` does. The
+team **Chat** pane carries the coordinator's accent, because it is the coordinator's
+surface. The rail stays neutral at every altitude.
+
 | Personality | Hex | Reasoning |
 |---|---|---|
 | researcher | `#4A9EFF` | Blue — knowledge, exploration |
@@ -190,7 +197,9 @@ three exemptions above share a property that is the actual test: each is a
 **repeated list unit** whose alternative was a dense row, and each was granted
 because the unit did not fit the row. A one-off container inline in a stream has
 no dense-row alternative to be measured against, so there is nothing for an
-exemption to buy — build it from primitives.
+exemption to buy — build it from primitives. The team Overview's attention tiles are
+the Task tile exemption reused, not a new one; structure-canvas nodes, scope-switcher
+rows and supervisor-ledger rows are bordered containers assembled from primitives.
 
 #### The one approved card grid: the Recipes gallery
 
@@ -456,6 +465,10 @@ Icon assignments:
 | Eval | Checkmark in a box |
 | Plugins | Plug (rectangle + 2 prongs) |
 | Settings | Gear / cog (circle + teeth) |
+| Overview | House (roof + walls) |
+| Structure | Three circles linked by lines (one above two) |
+| Channels | Envelope (same glyph as Communications) |
+| Board | Three vertical bars (same glyph as Kanban) |
 
 ### Active state
 `background: rgba(74,158,255,0.18); border-left: 2px solid #4A9EFF; padding-left: 10px` (compensate padding for the 2px border). Text color: `var(--text-primary)` (full brightness — not dimmed blue).
@@ -467,6 +480,23 @@ Nav group separators are **thin lines** (`height: 1px; background: var(--border)
 
 ### Desktop icon-only rail
 Desktop sidebar is 64px wide and always icon-only. Active state uses background + a 2px × 16px rounded bar flush to the left edge (not a full left-border since there's no label text to offset against).
+
+### Teams (third altitude)
+
+A team is a scope beside Library and Workspace, not a page inside the Library. It
+keeps the rail and gets its own contextual column. The column's rows, in order:
+
+1. **Chat** — with a `via <coordinator>` hint in Geist Mono 11px beside a 12px mark
+2. divider
+3. **Overview**, **Board**, **Structure**, **Memory**, **Activity**, **Channels**, **Settings**
+4. divider
+5. `RECENT IN <TEAM>` — the recent-sessions block filtered to the team's members
+
+The breadcrumb reads `<ring> <team> ▾ / <pane>`. The `▾` on the team name is the
+**scope switcher**, and it is the breadcrumb root at every altitude: Independent
+(the Library and per-agent workspaces), each team, and New team. Team chrome is
+neutral (see "Per-personality accent"); the segmented ring is the team mark (see
+"Personality marks → Altitude convention").
 
 ## Interaction states
 
@@ -516,9 +546,20 @@ Deterministic geometric marks per personality. Same algorithm runs at render tim
 
 **Altitude convention:** the Ethos annulus (`apps/desktop/assets/brand/ethos-mark.svg`)
 marks the machine altitude — the Library, not any single agent. Agents get generative
-marks (this algorithm, per personality); Ethos gets the ring. The two never trade
-places: a personality does not inherit the annulus, and the machine altitude does not
-generate a mark.
+marks (this algorithm, per personality); Ethos gets the ring. A team gets a
+**segmented ring** — one arc per member, in that member's accent, in manifest order
+starting at 12 o'clock, with a faint neutral fill inside. It is built from the members,
+so it is neither a generative mark (an agent) nor the annulus (the machine). Three
+marks, three altitudes; none inherits another: a personality does not inherit the
+annulus, the machine altitude does not generate a mark, and a team's ring is assembled
+from its members, not hashed from an id.
+
+The segmented ring renders at 14px (breadcrumb), 18px (switcher rows), 22–30px
+(column identity, rail) and 36px (team Overview). Arc stroke width is
+`max(1.5, size * 0.09)`; the gap between arcs is `min(3px, 18% of an arc)`. Same
+algorithm on every surface. TUI fallback: `◔ ◑ ◕ ●` by member count. Reference
+implementation in `apps/web/src/components/ui/TeamRing.tsx`, with the algorithm twin
+in `packages/web-contracts/src/marks.ts`.
 
 Reference implementation in `apps/web/src/components/ui/PersonalityMark.tsx`. Same algorithm available as `packages/web-contracts/src/marks.ts` so server-side rendering and TUI ASCII fallback can use it.
 
@@ -617,3 +658,4 @@ The web UI specifically must avoid these patterns. Code review checks for them.
 | 2026-09-04 | The Recipes gallery is an approved exception to "no card grids anywhere" | User-directed. The gallery shipped as stacked rows, correctly, because this file names card grids as slop. The user then reviewed a clickable prototype alongside the shipped rows and asked for the grid, and this file's rule is "do not deviate without explicit user approval" — so the deviation is recorded rather than re-litigated the next time someone reads the anti-slop table. Scoped to that one page: not a precedent for Skills / MCP / Plugins / Personalities / Dashboards, and not a fourth `Card`-primitive exemption, since the cards are raw primitives and each is a real `<Link>` (focusable, middle-clickable). The rest of the Recipes flow stays rows — preflight groups, the install summary and the post-install checklist are all the same bordered row list. |
 | 2026-09-04 | Feedback & activity contract | Owner principle: show every action, never inside the answer, complete, acknowledge every ask. Tool chips leave the bubble; status line on send in a reserved slot; collapsed trail footer; one derived trail for footer + drawer; findings and settings feedback share the row vocabulary. Supersedes ToolChip's "inline between text spans" rationale. |
 | 2026-09-04 | Five token values raised to clear WCAG AA 4.5:1 on `--bg-base`, plus the light `--text-secondary` the fix depended on | Owner-approved accessibility correction, not a restyle. The feedback & activity contract landed the same day assigns `--text-tertiary` to **every** duration and elapsed number at 13px and `--warning` to `⚠ still working` / `⚠ N unverified` — 13px is normal text, so 4.5:1 applies to tokens that were previously only ever carrying captions. Measured against `--bg-base` with `contrastRatio()` in `packages/design-tokens/src/validate.ts`, five pairs failed: `--text-tertiary` dark `#6B6B6A` 3.59:1 → `#7E7E7D` 4.72:1; `--text-tertiary` light `#94948F` 2.91:1 → `#70706B` 4.76:1; `--warning` light `#F59E0B` 2.05:1 → `#986206` 4.92:1; `--success` light `#4ADE80` 1.67:1 → `#177D3C` 4.98:1; `--error` light `#F87171` 2.65:1 → `#CE2C2C` 4.99:1. Every value clears the bar with margin rather than sitting on 4.51, because a token pinned to the threshold fails the next time anyone nudges a background. **The sixth change is the one that needed a decision.** Raising a tertiary compresses the grey ramp toward secondary, and a hierarchy you cannot see is not a hierarchy. In dark that still works: secondary stays `#9A9A98` and the step is ΔL\* 10.8 (was 18.4). In light it did not — secondary was `#6B6B6A` at 5.10:1, which caps a compliant tertiary at ΔL\* 1.9, indistinguishable. So light `--text-secondary` moves too, `#6B6B6A` → `#585857` (5.10:1 → 6.81:1, ΔL\* 9.7), which also makes the two skins' ramps parallel — 15.62/6.80/4.72 dark against 16.64/6.81/4.76 light. The alternative was leaving the single worst failure in the file at 2.91:1, which is not a fix. **The `reviewer` accent is deliberately unchanged at `#F59E0B`, and so is `engineer` at `#4ADE80`.** `--warning` and `reviewer` were never one constant — `DEFAULT_TOKENS.accents.reviewer` and `DEFAULT_TOKENS.semantic.warning` are separate fields that happened to agree — and they now agree only on the dark skin. A personality's identity hue is load-bearing and does not retune per background; a status colour does. The semantic table gains a Light column to say so in the file rather than only in the code. Light semantics keep their dark hue exactly (37.7° / 141.9° / 0.0°) and drop lightness; red also eases saturation 91% → 65% so a 5:1 red reads as brick rather than siren next to an ochre and a forest green. `--info` is knowingly left failing at 2.63:1 on paper-warm: it is the researcher hue and the permanent altitude-rail blue, so moving it is an accent decision under the identity rule above, not a contrast one, and it is not in the approved set. The validator now enforces `--text-secondary` and `--text-tertiary` at AA 4.5 alongside `--text-primary` at AAA 7, so this cannot silently regress; it deliberately does NOT yet cover the semantics, because `paper.info` would fail it. |
+| 2026-09-04 | Teams are a third altitude | Teams-as-a-scope plan (`plan/phases/teams-as-a-scope.md`, D9/D10, §12). A team is a scope beside Library and Workspace, not a page in the Library: the scope switcher (Independent · teams · New team) is the breadcrumb root at every altitude. Team chrome is **neutral** (`--ethos-info`) because a team's identity is plural; a member's workspace inside a team (`/t/:teamId/p/:id/*`) carries that member's accent exactly as `/p/:id/*` does; the team Chat pane is the coordinator's session and carries the coordinator's accent. The team mark is the **segmented ring** — one arc per member in that member's accent, manifest order from 12 o'clock — built from the members, so it can be mistaken for neither the generative mark nor the annulus. No new `Card` exemption: the Overview's attention tiles reuse the Task tile. Prototype: `plan/prototypes/teams-as-a-scope/ethos-team-scope.html` (artifact https://claude.ai/code/artifact/ca79190e-4d8a-4f1a-b4ec-29c53df17fb2). Blocking amendment, landed before any code. |

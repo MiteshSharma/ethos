@@ -1,7 +1,10 @@
 import { Drawer } from 'antd';
-import { useState } from 'react';
+import { type ReactNode, useState } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { useConfig } from '../features/config/api/queries';
+import { extractTeamId, extractWorkspacePersonalityId, TEAM_PANES } from '../lib/scopeNav';
+import { buildTeamPath } from '../lib/workspaceRoutes';
+import { NavIcon } from './ui/NavIcon';
 
 // Bottom tab bar shown at <768px. Per the plan's responsive contract:
 // "Mobile triage-only — read + approve + triage, not full functionality."
@@ -16,11 +19,15 @@ import { useConfig } from '../features/config/api/queries';
 //   • see what a cron job did
 //   • check mesh status
 // not run a full personality wizard.
+//
+// teams-as-a-scope T1 (§10): at the team altitude the four tabs are
+// Chat · Overview · Board · Structure, and "More" lists the remaining team
+// panes ahead of the machine-wide list. Everywhere else is unchanged.
 
 interface PrimaryItem {
   path: string;
   label: string;
-  icon: string;
+  icon: ReactNode;
 }
 
 const PRIMARY: ReadonlyArray<PrimaryItem> = [
@@ -29,6 +36,10 @@ const PRIMARY: ReadonlyArray<PrimaryItem> = [
   { path: '/cron', label: 'Cron', icon: '⏱' },
   { path: '/mesh', label: 'Mesh', icon: '🕸️' },
 ];
+
+// The first four team panes, in `TEAM_PANES` order, are the tabs; the rest
+// go under More.
+const TEAM_PRIMARY_COUNT = 4;
 
 interface MoreLink {
   path: string;
@@ -64,16 +75,36 @@ export function MobileTabBar() {
   const [moreOpen, setMoreOpen] = useState(false);
   const { data: config } = useConfig();
 
-  const moreLinks = config?.adminEnabled
+  const teamId = extractTeamId(pathname);
+  const teamAltitude = teamId !== null && extractWorkspacePersonalityId(pathname) === null;
+
+  const primary: ReadonlyArray<PrimaryItem> = teamAltitude
+    ? TEAM_PANES.slice(0, TEAM_PRIMARY_COUNT).map((p) => ({
+        path: buildTeamPath(teamId, p.key),
+        label: p.label,
+        icon: <NavIcon icon={p.key} />,
+      }))
+    : PRIMARY;
+
+  const globalLinks = config?.adminEnabled
     ? [...MORE_LINKS, { path: '/admin', label: 'Admin' }]
     : MORE_LINKS;
+  const moreLinks: ReadonlyArray<MoreLink> = teamAltitude
+    ? [
+        ...TEAM_PANES.slice(TEAM_PRIMARY_COUNT).map((p) => ({
+          path: buildTeamPath(teamId, p.key),
+          label: p.label,
+        })),
+        ...globalLinks,
+      ]
+    : globalLinks;
 
-  const moreActive = !PRIMARY.some((p) => pathname === p.path || pathname.startsWith(`${p.path}/`));
+  const moreActive = !primary.some((p) => pathname === p.path || pathname.startsWith(`${p.path}/`));
 
   return (
     <>
       <nav className="mobile-tabbar" aria-label="Primary navigation (mobile)">
-        {PRIMARY.map((item) => {
+        {primary.map((item) => {
           const active = pathname === item.path || pathname.startsWith(`${item.path}/`);
           return (
             <Link

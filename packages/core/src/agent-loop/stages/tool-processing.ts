@@ -306,6 +306,7 @@ export async function* processTools(
         allowedPlugins: ctx.allowedPlugins,
         traceId: ctx.traceId,
         ...(ctx.voiceOrigin ? { voiceOrigin: ctx.voiceOrigin } : {}),
+        personalityId: ctx.personality.id,
       },
     );
 

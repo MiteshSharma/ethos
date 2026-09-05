@@ -95,3 +95,70 @@ export function generatePersonalityMark(personalityId: string): PersonalityMarkS
 // single runtime source of truth for visual tokens). The marks algorithm
 // is identity-only — it produces cells/opacity/ringAlpha. Surface code
 // applies the accent on top by reading from design-tokens.
+
+// --- Team ring (plan/phases/teams-as-a-scope.md D10) ------------------------
+//
+// A team's face is a segmented ring: one arc per member, in that member's
+// accent, in manifest order, starting at 12 o'clock. It is BUILT from the
+// members rather than hashed from an id, so it can never be mistaken for a
+// personality mark (generative grid) or the Ethos annulus (machine). This is
+// the geometry twin of `apps/web/src/components/ui/TeamRing.tsx`; the
+// prototype is `ring()` in
+// `plan/prototypes/teams-as-a-scope/ethos-team-scope.html`.
+
+export interface TeamRingGeometry {
+  /** Radius of the arc circles' centreline. */
+  r: number;
+  /** Arc stroke width: `max(1.5, size * 0.09)`. */
+  strokeWidth: number;
+}
+
+/** The ring's shared geometry for a given pixel size — also what the
+ * inner fill (`r - strokeWidth`) is drawn from, so a team with no members
+ * still has a footprint. */
+export function teamRingGeometry(size: number): TeamRingGeometry {
+  const strokeWidth = Math.max(1.5, size * 0.09);
+  return { r: size / 2 - strokeWidth / 2 - 0.5, strokeWidth };
+}
+
+export interface TeamRingArc extends TeamRingGeometry {
+  /** SVG `stroke-dasharray` — "<arc length> <rest of circumference>". */
+  dashArray: string;
+  /** SVG `stroke-dashoffset` — walks each arc clockwise from the previous. */
+  dashOffset: number;
+  /** The member's accent hex. */
+  color: string;
+}
+
+/**
+ * One arc per accent, laid clockwise from 12 o'clock. Pure geometry: the
+ * renderer draws each as a full circle with this dasharray/offset and
+ * applies `rotate(-90 c c)` so offset 0 starts at the top. Every arc is
+ * `circumference / n` long minus a `min(3, 18%)` gap. An empty roster yields
+ * no arcs.
+ */
+export function teamRingArcs(accents: readonly string[], size: number): TeamRingArc[] {
+  const n = accents.length;
+  if (n === 0) return [];
+  const { r, strokeWidth } = teamRingGeometry(size);
+  const circumference = 2 * Math.PI * r;
+  const segment = circumference / n;
+  const gap = Math.min(3, segment * 0.18);
+  return accents.map((color, i) => ({
+    r,
+    strokeWidth,
+    dashArray: `${segment - gap} ${circumference - segment + gap}`,
+    dashOffset: 0 - i * segment,
+    color,
+  }));
+}
+
+/** TUI / text fallback for the ring: a quarter per member up to a full
+ * disc — `◔ ◑ ◕ ●` for 1, 2, 3, 4+ members; `○` for none. */
+export function teamRingGlyph(memberCount: number): string {
+  if (memberCount <= 0) return '○';
+  if (memberCount === 1) return '◔';
+  if (memberCount === 2) return '◑';
+  if (memberCount === 3) return '◕';
+  return '●';
+}

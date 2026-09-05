@@ -33,12 +33,22 @@ import type { BeforeToolCallPayload, BeforeToolCallResult } from '@ethosagent/ty
 export type TeamRole = 'coordinator' | 'member';
 
 export interface KanbanRoleGateOptions {
-  /** Role of the caller, fixed at boot time per `ethos serve --role`. */
+  /** Role of the caller, fixed at boot time per `ethos serve --role`. Used as
+   *  the caller's role when `coordinatorId` is not supplied. */
   role: TeamRole;
-  /** Personality id of the caller, used for assignee-only checks. */
+  /** Personality id the loop was constructed with. Used as the caller when the
+   *  payload carries no per-turn `personalityId`. */
   personalityId: string;
   /** Shared team board — assignee-only checks read it to compare current assignee. */
   store: KanbanStore;
+  /**
+   * The team manifest's coordinator personality. When set, the caller's role
+   * is resolved PER TURN from the caller's identity — `coordinator` iff the
+   * turn's personality is this id, else `member` — so one loop shared by a
+   * whole team (teams-as-a-scope D4) authorises each personality as itself.
+   * Absent → the boot-time `role` is used unchanged.
+   */
+  coordinatorId?: string;
 }
 
 const COORDINATOR_ONLY = new Set([
@@ -63,13 +73,25 @@ const KANBAN_PREFIX = 'kanban_';
 export function createKanbanRoleGateHook(
   opts: KanbanRoleGateOptions,
 ): (payload: BeforeToolCallPayload) => Promise<BeforeToolCallResult> {
-  const { role, personalityId, store } = opts;
+  const { store, coordinatorId } = opts;
 
   return async (payload: BeforeToolCallPayload): Promise<BeforeToolCallResult> => {
     const { toolName, args } = payload;
 
     // Non-kanban tools: this hook has no opinion.
     if (!toolName.startsWith(KANBAN_PREFIX)) return {};
+
+    // The caller is the TURN's personality when the loop reports one (a
+    // team-scoped loop runs a different personality per turn); otherwise the
+    // personality the loop was built with. Role follows identity when the
+    // manifest's coordinator is known, else it is the boot-time role.
+    const personalityId = payload.personalityId ?? opts.personalityId;
+    const role: TeamRole =
+      coordinatorId === undefined
+        ? opts.role
+        : personalityId === coordinatorId
+          ? 'coordinator'
+          : 'member';
 
     if (COORDINATOR_ONLY.has(toolName) && role !== 'coordinator') {
       return {

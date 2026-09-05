@@ -1,7 +1,7 @@
 import { resolveCapabilities } from '@ethosagent/core';
 import type { CronScheduler, CronJob as ExtCronJob } from '@ethosagent/cron';
 import { FilePersonalityRegistry } from '@ethosagent/personalities';
-import { morningBriefing, RECIPES } from '@ethosagent/recipes';
+import { morningBriefing, obsidianSecondBrain, RECIPES } from '@ethosagent/recipes';
 import { SkillsLibrary } from '@ethosagent/skills';
 import { InMemorySecretsResolver, InMemoryStorage } from '@ethosagent/storage-fs';
 import { isEthosError, type Tool } from '@ethosagent/types';
@@ -72,6 +72,8 @@ interface WorldOptions {
    * a key called anything at all for selection.
    */
   namedKeys?: Array<{ provider: string; name: string }>;
+  /** Tool names the registry reports available. Defaults to morning-briefing's. */
+  availableTools?: string[];
 }
 
 /** `web_search`'s real shape: it publishes its provider roster, not the recipe. */
@@ -210,7 +212,7 @@ function makeWorld(o: WorldOptions = {}) {
     delete: async () => ({ ok: true as const }),
   };
 
-  const tools: Tool[] = morningBriefing.requires.tools.map(
+  const tools: Tool[] = (o.availableTools ?? morningBriefing.requires.tools).map(
     (name) =>
       ({
         name,
@@ -220,14 +222,22 @@ function makeWorld(o: WorldOptions = {}) {
       }) as Tool,
   );
 
-  const personalities = o.personalityDeleteThrows
-    ? {
-        ...bindService(personalitiesService),
-        delete: async () => {
-          throw new Error('disk is read-only');
-        },
-      }
-    : bindService(personalitiesService);
+  /** Every `personalities.update` the pipeline made, by id — attach mode promises exactly one. */
+  const updateCalls: string[] = [];
+  const personalities: RecipesServiceOptions['personalities'] = {
+    ...bindService(personalitiesService),
+    update: (id, patch) => {
+      updateCalls.push(id);
+      return personalitiesService.update(id, patch);
+    },
+    ...(o.personalityDeleteThrows
+      ? {
+          delete: async () => {
+            throw new Error('disk is read-only');
+          },
+        }
+      : {}),
+  };
 
   // The real service, not a stub: the binding this install writes has to land
   // in the same `tools.yaml` the personality's own Tools tab reads.
@@ -255,14 +265,25 @@ function makeWorld(o: WorldOptions = {}) {
     dataDir: DATA,
   });
 
-  return { recipes, registry, jobs, attached, createJob, personalitiesService, toolSettings };
+  return {
+    recipes,
+    registry,
+    jobs,
+    attached,
+    createJob,
+    personalitiesService,
+    toolSettings,
+    updateCalls,
+  };
 }
 
 /** Methods lose `this` when spread, so bind the ones the pipeline calls. */
 function bindService(s: PersonalitiesService): RecipesServiceOptions['personalities'] {
   return {
+    list: s.list.bind(s),
     exists: s.exists.bind(s),
     get: s.get.bind(s),
+    config: s.config.bind(s),
     create: s.create.bind(s),
     update: s.update.bind(s),
     delete: s.delete.bind(s),
@@ -276,10 +297,14 @@ const FILLED = { city: 'Bengaluru', topics: 'AI infra, F1' };
 // ---------------------------------------------------------------------------
 
 describe('recipes catalog', () => {
-  it('lists every shipped bundle', () => {
+  it('lists every shipped bundle', async () => {
     const { recipes } = makeWorld();
-    const { recipes: rows } = recipes.list();
+    const { recipes: rows } = await recipes.list();
     expect(rows.map((r) => r.id)).toEqual(RECIPES.map((r) => r.id));
+    // Installed state is derived per mode: a create recipe's from its bundle id
+    // (client-side), an attach recipe's from the SOULs that carry its marker.
+    expect(rows.find((r) => r.id === 'morning-briefing')?.attachedTo).toBeNull();
+    expect(rows.find((r) => r.id === 'obsidian-second-brain')?.attachedTo).toEqual([]);
   });
 
   it('every shipped bundle parses through the wire schema', () => {
@@ -377,6 +402,295 @@ describe('recipes.preflight', () => {
     await recipes.preflight({ id: 'morning-briefing', inputs: FILLED });
     expect(registry.describe('briefer')).toBeNull();
     expect(jobs).toEqual([]);
+  });
+});
+
+/** A world with a plain `writer` personality for an attach recipe to land on. */
+async function attachWorld(o: WorldOptions = {}) {
+  const world = makeWorld({ availableTools: [...obsidianSecondBrain.requires.tools], ...o });
+  await world.personalitiesService.create({
+    id: 'writer',
+    name: 'Writer',
+    description: 'Writes things.',
+    soulMd: 'I am Writer.\n',
+    toolset: ['read_file', 'web_search'],
+  });
+  return world;
+}
+
+const VAULT = { vaultPath: '/Users/you/Vault/', consolidationTime: '30 23 * * *' };
+const ATTACH = {
+  id: 'obsidian-second-brain',
+  version: obsidianSecondBrain.version,
+  inputs: VAULT,
+  installMode: 'attach' as const,
+  personalityIdOverride: 'writer',
+};
+
+describe('recipes — path inputs', () => {
+  it('blocks a non-absolute vault path in preflight, naming the fix', async () => {
+    const { recipes } = await attachWorld();
+    for (const bad of ['~/Vault/', 'Documents/Vault/', '/Users/you/../Vault/']) {
+      const report = await recipes.preflight({
+        id: 'obsidian-second-brain',
+        inputs: { vaultPath: bad },
+        installMode: 'attach',
+        personalityIdOverride: 'writer',
+      });
+      const row = report.blocking.find((b) => b.code === 'PATH_NOT_ABSOLUTE');
+      expect(row?.message).toContain(bad);
+      expect(row?.action).toContain('starting with "/"');
+    }
+  });
+
+  it('accepts an absolute vault path', async () => {
+    const { recipes } = await attachWorld();
+    const report = await recipes.preflight({
+      id: 'obsidian-second-brain',
+      inputs: { vaultPath: '/Users/you/Vault/' },
+      installMode: 'attach',
+      personalityIdOverride: 'writer',
+    });
+    expect(report.blocking).toEqual([]);
+    expect(report.characterSheet).toContain('/Users/you/Vault/');
+  });
+
+  it('refuses the install with RECIPE_BLOCKED before any write', async () => {
+    const { recipes, registry, jobs } = await attachWorld();
+    await expect(
+      recipes.install({ ...ATTACH, inputs: { vaultPath: '~/Vault/' } }),
+    ).rejects.toMatchObject({ code: 'RECIPE_BLOCKED' });
+    expect(await registry.readSoulMd('writer')).toBe('I am Writer.\n');
+    expect(jobs).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Attach mode — onto a personality that already exists
+// ---------------------------------------------------------------------------
+
+describe('recipes — attach mode', () => {
+  it('asks for a target, and refuses one that does not exist', async () => {
+    const { recipes } = await attachWorld();
+    const none = await recipes.preflight({
+      id: 'obsidian-second-brain',
+      inputs: VAULT,
+      installMode: 'attach',
+    });
+    expect(none.blocking.map((b) => b.code)).toEqual(['PERSONALITY_REQUIRED']);
+    expect(none.characterSheet).toContain('Pick the personality');
+
+    const ghost = await recipes.preflight({
+      id: 'obsidian-second-brain',
+      inputs: VAULT,
+      installMode: 'attach',
+      personalityIdOverride: 'ghost',
+    });
+    expect(ghost.blocking.map((b) => b.code)).toEqual(['PERSONALITY_NOT_FOUND']);
+
+    await expect(
+      recipes.install({ ...ATTACH, personalityIdOverride: undefined }),
+    ).rejects.toMatchObject({ code: 'RECIPE_BLOCKED' });
+  });
+
+  it("previews the TARGET's sheet with the additions applied", async () => {
+    const { recipes } = await attachWorld();
+    const report = await recipes.preflight(ATTACH);
+    expect(report.blocking).toEqual([]);
+    expect(report.willCreate.personality).toEqual({ id: 'writer', isNew: false });
+    // Writer's own identity, plus what the recipe adds — never an "Archivist".
+    expect(report.characterSheet).toContain('writer — Writer');
+    expect(report.characterSheet).not.toContain('Archivist');
+    expect(report.characterSheet).toContain('patch_file');
+    expect(report.characterSheet).toContain('web_search');
+    expect(report.characterSheet).toContain('/Users/you/Vault/');
+  });
+
+  it('installs with ONE update: a marked SOUL section, a toolset union, reach appended', async () => {
+    const { recipes, registry, jobs, updateCalls } = await attachWorld();
+    const report = await recipes.install(ATTACH);
+
+    expect(report.ok).toBe(true);
+    expect(report.created.personality).toBe('writer');
+    expect(report.created.cronJobs).toEqual(['vault-consolidation']);
+    expect(updateCalls).toEqual(['writer']);
+
+    const soul = await registry.readSoulMd('writer');
+    expect(soul.startsWith('I am Writer.\n')).toBe(true);
+    expect(soul).toContain('<!-- recipe:obsidian-second-brain:start -->');
+    expect(soul).toContain('<!-- recipe:obsidian-second-brain:end -->');
+    expect(soul).toContain('/Users/you/Vault/');
+    expect(soul).not.toContain('{{input.');
+
+    const config = registry.describe('writer')?.config;
+    // Union: what Writer had, then what the recipe adds, nothing twice.
+    expect(config?.toolset).toEqual([
+      'read_file',
+      'web_search',
+      'write_file',
+      'patch_file',
+      'search_files',
+      'memory_read',
+      'memory_write',
+      'cron',
+      'clarify',
+    ]);
+    // Writer declared no reach, so the written list carries the defaults it
+    // was silently getting — a bare vault entry would REPLACE them and make
+    // Writer's own directory unreachable.
+    expect(config?.fs_reach?.read).toEqual([
+      // biome-ignore lint/suspicious/noTemplateCurlyInString: literal config.yaml substitution token
+      '${ETHOS_HOME}/personalities/${self}/',
+      // biome-ignore lint/suspicious/noTemplateCurlyInString: literal config.yaml substitution token
+      '${ETHOS_HOME}/skills/',
+      // biome-ignore lint/suspicious/noTemplateCurlyInString: literal config.yaml substitution token
+      '${CWD}',
+      '/Users/you/Vault/',
+    ]);
+    expect(config?.fs_reach?.write).toEqual([
+      // biome-ignore lint/suspicious/noTemplateCurlyInString: literal config.yaml substitution token
+      '${ETHOS_HOME}/personalities/${self}/',
+      // biome-ignore lint/suspicious/noTemplateCurlyInString: literal config.yaml substitution token
+      '${CWD}',
+      '/Users/you/Vault/',
+    ]);
+    // Identity and routing are untouched.
+    expect(config?.name).toBe('Writer');
+    expect(config?.safety).toBeUndefined();
+    expect(jobs[0]?.personalityId).toBe('writer');
+  });
+
+  it('appends to a declared reach instead of replacing it', async () => {
+    const world = await attachWorld();
+    await world.personalitiesService.update('writer', {
+      fs_reach: { read: ['/Users/you/Notes/'], write: ['/Users/you/Notes/'] },
+    });
+    await world.recipes.install(ATTACH);
+    const reach = world.registry.describe('writer')?.config.fs_reach;
+    expect(reach?.read).toEqual(['/Users/you/Notes/', '/Users/you/Vault/']);
+    expect(reach?.write).toEqual(['/Users/you/Notes/', '/Users/you/Vault/']);
+  });
+
+  it('is idempotent — a second install skips the SOUL append and adds nothing', async () => {
+    const { recipes, registry, jobs, updateCalls } = await attachWorld();
+    await recipes.install(ATTACH);
+    const soulAfterFirst = await registry.readSoulMd('writer');
+
+    const second = await recipes.install(ATTACH);
+    expect(second.ok).toBe(true);
+    expect(second.created.personality).toBeNull();
+    expect(second.skipped.map((s) => s.what)).toEqual([
+      "SOUL section on 'writer'",
+      "cron job 'vault-consolidation'",
+    ]);
+    expect(updateCalls).toEqual(['writer']);
+    expect(await registry.readSoulMd('writer')).toBe(soulAfterFirst);
+    expect(jobs).toHaveLength(1);
+  });
+
+  it('restores the previous SOUL, toolset and reach when a later step throws', async () => {
+    const { recipes, registry, jobs } = await attachWorld({
+      cronCreateThrows: new Error('scheduler is down'),
+    });
+    const report = await recipes.install(ATTACH);
+
+    expect(report.ok).toBe(false);
+    expect(report.created.personality).toBeNull();
+    expect(report.rolledBack).toEqual([{ what: "recipe section on 'writer'", ok: true }]);
+    expect(report.orphaned).toEqual([]);
+
+    expect(await registry.readSoulMd('writer')).toBe('I am Writer.\n');
+    const config = registry.describe('writer')?.config;
+    expect(config?.toolset).toEqual(['read_file', 'web_search']);
+    expect(config?.fs_reach?.read ?? []).toEqual([]);
+    expect(config?.fs_reach?.write ?? []).toEqual([]);
+    expect(jobs).toEqual([]);
+  });
+
+  it('lists the personalities an attach recipe is installed on', async () => {
+    const { recipes } = await attachWorld();
+    await recipes.install(ATTACH);
+    const { recipes: rows } = await recipes.list();
+    expect(rows.find((r) => r.id === 'obsidian-second-brain')?.attachedTo).toEqual(['writer']);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Both modes — one recipe, the user picks at install time
+// ---------------------------------------------------------------------------
+
+describe('recipes — a both recipe', () => {
+  it('ships as both, and `get` shows the whole bundle', () => {
+    const { recipes } = makeWorld();
+    const { recipe } = recipes.get('obsidian-second-brain');
+    expect(recipe.personality.mode).toBe('both');
+  });
+
+  it('with no installMode it is a CREATE: Archivist, rooted in the vault, offline', async () => {
+    const { recipes, registry, jobs } = await attachWorld();
+    const preview = await recipes.preflight({ id: 'obsidian-second-brain', inputs: VAULT });
+    expect(preview.blocking).toEqual([]);
+    expect(preview.willCreate.personality).toEqual({ id: 'obsidian-archivist', isNew: true });
+    expect(preview.characterSheet).toContain('obsidian-archivist — Archivist');
+
+    const report = await recipes.install({
+      id: 'obsidian-second-brain',
+      version: obsidianSecondBrain.version,
+      inputs: VAULT,
+    });
+    expect(report.ok).toBe(true);
+    expect(report.created.personality).toBe('obsidian-archivist');
+    const config = registry.describe('obsidian-archivist')?.config;
+    expect(config?.fs_reach?.workdir).toBe('/Users/you/Vault/');
+    // Offline: never the D15 `['*']`. The registry's yaml round-trip drops an
+    // EMPTY allow list, and an absent policy resolves to an empty host set —
+    // the same deny-all the bundle declared.
+    expect(config?.safety?.network?.allow ?? []).toEqual([]);
+    expect(config?.toolset).toEqual(obsidianSecondBrain.requires.tools);
+    const soul = await registry.readSoulMd('obsidian-archivist');
+    expect(soul.startsWith('I am Archivist.')).toBe(true);
+    expect(soul).not.toContain('<!-- recipe:');
+    expect(jobs[0]?.personalityId).toBe('obsidian-archivist');
+    // Writer was never touched.
+    expect(await registry.readSoulMd('writer')).toBe('I am Writer.\n');
+  });
+
+  it("with installMode 'attach' it is an ATTACH, with the attach path's rows", async () => {
+    const { recipes, registry } = await attachWorld();
+    const none = await recipes.preflight({
+      id: 'obsidian-second-brain',
+      inputs: VAULT,
+      installMode: 'attach',
+    });
+    expect(none.blocking.map((b) => b.code)).toEqual(['PERSONALITY_REQUIRED']);
+
+    const report = await recipes.install(ATTACH);
+    expect(report.ok).toBe(true);
+    expect(report.created.personality).toBe('writer');
+    expect(registry.describe('obsidian-archivist')).toBeNull();
+    expect(await registry.readSoulMd('writer')).toContain(
+      '<!-- recipe:obsidian-second-brain:start -->',
+    );
+  });
+
+  it('exposes both installed signals on the list row', async () => {
+    const { recipes, registry } = await attachWorld();
+    const before = await recipes.list();
+    expect(before.recipes.find((r) => r.id === 'obsidian-second-brain')?.attachedTo).toEqual([]);
+
+    await recipes.install({
+      id: 'obsidian-second-brain',
+      version: obsidianSecondBrain.version,
+      inputs: VAULT,
+    });
+    await recipes.install(ATTACH);
+    const after = await recipes.list();
+    // The attach signal on the row; the create signal is the personality's
+    // existence, which the gallery reads off the bundle's id.
+    expect(after.recipes.find((r) => r.id === 'obsidian-second-brain')?.attachedTo).toEqual([
+      'writer',
+    ]);
+    expect(registry.describe('obsidian-archivist')).not.toBeNull();
   });
 });
 

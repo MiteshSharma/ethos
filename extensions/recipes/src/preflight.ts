@@ -10,7 +10,12 @@
 // every row carries an `action` a user can actually perform.
 
 import type { RecipeBundle } from './schema';
-import { renderTemplatePreview, resolveInputs, unresolvedPlaceholders } from './template';
+import {
+  hasRecipeSoulSection,
+  renderTemplatePreview,
+  resolveInputs,
+  unresolvedPlaceholders,
+} from './template';
 
 /**
  * A snapshot of the world, as the service layer sees it. Everything is scoped
@@ -18,8 +23,12 @@ import { renderTemplatePreview, resolveInputs, unresolvedPlaceholders } from './
  * `deliveryTargets` are that personality's, not the whole machine's.
  */
 export interface RecipeWorldSnapshot {
-  /** Personalities that already exist, with enough to tell "same recipe" from "collision". */
-  personalities: Array<{ id: string; soulMd: string; toolset: string[] }>;
+  /**
+   * Personalities that already exist, with enough to tell "same recipe" from
+   * "collision" (create mode) or "already attached" (attach mode). `builtin`
+   * marks a read-only one an attach cannot write to.
+   */
+  personalities: Array<{ id: string; soulMd: string; toolset: string[]; builtin?: boolean }>;
   /** Registered tool names that pass `isAvailable()` — `toolRegistry.getAvailable()`. */
   availableTools: string[];
   /** MCP server names registered in `mcp.json`. */
@@ -180,7 +189,11 @@ export interface PreflightRequest {
   snapshot: RecipeWorldSnapshot;
   /** Values the user has filled in so far. Defaults are merged underneath. */
   inputs?: Record<string, string>;
-  /** `personalityIdOverride` from `recipes.preflight` (§4). */
+  /**
+   * `personalityIdOverride` from `recipes.preflight` (§4). In create mode the
+   * collision escape hatch; in attach mode the TARGET — required, and a
+   * `PERSONALITY_REQUIRED` row until it arrives.
+   */
   personalityId?: string;
   /**
    * Which named secret, per `requires.secrets[].toolName`, the user picked —
@@ -235,12 +248,46 @@ export function preflightRecipe(req: PreflightRequest): PreflightReport {
   }));
 
   // --- personality id ------------------------------------------------------
-  const personalityId = req.personalityId ?? bundle.personality.id;
-  const existing = snapshot.personalities.find((p) => p.id === personalityId);
-  if (existing) {
-    const wouldWrite = renderTemplatePreview(bundle.personality.soulMd, values);
+  const p = bundle.personality;
+  const personalityId =
+    p.mode === 'create' ? (req.personalityId ?? p.id) : (req.personalityId ?? '');
+  const existing = snapshot.personalities.find((entry) => entry.id === personalityId);
+  if (p.mode === 'attach') {
+    // The target is a CHOICE, not a bundle field — so "no choice yet" is a row
+    // the user clears by picking, and a choice naming nothing is refused
+    // before the first write rather than at it.
+    if (!req.personalityId) {
+      blocking.push({
+        code: 'PERSONALITY_REQUIRED',
+        message: 'Pick the personality this recipe attaches to.',
+        action: 'Choose one of your personalities above.',
+      });
+    } else if (!existing) {
+      blocking.push({
+        code: 'PERSONALITY_NOT_FOUND',
+        message: `No personality with the id '${personalityId}' exists.`,
+        action: 'Pick an existing personality, or create one first.',
+        href: '/personalities',
+      });
+    } else if (existing.builtin) {
+      blocking.push({
+        code: 'PERSONALITY_READ_ONLY',
+        message: `'${personalityId}' is built-in, and its files cannot be changed.`,
+        action: 'Duplicate it on the Personalities page and attach to the copy.',
+        href: '/personalities',
+      });
+    } else if (hasRecipeSoulSection(existing.soulMd, bundle.id)) {
+      // Said out loud, not blocked: the install is idempotent — tools, reach
+      // and schedules are re-checked, and only the SOUL append is skipped.
+      warnings.push({
+        code: 'ALREADY_ATTACHED',
+        message: `'${personalityId}' already carries this recipe's section. Installing again adds nothing to its SOUL.md.`,
+      });
+    }
+  } else if (existing) {
+    const wouldWrite = renderTemplatePreview(p.soulMd, values);
     const alreadyInstalled =
-      existing.soulMd === wouldWrite && sameToolset(existing.toolset, bundle.personality.toolset);
+      existing.soulMd === wouldWrite && sameToolset(existing.toolset, p.toolset);
     if (!alreadyInstalled) {
       blocking.push({
         code: 'PERSONALITY_ID_TAKEN',
@@ -414,7 +461,8 @@ export function preflightRecipe(req: PreflightRequest): PreflightReport {
     needsInput,
     warnings,
     willCreate: {
-      personality: { id: personalityId, isNew: existing === undefined },
+      // An attach never creates: the target either exists or is refused above.
+      personality: { id: personalityId, isNew: p.mode === 'create' && existing === undefined },
       cronJobs: bundle.cronJobs.map((job) => {
         // Preview only — an unfilled schedule keeps its placeholder rather than
         // rendering a wrong time; `needsInput` already names what is missing.
@@ -445,6 +493,11 @@ export function preflightRecipe(req: PreflightRequest): PreflightReport {
  */
 export function unknownToolNames(bundle: RecipeBundle, known: Iterable<string>): string[] {
   const knownSet = new Set(known);
-  const referenced = new Set([...bundle.requires.tools, ...bundle.personality.toolset]);
+  const p = bundle.personality;
+  const referenced = new Set([
+    ...bundle.requires.tools,
+    ...p.toolset,
+    ...(p.mode === 'both' ? p.attach.toolset : []),
+  ]);
   return [...referenced].filter((name) => !knownSet.has(name)).sort();
 }

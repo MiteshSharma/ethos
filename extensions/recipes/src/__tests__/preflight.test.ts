@@ -3,10 +3,10 @@
 // prerequisite produces none.
 
 import { describe, expect, it } from 'vitest';
-import { morningBriefing } from '../data';
+import { morningBriefing, obsidianSecondBrain as obsidianBoth } from '../data';
 import { preflightRecipe, type RecipeWorldSnapshot, unknownToolNames } from '../preflight';
-import type { RecipeBundle } from '../schema';
-import { renderTemplatePreview } from '../template';
+import { projectBundle, type RecipeBundle } from '../schema';
+import { recipeSoulMarkers, renderTemplatePreview } from '../template';
 
 const FILLED = {
   city: 'Bengaluru',
@@ -53,7 +53,7 @@ function happyWorld(): RecipeWorldSnapshot {
 function run(
   snapshot: RecipeWorldSnapshot,
   inputs = FILLED,
-  bundle = morningBriefing,
+  bundle: RecipeBundle = morningBriefing,
   secretBindings?: Record<string, { provider: string; secret: string }>,
 ) {
   return preflightRecipe({
@@ -496,5 +496,139 @@ describe('preflightRecipe — credentials', () => {
     const report = run(snapshot, FILLED, noSecrets);
     expect(report.warnings).toEqual([]);
     expect(report.needsInput).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Attach mode — the target is a choice, and it must be a real, writable one
+// ---------------------------------------------------------------------------
+
+describe('preflightRecipe — attach mode', () => {
+  const VAULT = { vaultPath: '/Users/you/Vault/', consolidationTime: '30 23 * * *' };
+  // The shipped Obsidian bundle is `both`; preflight always sees ONE view.
+  const obsidianSecondBrain = projectBundle(obsidianBoth, 'attach');
+
+  function attachWorld(): RecipeWorldSnapshot {
+    return {
+      ...happyWorld(),
+      availableTools: [...obsidianSecondBrain.requires.tools],
+      deliveryTargets: [],
+      secretStatus: {},
+      personalities: [{ id: 'writer', soulMd: 'I am Writer.\n', toolset: ['read_file'] }],
+    };
+  }
+
+  it('asks for a target until one is picked', () => {
+    const report = preflightRecipe({
+      bundle: obsidianSecondBrain,
+      snapshot: attachWorld(),
+      inputs: VAULT,
+    });
+    expect(codes(report.blocking)).toEqual(['PERSONALITY_REQUIRED']);
+    expect(report.blocking[0]?.message).toBe('Pick the personality this recipe attaches to.');
+    expect(report.willCreate.personality).toEqual({ id: '', isNew: false });
+  });
+
+  it('refuses a target that does not exist', () => {
+    const report = preflightRecipe({
+      bundle: obsidianSecondBrain,
+      snapshot: attachWorld(),
+      inputs: VAULT,
+      personalityId: 'ghost',
+    });
+    expect(codes(report.blocking)).toEqual(['PERSONALITY_NOT_FOUND']);
+    expect(report.blocking[0]?.href).toBe('/personalities');
+  });
+
+  it('refuses a built-in target, whose files are read-only', () => {
+    const snapshot = attachWorld();
+    snapshot.personalities = [{ id: 'writer', soulMd: 'x', toolset: [], builtin: true }];
+    const report = preflightRecipe({
+      bundle: obsidianSecondBrain,
+      snapshot,
+      inputs: VAULT,
+      personalityId: 'writer',
+    });
+    expect(codes(report.blocking)).toEqual(['PERSONALITY_READ_ONLY']);
+  });
+
+  it('passes an existing target and never claims to create it', () => {
+    const report = preflightRecipe({
+      bundle: obsidianSecondBrain,
+      snapshot: attachWorld(),
+      inputs: VAULT,
+      personalityId: 'writer',
+    });
+    expect(report.blocking).toEqual([]);
+    expect(report.willCreate.personality).toEqual({ id: 'writer', isNew: false });
+    // PERSONALITY_ID_TAKEN is a create-mode collision; an attach WANTS the id taken.
+    expect(codes(report.blocking)).not.toContain('PERSONALITY_ID_TAKEN');
+  });
+
+  it('says so — without blocking — when the target already carries the section', () => {
+    const snapshot = attachWorld();
+    const { start, end } = recipeSoulMarkers(obsidianSecondBrain.id);
+    snapshot.personalities = [
+      { id: 'writer', soulMd: `I am Writer.\n\n${start}\nVault rules.\n${end}\n`, toolset: [] },
+    ];
+    const report = preflightRecipe({
+      bundle: obsidianSecondBrain,
+      snapshot,
+      inputs: VAULT,
+      personalityId: 'writer',
+    });
+    expect(report.blocking).toEqual([]);
+    expect(codes(report.warnings)).toContain('ALREADY_ATTACHED');
+  });
+
+  it('leaves the create-mode collision check exactly as it was', () => {
+    const report = run({
+      ...happyWorld(),
+      personalities: [{ id: 'briefer', soulMd: 'Someone else entirely.', toolset: ['read_file'] }],
+    });
+    expect(codes(report.blocking)).toEqual(['PERSONALITY_ID_TAKEN']);
+  });
+});
+
+describe('preflightRecipe — a both bundle, projected', () => {
+  const VAULT = { vaultPath: '/Users/you/Vault/', consolidationTime: '30 23 * * *' };
+  const world = (): RecipeWorldSnapshot => ({
+    ...happyWorld(),
+    availableTools: [...obsidianBoth.requires.tools],
+    deliveryTargets: [],
+    secretStatus: {},
+    personalities: [{ id: 'writer', soulMd: 'I am Writer.\n', toolset: ['read_file'] }],
+  });
+
+  it('runs the create path as create — its own id, no target needed', () => {
+    const report = preflightRecipe({
+      bundle: projectBundle(obsidianBoth, 'create'),
+      snapshot: world(),
+      inputs: VAULT,
+    });
+    expect(report.blocking).toEqual([]);
+    expect(report.willCreate.personality).toEqual({ id: 'obsidian-archivist', isNew: true });
+  });
+
+  it('runs the attach path as attach — the target is required', () => {
+    const report = preflightRecipe({
+      bundle: projectBundle(obsidianBoth, 'attach'),
+      snapshot: world(),
+      inputs: VAULT,
+    });
+    expect(codes(report.blocking)).toEqual(['PERSONALITY_REQUIRED']);
+  });
+
+  it('unknownToolNames reads both halves of the unprojected bundle', () => {
+    const known = new Set([...obsidianBoth.requires.tools]);
+    expect(unknownToolNames(obsidianBoth, known)).toEqual([]);
+    const drifted: RecipeBundle = {
+      ...obsidianBoth,
+      personality: {
+        ...obsidianBoth.personality,
+        attach: { ...obsidianBoth.personality.attach, toolset: ['ghost_tool'] },
+      },
+    };
+    expect(unknownToolNames(drifted, known)).toEqual(['ghost_tool']);
   });
 });

@@ -1,0 +1,652 @@
+/* Team panes — Overview, Board, Activity (plan/phases/teams-as-a-scope.md T2,
+   §4/§5/§8). Pixel reference: plan/prototypes/teams-as-a-scope/
+   ethos-team-scope.html (`.body`, `.strip`, `.ov`, `.colv`, `.mrow`, `.feed`,
+   `.ev`, `.group`, `.cols`, `.split`, `.drawer`). Hex → `--ethos-*` tokens;
+   the mono stack matches styles.css. The lifted board columns keep their
+   `.cc-*` rules from styles.css until T5 consolidates them. */
+
+.team-body {
+  flex: 1 1 auto;
+  height: 100%;
+  box-sizing: border-box;
+  padding: 24px 28px;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  min-height: 0;
+  overflow: auto;
+  background: var(--ethos-bg);
+  color: var(--ethos-text);
+  font-size: 13px;
+  line-height: 1.45;
+}
+.team-body-center {
+  align-items: center;
+  justify-content: center;
+}
+
+/* Family only (prototype `.mono`) — the size and colour come from where it
+   sits: the strip's trailing detail below, the kv value it is inside, etc. */
+.team-mono {
+  font-family: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 10px mono uppercase label — strip cells, section headers, group headers. */
+.team-k,
+.team-sec,
+.team-group-h {
+  font-family: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10px;
+  font-weight: 500;
+  line-height: 1.4;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ethos-text-tertiary);
+}
+
+/* ── Status line ─────────────────────────────────────────────────── */
+
+.team-strip {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 24px;
+  flex: none;
+  padding-bottom: 20px;
+  border-bottom: 1px solid var(--ethos-border);
+}
+.team-strip-v {
+  font-size: 14px;
+  font-weight: 500;
+  margin-top: 3px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+  min-width: 0;
+  overflow: hidden;
+}
+/* The strip value's trailing mono detail (`up 6h 12m`, `via cmo · poll 1s`). */
+.team-strip-v .team-mono {
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--ethos-text-dim);
+}
+.team-strip-none {
+  color: var(--ethos-text-tertiary);
+  font-weight: 400;
+}
+
+/* ── Semantic dot — always beside text, never the only signal ─────── */
+
+.team-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 9999px;
+  display: inline-block;
+  flex: none;
+}
+.team-dot-ok {
+  background: var(--ethos-success);
+}
+.team-dot-warn {
+  background: var(--ethos-warning);
+}
+.team-dot-err {
+  background: var(--ethos-error);
+}
+.team-dot-info {
+  background: var(--ethos-info);
+}
+.team-dot-dim {
+  background: var(--ethos-text-tertiary);
+}
+.team-dot-live {
+  animation: team-pulse 1.8s ease-in-out infinite;
+}
+@keyframes team-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .team-dot-live {
+    animation: none;
+  }
+}
+
+/* ── Section header: label · count · trailing link ───────────────── */
+
+.team-sec {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+}
+.team-sec-cnt {
+  text-transform: none;
+  letter-spacing: 0;
+  color: var(--ethos-text-tertiary);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.team-sec-more {
+  margin-left: auto;
+  text-transform: none;
+  letter-spacing: 0;
+  color: var(--ethos-text-dim);
+  font-family: "Geist", system-ui, sans-serif;
+  font-size: 12px;
+  font-weight: 400;
+  border-radius: 4px;
+  padding: 1px 4px;
+  background: none;
+  border: 0;
+  cursor: pointer;
+  text-decoration: none;
+  transition:
+    color 80ms cubic-bezier(0.16, 1, 0.3, 1),
+    background-color 80ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+.team-sec-more:hover {
+  color: var(--ethos-text);
+  background: var(--ethos-hover);
+}
+.team-sec-actions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+/* ── Overview grid — three columns, each scrolls on its own ──────── */
+
+.team-ov {
+  display: grid;
+  grid-template-columns: minmax(300px, 1fr) minmax(320px, 1.15fr) minmax(280px, 1fr);
+  gap: 32px;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+.team-ov-2 {
+  grid-template-columns: 1fr 1fr;
+}
+.team-colv {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 0;
+  min-width: 0;
+}
+.team-scroll {
+  overflow: auto;
+  min-height: 0;
+  flex: 1 1 auto;
+}
+.team-colv-foot {
+  margin-top: auto;
+  padding-top: 14px;
+}
+.team-message-btn .team-mono {
+  font-size: 11px;
+  color: var(--ethos-text-tertiary);
+  margin-left: 4px;
+}
+
+/* ── Member row ──────────────────────────────────────────────────── */
+
+.team-rows {
+  display: flex;
+  flex-direction: column;
+}
+.team-mrow {
+  display: grid;
+  grid-template-columns: 28px 1fr auto;
+  gap: 12px;
+  align-items: center;
+  padding: 10px 6px;
+  border-bottom: 1px solid var(--ethos-border);
+  border-radius: 4px;
+  color: inherit;
+  text-decoration: none;
+  transition: background-color 80ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+.team-mrow:last-child {
+  border-bottom: 0;
+}
+.team-mrow:hover {
+  background: var(--ethos-hover);
+  color: inherit;
+}
+.team-mrow-main {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+.team-mrow-nm {
+  font-weight: 500;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.team-mrow-role {
+  font-family: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10px;
+  font-weight: 400;
+  color: var(--ethos-text-tertiary);
+}
+.team-mrow-st {
+  color: var(--ethos-text-dim);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  font-size: 12px;
+  margin-top: 2px;
+}
+.team-mrow-id {
+  font-family: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-variant-numeric: tabular-nums;
+  font-size: 11px;
+  color: var(--ethos-text);
+}
+.team-mrow-txt {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.team-tier {
+  font-family: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10px;
+  font-weight: 500;
+  border: 1px solid var(--ethos-border-strong);
+  border-radius: 4px;
+  padding: 1px 5px;
+  color: var(--ethos-text-dim);
+  white-space: nowrap;
+}
+
+/* ── Memory topic chips ──────────────────────────────────────────── */
+
+.team-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.team-chip {
+  font-family: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  border: 1px solid var(--ethos-border-strong);
+  border-radius: 4px;
+  padding: 2px 7px;
+  color: var(--ethos-text-dim);
+  text-decoration: none;
+  transition:
+    color 80ms cubic-bezier(0.16, 1, 0.3, 1),
+    border-color 80ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+.team-chip:hover {
+  color: var(--ethos-text);
+  border-color: var(--ethos-text-tertiary);
+}
+
+/* ── Feed rows — ledger and activity ─────────────────────────────── */
+
+.team-feed {
+  display: flex;
+  flex-direction: column;
+}
+.team-ev {
+  display: grid;
+  grid-template-columns: 52px 16px 1fr;
+  gap: 8px;
+  padding: 8px 4px;
+  border-bottom: 1px solid var(--ethos-border);
+  align-items: start;
+  font-size: 12px;
+}
+.team-ev:last-child {
+  border-bottom: 0;
+}
+.team-ev > .team-dot,
+.team-ev > svg {
+  margin-top: 3px;
+}
+.team-ev-t {
+  font-family: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-variant-numeric: tabular-nums;
+  font-size: 11px;
+  color: var(--ethos-text-tertiary);
+  padding-top: 1px;
+}
+.team-ev-body {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.team-ev-who {
+  font-weight: 500;
+}
+.team-ev-why {
+  color: var(--ethos-text-dim);
+  display: block;
+}
+.team-idlink {
+  font-family: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-variant-numeric: tabular-nums;
+  font-size: 11px;
+  color: var(--ethos-text);
+  border-radius: 3px;
+  padding: 0 2px;
+  text-decoration: none;
+  transition:
+    color 80ms cubic-bezier(0.16, 1, 0.3, 1),
+    background-color 80ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+.team-idlink:hover {
+  background: var(--ethos-hover);
+  color: var(--ethos-info);
+}
+
+/* ── Attention groups ────────────────────────────────────────────── */
+
+.team-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 14px;
+}
+.team-group-h {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.team-group-cnt {
+  margin-left: auto;
+  letter-spacing: 0;
+  color: var(--ethos-text-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── Empty states ────────────────────────────────────────────────── */
+
+.team-empty {
+  color: var(--ethos-text-tertiary);
+  padding: 16px 0;
+  font-size: 12.5px;
+  max-width: 52ch;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  align-items: flex-start;
+}
+.team-ledger-stopped {
+  border-bottom: 1px solid var(--ethos-border);
+  max-width: none;
+}
+
+/* ── Board pane — columns fill the width, drawer as a side column ── */
+
+.team-split {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  flex: 1 1 auto;
+  min-height: 0;
+}
+.team-split-open {
+  grid-template-columns: minmax(0, 1fr) 320px;
+}
+.team-board {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+  min-height: 0;
+}
+.team-split-open .team-board {
+  padding-right: 20px;
+}
+.team-cols {
+  display: grid;
+  grid-template-rows: minmax(0, 1fr);
+  gap: 12px;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+/* The lifted `.cc-column` is sized as a flex item in styles.css; here it is a
+   grid cell and the gap is the divider. */
+.team-cols .cc-column {
+  flex: none;
+  min-width: 0;
+  max-width: none;
+  border-right: 0;
+}
+/* The plain column header (`headerVariant="plain"`, prototype `.col .h`):
+   the 10px mono uppercase label, an optional state dot, the count on the
+   right, one rule beneath — no chip, no elevated band. */
+.cc-column-header-plain {
+  padding: 0 2px 6px;
+  gap: 6px;
+  min-width: 0;
+  background: none;
+  font-family: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10px;
+  font-weight: 500;
+  line-height: 1.4;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ethos-text-tertiary);
+}
+.cc-column-header-plain .cc-column-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cc-column-header-plain .cc-column-count {
+  margin-left: auto;
+  font-size: 10px;
+  letter-spacing: 0;
+  color: var(--ethos-text-secondary);
+}
+.team-cols .cc-column-body {
+  padding: 8px 0;
+}
+/* The prototype has no dashed box for an empty column — just the line. */
+.team-cols .cc-column-empty {
+  border: 0;
+  padding: 4px 2px;
+  margin-top: 0;
+  text-align: left;
+  color: var(--ethos-text-tertiary);
+}
+.team-drawer {
+  border-left: 1px solid var(--ethos-border);
+  padding: 0 0 0 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  overflow: auto;
+  min-height: 0;
+}
+.team-drawer-title {
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 1.35;
+}
+.team-drawer .cc-task-modal-layout {
+  flex-direction: column;
+  height: auto;
+}
+.team-drawer .cc-task-modal-main {
+  height: auto;
+}
+.team-drawer .cc-task-modal-scroll {
+  padding: 0;
+  overflow: visible;
+}
+.team-drawer .cc-task-modal-events {
+  flex: none;
+  border-left: 0;
+  border-top: 1px solid var(--ethos-border);
+  padding: 12px 0 0;
+}
+
+/* Task tile additions (§5): the reason line and the T4 action slot. */
+.cc-task-reason {
+  font-size: 11px;
+  line-height: 1.35;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.cc-task-reason-needs_revision {
+  color: var(--ethos-warning);
+}
+.cc-task-reason-blocked {
+  color: var(--ethos-error);
+}
+.cc-task-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+
+/* ── Responsive (§4): ledger wraps beneath, then everything stacks ── */
+
+@media (max-width: 1180px) {
+  .team-ov {
+    grid-template-columns: minmax(300px, 1fr) minmax(320px, 1.15fr);
+  }
+  .team-ov > :nth-child(3) {
+    grid-column: 1 / -1;
+  }
+  .team-ov-2 {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+@media (max-width: 900px) {
+  .team-ov,
+  .team-ov-2 {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .team-strip {
+    grid-template-columns: repeat(2, 1fr);
+    gap: 16px;
+  }
+  .team-split-open {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .team-split-open .team-board {
+    padding-right: 0;
+  }
+  .team-drawer {
+    border-left: 0;
+    border-top: 1px solid var(--ethos-border);
+    padding: 16px 0 0;
+  }
+}
+
+/* ── T4 — Needs-you pill (D11), breadcrumb right slot; prototype `.needs` ── */
+
+.team-needs-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--ethos-warning);
+  color: var(--ethos-warning);
+  border-radius: 9999px;
+  padding: 2px 9px;
+  font-family: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.4;
+  text-decoration: none;
+  white-space: nowrap;
+  /* The header's own gap is 6px; the pill sits 12px before the create action. */
+  margin-right: 6px;
+  transition: background-color var(--motion-fast, 80ms) var(--ease, cubic-bezier(0.16, 1, 0.3, 1));
+}
+.team-needs-pill:hover {
+  color: var(--ethos-warning);
+  background: rgba(245, 158, 11, 0.12);
+}
+
+/* The breadcrumb's supervisor line beside the pill (prototype right slot).
+   `.stage-header` gaps 6px; the 6px margins make it 12px to each neighbour. */
+.team-supervisor-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 6px;
+  font-size: 11px;
+  color: var(--ethos-text-secondary);
+  white-space: nowrap;
+}
+
+/* ── T4 — Drawer member picker (D11); prototype `.picker` ─────────── */
+
+.team-picker {
+  flex-basis: 100%;
+  border: 1px solid var(--ethos-border-strong);
+  border-radius: 8px;
+  background: var(--ethos-bg-elevated);
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+}
+.team-picker-h {
+  padding: 4px 8px 2px;
+}
+.team-picker-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 4px;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color var(--motion-fast, 80ms) var(--ease, cubic-bezier(0.16, 1, 0.3, 1));
+}
+.team-picker-row:hover:not(:disabled) {
+  background: var(--ethos-hover);
+}
+.team-picker-row:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+.team-picker-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ── T4 — Cross-highlight (D12): `useCrossHighlight` sets the classes ── */
+
+.app-shell [data-p] {
+  transition: opacity var(--motion-fast, 80ms) var(--ease, cubic-bezier(0.16, 1, 0.3, 1));
+}
+.app-shell.is-hl-on [data-p] {
+  opacity: 0.4;
+}
+.app-shell.is-hl-on [data-p].is-hl {
+  opacity: 1;
+}
+@media (prefers-reduced-motion: reduce) {
+  .app-shell [data-p] {
+    transition: none;
+  }
+}

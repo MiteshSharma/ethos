@@ -5,6 +5,7 @@ import type { ActivityEvent, SseEvent } from '@ethosagent/web-contracts';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { ChatRepository } from '../../features/chat/repository';
 import { ChatService } from '../../features/chat/service';
+import { TeamLoopRegistry } from '../../features/chat/team-loops';
 import { makeStubAgentLoop } from '../test-helpers';
 
 // ChatService composes a real SessionStreamBuffer + SessionsRepository
@@ -677,5 +678,136 @@ describe('ChatService — activity fan-out', () => {
     });
 
     unsubscribe();
+  });
+});
+
+// Team routing (plan/phases/teams-as-a-scope.md D4, §9): a personality that
+// belongs to a team runs on that team's loop; everything else on the main one.
+describe('ChatService — team-scoped loops', () => {
+  let store: SQLiteSessionStore;
+  let sessions: ChatRepository;
+  let buffer: SessionStreamBuffer<SseEvent>;
+  let activityBuffer: SessionStreamBuffer<ActivityEvent>;
+
+  beforeEach(() => {
+    store = new SQLiteSessionStore(':memory:');
+    sessions = new ChatRepository(store);
+    buffer = new SessionStreamBuffer<SseEvent>();
+    activityBuffer = new SessionStreamBuffer<ActivityEvent>();
+  });
+
+  afterEach(() => {
+    buffer.destroy();
+    activityBuffer.destroy();
+    store.close();
+  });
+
+  const MEMBERSHIP = [{ name: 'marketing', members: ['cmo', 'writer'], coordinator: 'cmo' }];
+
+  function makeRouted(opts: { failTeamBuild?: boolean } = {}) {
+    const ran: Array<{ loop: string; personalityId: unknown }> = [];
+    const record = (loop: string) => (_input: string, runOpts: unknown) => {
+      ran.push({ loop, personalityId: (runOpts as { personalityId?: string }).personalityId });
+    };
+    const mainLoop = makeStubAgentLoop({ onRun: record('main') });
+    const teamLoop = makeStubAgentLoop({ onRun: record('team:marketing') });
+    let mainRefreshes = 0;
+    let teamRefreshes = 0;
+    const teamLoops = new TeamLoopRegistry({
+      factory: async () => {
+        if (opts.failTeamBuild) throw new Error('manifest broken');
+        return {
+          loop: teamLoop,
+          refreshPersonalities: async () => {
+            teamRefreshes++;
+          },
+        };
+      },
+      listTeams: async () => MEMBERSHIP,
+    });
+    const service = new ChatService({
+      loop: mainLoop,
+      sessions,
+      buffer,
+      activityBuffer,
+      defaults: { model: 'claude-test', provider: 'anthropic' },
+      refreshPersonalities: async () => {
+        mainRefreshes++;
+      },
+      teamLoops,
+    });
+    return {
+      service,
+      ran,
+      refreshes: () => ({ main: mainRefreshes, team: teamRefreshes }),
+    };
+  }
+
+  it('a turn for a team member runs on the team loop; a non-member on the main loop', async () => {
+    const { service, ran } = makeRouted();
+
+    await service.send({ clientId: 'tab-1', text: 'hi', personalityId: 'writer' });
+    await waitFor(() => ran.length === 1);
+    expect(ran[0]).toEqual({ loop: 'team:marketing', personalityId: 'writer' });
+
+    await service.send({ clientId: 'tab-1', text: 'hi', personalityId: 'researcher' });
+    await waitFor(() => ran.length === 2);
+    expect(ran[1]).toEqual({ loop: 'main', personalityId: 'researcher' });
+  });
+
+  it('the coordinator and a member share the team loop — one scope, two doors', async () => {
+    const { service, ran } = makeRouted();
+    await service.send({ clientId: 'tab-1', text: 'hi', personalityId: 'cmo' });
+    await service.send({ clientId: 'tab-2', text: 'hi', personalityId: 'writer' });
+    await waitFor(() => ran.length === 2);
+    expect(ran.map((r) => r.loop)).toEqual(['team:marketing', 'team:marketing']);
+  });
+
+  it('a follow-up turn without personalityId routes by the session personality', async () => {
+    const { service, ran } = makeRouted();
+    const first = await service.send({ clientId: 'tab-1', text: 'hi', personalityId: 'cmo' });
+    await waitFor(() => ran.length === 1);
+    await service.send({ sessionId: first.sessionId, clientId: 'tab-1', text: 'again' });
+    await waitFor(() => ran.length === 2);
+    expect(ran[1]?.loop).toBe('team:marketing');
+  });
+
+  it('refreshes the personality registry of the loop the turn runs on', async () => {
+    const { service, ran, refreshes } = makeRouted();
+    await service.send({ clientId: 'tab-1', text: 'hi', personalityId: 'writer' });
+    await waitFor(() => ran.length === 1);
+    expect(refreshes()).toEqual({ main: 0, team: 1 });
+    await service.send({ clientId: 'tab-1', text: 'hi', personalityId: 'researcher' });
+    await waitFor(() => ran.length === 2);
+    expect(refreshes()).toEqual({ main: 1, team: 1 });
+  });
+
+  it('a team loop that fails to build rejects the turn instead of silently dropping scope', async () => {
+    const { service, ran } = makeRouted({ failTeamBuild: true });
+    try {
+      await service.send({ clientId: 'tab-1', text: 'hi', personalityId: 'writer' });
+      throw new Error('expected throw');
+    } catch (err) {
+      expect(isEthosError(err)).toBe(true);
+      if (isEthosError(err)) {
+        expect(err.code).toBe('CONFIG_INVALID');
+        expect(err.message).toContain('marketing');
+      }
+    }
+    expect(ran).toHaveLength(0);
+  });
+
+  it('without a registry every turn runs on the main loop', async () => {
+    const ran: string[] = [];
+    const service = new ChatService({
+      loop: makeStubAgentLoop({ onRun: () => ran.push('main') }),
+      sessions,
+      buffer,
+      activityBuffer,
+      defaults: { model: 'claude-test', provider: 'anthropic' },
+    });
+    await service.send({ clientId: 'tab-1', text: 'hi', personalityId: 'cmo' });
+    await waitFor(() => ran.length === 1);
+    expect(ran).toEqual(['main']);
   });
 });

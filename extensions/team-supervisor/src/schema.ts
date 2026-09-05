@@ -47,6 +47,15 @@ const TeamManifestSchema = z
       })
       .optional(),
     members: z.array(TeamMemberSchema),
+    channels: z
+      .array(
+        z.object({
+          platform: z.string().min(1),
+          botKey: z.string().min(1),
+          config: z.record(z.string(), z.unknown()).optional(),
+        }),
+      )
+      .optional(),
     kanban: z
       .object({
         stale_ms: z.number().int().positive().optional(),

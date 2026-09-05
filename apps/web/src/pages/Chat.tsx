@@ -2,13 +2,17 @@ import { resolveCallTreatment } from '@ethosagent/types';
 import { useQueryClient } from '@tanstack/react-query';
 import { App as AntApp, ConfigProvider } from 'antd';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { useNavigate, useSearchParams } from 'react-router-dom';
+import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { ApprovalModal } from '../components/chat/ApprovalModal';
 import { ClarifyCard } from '../components/chat/ClarifyCard';
 import { Composer } from '../components/chat/Composer';
 import { GoalIntakeModal } from '../components/chat/GoalIntakeModal';
 import { MessageList } from '../components/chat/MessageList';
-import { PersonalityBar } from '../components/chat/PersonalityBar';
+import {
+  PersonalityBar,
+  type PersonalityBarCoordinatorOf,
+  type PersonalityBarTeamContext,
+} from '../components/chat/PersonalityBar';
 import type { RunSurface } from '../components/chat/RunCard';
 import { StatusLine } from '../components/chat/StatusLine';
 import { useConfig } from '../features/config/api/queries';
@@ -17,6 +21,8 @@ import { useGoalDetection } from '../features/goals/useGoalDetection';
 import { usePersonalityGet } from '../features/personalities/api/queries';
 import { useSessionRenameFromChat } from '../features/sessions/api/mutations';
 import { useRecentSessions, useSessionGet } from '../features/sessions/api/queries';
+import { useTeam } from '../features/teams/api/queries';
+import { teamAccents } from '../features/teams/lib/membership';
 import { CallStage } from '../features/voice/CallStage';
 import {
   callStageMounted,
@@ -46,7 +52,9 @@ import { useChat } from '../hooks/useChat';
 import { useNewSessionModal } from '../hooks/useNewSessionModal';
 import { type AttachmentPreview, placeholderPreview, readPreviewData } from '../lib/attachments';
 import { clearLastSessionId, setLastSessionId } from '../lib/lastSession';
+import { buildNewSessionPath } from '../lib/newSessionPicker';
 import { accentVars, personalityTheme } from '../lib/theme';
+import { buildTeamPath } from '../lib/workspaceRoutes';
 import { mostRecentSessionIdForPersonality } from '../lib/workspaceScope';
 import { rpc } from '../rpc';
 
@@ -88,11 +96,31 @@ import { rpc } from '../rpc';
 // (AltitudeRail, `sessionOpenPath`, a redirect) always remounts fresh rather
 // than patching a live instance — the effects below run once per agent, not
 // once ever.
+//
+// The team Chat pane (`/t/:teamId/chat`, plan/phases/teams-as-a-scope.md D4)
+// renders this same page for the team's coordinator: `TeamChat` passes
+// `personalityId` explicitly (the route carries no `/p/` segment for the URL
+// lookup to find) plus `teamContext`, which swaps in the bar variant, the
+// team empty state and the composer placeholder. Everything else — sessions,
+// the loop the turn runs on — is the coordinator's by construction.
 
-export function Chat() {
+/** The team whose chat this is (D4). `accents` are the members' in manifest order. */
+// The page resolves the coordinator's display name itself (it already loads
+// the personality), so the pane passes everything but that.
+export type ChatTeamContext = Omit<PersonalityBarTeamContext, 'coordinatorName'>;
+
+export interface ChatProps {
+  /** Overrides the URL-derived active personality. Set by the team Chat pane. */
+  personalityId?: string;
+  teamContext?: ChatTeamContext;
+}
+
+export function Chat({ personalityId: personalityIdProp, teamContext }: ChatProps = {}) {
   const [searchParams, setSearchParams] = useSearchParams();
   const sessionParam = searchParams.get('session') ?? undefined;
-  const { id: personalityId, model, isLoading } = useActivePersonality();
+  const active = useActivePersonality();
+  const personalityId = personalityIdProp ?? active.id;
+  const { model, isLoading } = active;
   const { notification } = AntApp.useApp();
   const queryClient = useQueryClient();
   const navigate = useNavigate();
@@ -410,6 +438,20 @@ export function Chat() {
   const personalityQuery = usePersonalityGet(personalityId);
   const canTalk = personalityCanTalk(personalityQuery.data?.personality.toolset);
 
+  // The reverse label (D4): inside a team, the coordinator's OWN workspace
+  // chat says it is the team's chat. Read off the route's `:teamId` — the
+  // team Chat pane already knows (`teamContext`), so it skips the query.
+  const { teamId: routeTeamId } = useParams<{ teamId?: string }>();
+  const routeTeamQuery = useTeam(routeTeamId ?? '', {
+    enabled: Boolean(routeTeamId) && !teamContext,
+  });
+  const routeTeam = routeTeamQuery.data;
+  const coordinatorOf: PersonalityBarCoordinatorOf | undefined =
+    !teamContext && routeTeamId && routeTeam && routeTeam.coordinator === personalityId
+      ? { teamId: routeTeamId, teamName: routeTeam.name, accents: teamAccents(routeTeam) }
+      : undefined;
+  const coordinatorName = personalityQuery.data?.personality.name ?? capitalize(personalityId);
+
   // Voice config gates the live call. STT is required; TTS is optional (no TTS →
   // the reply is surfaced as text only, synthesis skipped).
   const configQuery = useConfig();
@@ -686,6 +728,15 @@ export function Chat() {
   }, [pendingClarify, inCall, askByVoice]);
 
   const handleNewSession = () => {
+    // Team Chat pane (teams-as-a-scope T4): there is nothing to pick — the
+    // team has one coordinator — and the picker's `/p/<id>/chat?new=1` would
+    // be bounced into the coordinator's workspace. Stay in the pane.
+    if (teamContext) {
+      navigate(
+        buildNewSessionPath(teamContext.coordinatorId, buildTeamPath(teamContext.teamId, 'chat')),
+      );
+      return;
+    }
     openNewSessionModal();
   };
 
@@ -741,6 +792,8 @@ export function Chat() {
         onNewSession={handleNewSession}
         sessionTitle={sessionTitle}
         onRenameSession={handleRenameSession}
+        {...(teamContext ? { teamContext: { ...teamContext, coordinatorName } } : {})}
+        {...(coordinatorOf ? { coordinatorOf } : {})}
         actionsSlot={
           <>
             {/* Whether replies are SPOKEN in this conversation, and whether
@@ -816,6 +869,15 @@ export function Chat() {
         sessionId={currentSessionId ?? undefined}
         onSuggestPrompt={handleSuggestPrompt}
         {...(canTalk && !inCall ? { onTryVoice: handleTalkToggle } : {})}
+        {...(teamContext
+          ? {
+              teamContext: {
+                teamName: teamContext.teamName,
+                accents: teamContext.accents,
+                coordinatorName,
+              },
+            }
+          : {})}
       />
       <StatusLine
         phase={state.phase}
@@ -833,7 +895,13 @@ export function Chat() {
           personalityId={personalityId}
           disabled={false}
           onSend={handleSend}
-          placeholder={state.isStreaming ? 'Steer the agent…' : 'Send a message…'}
+          placeholder={
+            state.isStreaming
+              ? 'Steer the agent…'
+              : teamContext
+                ? `Message ${teamContext.teamName}… (${coordinatorName} answers)`
+                : 'Send a message…'
+          }
           isStreaming={state.isStreaming}
           onAbort={() => void abortTurn()}
           attachments={pendingAttachments}

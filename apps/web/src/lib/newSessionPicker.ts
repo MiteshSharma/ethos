@@ -72,7 +72,13 @@ export function moveSelection<T extends PickerPersonality>(
  * restoring the target agent's last one — required because without it, a
  * bare `/p/:id/chat` visit is indistinguishable from "just switched to this
  * agent, resume where I left off".
+ *
+ * `teamChatPath` (teams-as-a-scope T4): from the team Chat pane the fresh
+ * session stays in that pane — `/t/:teamId/chat?new=1` — rather than going
+ * to the coordinator's own `/p/<id>/chat`, which the member redirect would
+ * bounce into the coordinator's workspace and out of team chrome.
  */
-export function buildNewSessionPath(id: string): string {
+export function buildNewSessionPath(id: string, teamChatPath?: string): string {
+  if (teamChatPath) return `${teamChatPath}?new=1`;
   return `/p/${encodeURIComponent(id)}/chat?new=1`;
 }

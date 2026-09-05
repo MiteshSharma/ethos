@@ -244,6 +244,14 @@ export interface WiringConfig {
    * Only honored when `teamName` is also set.
    */
   role?: TeamRole;
+  /**
+   * The team manifest's coordinator personality id. When set alongside
+   * `teamName`/`role`, the kanban role gate resolves the caller's role per
+   * turn from the turn's personality (`coordinator` iff it is this id) instead
+   * of the boot-time `role` — needed on a team-scoped loop that runs every
+   * member's turns. Absent → boot-time `role` applies to every turn.
+   */
+  coordinatorId?: string;
   /** Enable postmortem entries in team memory on ticket revision. */
   postmortems?: boolean;
   /** Reputation-aware autonomy tiers for team members. */

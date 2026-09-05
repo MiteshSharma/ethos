@@ -1,5 +1,14 @@
 import type { Tool, ToolContext, ToolResult } from '@ethosagent/types';
 import { getAccessToken, REDDIT_USER_AGENT, refreshAccessToken } from './auth';
+import {
+  DEFAULT_CLIENT_ID_REF,
+  DEFAULT_CLIENT_SECRET_REF,
+  HELP_TEXT,
+  SEARCH_HOST,
+  TOKEN_HOST,
+} from './constants';
+
+export { createRedditThreadTool, parseRedditPostId, redditThreadTool } from './thread';
 
 // ---------------------------------------------------------------------------
 // reddit_search — Reddit's official OAuth API
@@ -10,12 +19,6 @@ import { getAccessToken, REDDIT_USER_AGENT, refreshAccessToken } from './auth';
 // multi-backend indirection.
 // ---------------------------------------------------------------------------
 
-const SEARCH_HOST = 'oauth.reddit.com';
-const TOKEN_HOST = 'www.reddit.com';
-
-const DEFAULT_CLIENT_ID_REF = 'providers/reddit/client_id';
-const DEFAULT_CLIENT_SECRET_REF = 'providers/reddit/client_secret';
-
 const NO_CREDENTIALS_MESSAGE =
   "Reddit credentials are not configured — bind client_id and client_secret in this personality's Tool settings section (Settings > Named Secrets, then bind to reddit_search). In the meantime, web_search with a site:reddit.com query works with no setup.";
 
@@ -25,14 +28,6 @@ const DEFAULT_LIMIT = 10;
 const MAX_LIMIT = 25;
 
 const SNIPPET_MAX_CHARS = 400;
-
-const HELP_TEXT = `1. Go to reddit.com/prefs/apps while logged into the Reddit account you want this tool to act under.
-2. Click "create app" (or "create another app" if you have existing ones).
-3. Choose type "script".
-4. Give it a name (e.g. "ethos-marketing-research") and set the redirect uri field to http://localhost:8080 — required by Reddit's form even though script apps don't use it.
-5. Click "create app".
-6. The string shown under the app's name (a short id, not labeled) is the client_id.
-7. The field labeled "secret" is the client_secret.`;
 
 export type RedditTimeFilter = 'hour' | 'day' | 'week' | 'month' | 'year' | 'all';
 export type RedditSort = 'relevance' | 'hot' | 'top' | 'new' | 'comments';

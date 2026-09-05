@@ -1,23 +1,22 @@
-import type { KanbanTeamSummary } from '@ethosagent/web-contracts';
-import { useQuery } from '@tanstack/react-query';
+import type { TeamSummary } from '@ethosagent/web-contracts';
 import { Badge, Button, Empty, Spin, Table, Tag, Typography } from 'antd';
 import { useNavigate } from 'react-router-dom';
-import { rpc } from '../rpc';
+import { PersonalityMark } from '../components/ui/PersonalityMark';
+import { TeamRing } from '../components/ui/TeamRing';
+import { useTeamsList } from '../features/teams/api/queries';
+import { teamAccents } from '../features/teams/lib/membership';
+import { buildTeamPath } from '../lib/workspaceRoutes';
 
-// Teams listing — entry point to Plan B's Control Center.
-//
-// Lists every team manifest in ~/.ethos/teams/*.yaml, merges in the runtime
-// health (`running` / `stale` / `stopped`), and links into the per-team
-// Control Center on click. Refetches every 5s so a `ethos team start`
+// Teams listing — the Library's second door into a team's scope
+// (plan/phases/teams-as-a-scope.md D2/§2, §10). Still a table, no card grid:
+// every row is the team's ring, name, coordinator, mode, members, health,
+// and `Open scope →` — which, like a row click, lands on
+// `/t/<team>/overview`. Refetches every 5s so an `ethos team start`
 // surfaces without a hard reload.
 
 export function Teams() {
   const navigate = useNavigate();
-  const { data, isLoading, error, refetch, isFetching } = useQuery({
-    queryKey: ['kanban', 'list'],
-    queryFn: () => rpc.kanban.list(),
-    refetchInterval: 5_000,
-  });
+  const { data, isLoading, error, refetch, isFetching } = useTeamsList();
 
   if (isLoading) {
     return (
@@ -34,7 +33,7 @@ export function Teams() {
     );
   }
 
-  const teams = data?.teams ?? [];
+  const teams = data?.items ?? [];
 
   return (
     <div className="teams-tab">
@@ -48,13 +47,13 @@ export function Teams() {
         </Button>
       </header>
 
-      <Table<KanbanTeamSummary>
+      <Table<TeamSummary>
         rowKey="name"
         dataSource={teams}
         pagination={false}
         size="small"
         onRow={(record) => ({
-          onClick: () => navigate(`/teams/${encodeURIComponent(record.name)}`),
+          onClick: () => navigate(buildTeamPath(record.name)),
           style: { cursor: 'pointer' },
         })}
         locale={{
@@ -70,7 +69,27 @@ export function Teams() {
             title: 'Team',
             dataIndex: 'name',
             key: 'name',
-            render: (name: string) => <Typography.Text strong>{name}</Typography.Text>,
+            render: (name: string, record: TeamSummary) => (
+              <span className="teams-row-name">
+                <TeamRing accents={teamAccents(record)} size={18} title={name} />
+                <Typography.Text strong>{name}</Typography.Text>
+              </span>
+            ),
+          },
+          {
+            title: 'Coordinator',
+            dataIndex: 'coordinator',
+            key: 'coordinator',
+            width: 160,
+            render: (coordinator: string | null) =>
+              coordinator ? (
+                <span className="teams-row-coordinator">
+                  <PersonalityMark personalityId={coordinator} size={12} />
+                  {coordinator}
+                </span>
+              ) : (
+                <Typography.Text type="secondary">—</Typography.Text>
+              ),
           },
           {
             title: 'Description',
@@ -89,13 +108,13 @@ export function Teams() {
             dataIndex: 'dispatchMode',
             key: 'dispatchMode',
             width: 120,
-            render: (mode: KanbanTeamSummary['dispatchMode']) => <Tag bordered={false}>{mode}</Tag>,
+            render: (mode: TeamSummary['dispatchMode']) => <Tag bordered={false}>{mode}</Tag>,
           },
           {
             title: 'Members',
             key: 'members',
             width: 140,
-            render: (_: unknown, record: KanbanTeamSummary) => (
+            render: (_: unknown, record: TeamSummary) => (
               <span>
                 {record.runningCount}/{record.memberCount} running
               </span>
@@ -106,7 +125,25 @@ export function Teams() {
             dataIndex: 'health',
             key: 'health',
             width: 110,
-            render: (health: KanbanTeamSummary['health']) => <HealthBadge health={health} />,
+            render: (health: TeamSummary['health']) => <HealthBadge health={health} />,
+          },
+          {
+            title: '',
+            key: 'open',
+            width: 120,
+            align: 'right' as const,
+            render: (_: unknown, record: TeamSummary) => (
+              <Button
+                type="link"
+                size="small"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  navigate(buildTeamPath(record.name));
+                }}
+              >
+                Open scope →
+              </Button>
+            ),
           },
         ]}
       />
@@ -114,7 +151,7 @@ export function Teams() {
   );
 }
 
-function HealthBadge({ health }: { health: KanbanTeamSummary['health'] }) {
+function HealthBadge({ health }: { health: TeamSummary['health'] }) {
   if (health === 'running') return <Badge status="success" text="running" />;
   if (health === 'stale') return <Badge status="warning" text="stale" />;
   return <Badge status="default" text="stopped" />;

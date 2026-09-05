@@ -147,6 +147,7 @@ Any `running` task whose worker was killed mid-flight lands in `blocked` on the 
 
 ## See also
 
+- [Work with a team](work-with-a-team.md) — the team scope in the web dashboard: Overview, ledger, board actions
 - [Kanban primitive (Plan A — solo)](../../building/reference/kanban-tools) — what the team board is built on
 - [Teams and meshes](../../building/explanation/teams-and-meshes) — supervisor, port allocation, dispatch modes
 - [`ethos team` CLI reference](../reference/cli) — every subcommand including the new `destroy`

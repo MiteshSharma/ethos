@@ -15,9 +15,13 @@ import {
   installBlockedReason,
   isStaleRecipeError,
   needsDeliveryTarget,
+  prefillPathInputs,
   preflightGroups,
+  projectBundle,
+  recipeAgentName,
   recipeMetaLine,
   requirementRows,
+  resolveInstallMode,
 } from '../recipes';
 
 // The rules behind the Recipes UI, without a DOM
@@ -31,6 +35,7 @@ const BUNDLE: RecipeBundleWire = {
   summary: 'A digest before you wake up.',
   tags: ['daily'],
   personality: {
+    mode: 'create',
     id: 'briefer',
     name: 'Briefer',
     description: 'Concise morning-briefing agent.',
@@ -357,5 +362,123 @@ describe('createsRows', () => {
       ['google-calendar', 'oauth'],
       ['Scheduled — morning briefing', '{{input.briefingTime}}'],
     ]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Attach mode — the target is chosen, and it answers the path inputs
+// ---------------------------------------------------------------------------
+
+const ATTACH_BUNDLE: RecipeBundleWire = {
+  ...BUNDLE,
+  id: 'obsidian-second-brain',
+  personality: {
+    mode: 'attach',
+    soulSection: 'Vault: {{input.vaultPath}}',
+    toolset: ['read_file'],
+  },
+  requires: {
+    ...BUNDLE.requires,
+    mcpServers: [],
+    channels: [],
+    inputs: [
+      { key: 'vaultPath', label: 'Vault folder', kind: 'path', required: true, help: 'Root.' },
+      { key: 'other', label: 'Other', kind: 'text', required: false, help: 'Not a path.' },
+    ],
+  },
+  cronJobs: [],
+};
+
+describe('prefillPathInputs', () => {
+  it('fills an empty path input from the first workdir, with a trailing slash', () => {
+    expect(prefillPathInputs(ATTACH_BUNDLE, {}, ['/Users/you/Notes', '/elsewhere'])).toEqual({
+      vaultPath: '/Users/you/Notes/',
+    });
+    expect(prefillPathInputs(ATTACH_BUNDLE, {}, ['/Users/you/Notes/'])).toEqual({
+      vaultPath: '/Users/you/Notes/',
+    });
+  });
+
+  it('never overwrites a value the user typed, and touches only path inputs', () => {
+    const typed = { vaultPath: '/Users/you/Vault/', other: 'x' };
+    expect(prefillPathInputs(ATTACH_BUNDLE, typed, ['/Users/you/Notes'])).toEqual(typed);
+    expect(prefillPathInputs(ATTACH_BUNDLE, { other: 'x' }, ['/n'])).toEqual({
+      vaultPath: '/n/',
+      other: 'x',
+    });
+  });
+
+  it('leaves the field empty when the personality has no workdir', () => {
+    expect(prefillPathInputs(ATTACH_BUNDLE, {}, null)).toEqual({});
+    expect(prefillPathInputs(ATTACH_BUNDLE, {}, [])).toEqual({});
+  });
+});
+
+describe('attach-mode copy', () => {
+  it('names the chosen personality, or says one is still to be chosen', () => {
+    expect(recipeAgentName(BUNDLE)).toBe('Briefer');
+    expect(recipeAgentName(ATTACH_BUNDLE)).toBe('the personality you choose');
+    expect(recipeAgentName(ATTACH_BUNDLE, 'Writer')).toBe('Writer');
+    expect(installActionLabel(ATTACH_BUNDLE, [], 'Writer')).toBe('Attach to Writer');
+    expect(
+      installActionLabel(
+        ATTACH_BUNDLE,
+        [{ name: 'vault-consolidation', schedule: '30 23 * * *', nextRun: null, exists: false }],
+        'Writer',
+      ),
+    ).toBe('Attach to Writer and its 11:30pm job');
+  });
+
+  it('says what an attach does instead of naming an agent it would create', () => {
+    const rows = createsRows(ATTACH_BUNDLE);
+    expect(rows[0]?.label).toBe('Attaches to a personality you choose');
+    expect(rows[0]?.value).toBe('attach');
+    expect(rows[1]?.label).toBe('1 tool added');
+  });
+});
+
+describe('a both recipe', () => {
+  const BOTH_BUNDLE: RecipeBundleWire = {
+    ...ATTACH_BUNDLE,
+    personality: {
+      mode: 'both',
+      id: 'obsidian-archivist',
+      name: 'Archivist',
+      description: 'Vault librarian.',
+      soulMd: 'I am Archivist.',
+      toolset: ['read_file'],
+      attach: { soulSection: 'Vault: {{input.vaultPath}}', toolset: ['read_file'] },
+    },
+  };
+
+  it('resolves to create by default and to whatever is asked, unlike a single-mode recipe', () => {
+    expect(resolveInstallMode(BOTH_BUNDLE)).toBe('create');
+    expect(resolveInstallMode(BOTH_BUNDLE, 'attach')).toBe('attach');
+    expect(resolveInstallMode(BUNDLE, 'attach')).toBe('create');
+    expect(resolveInstallMode(ATTACH_BUNDLE, 'create')).toBe('attach');
+  });
+
+  it('projects to one view, and every surface reads that view', () => {
+    const create = projectBundle(BOTH_BUNDLE, 'create');
+    expect(create.personality.mode).toBe('create');
+    expect('attach' in create.personality).toBe(false);
+    expect(recipeAgentName(create)).toBe('Archivist');
+    expect(installActionLabel(create, [])).toBe('Create Archivist');
+
+    const attach = projectBundle(BOTH_BUNDLE, 'attach');
+    expect(attach.personality).toEqual({
+      mode: 'attach',
+      soulSection: 'Vault: {{input.vaultPath}}',
+      toolset: ['read_file'],
+    });
+    expect(installActionLabel(attach, [], 'Writer')).toBe('Attach to Writer');
+    // A single-mode bundle is itself.
+    expect(projectBundle(BUNDLE, 'create')).toBe(BUNDLE);
+  });
+
+  it('says both things on the recipe step', () => {
+    expect(createsRows(BOTH_BUNDLE)[0]?.label).toBe(
+      'Creates Archivist, or attaches to a personality you choose',
+    );
   });
 });

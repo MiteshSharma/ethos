@@ -1,10 +1,11 @@
 import { useQuery } from '@tanstack/react-query';
 import { Input, Modal } from 'antd';
 import { useEffect, useMemo, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { useConfig } from '../features/config/api/queries';
 import { usePersonalityList } from '../features/personalities/api/queries';
 import { filterSelectablePersonalities } from '../features/personalities/constants';
+import { useTeamsList } from '../features/teams/api/queries';
 import { useNewSessionModal } from '../hooks/useNewSessionModal';
 import { getLastPersonalityId } from '../lib/lastPersonality';
 import { setLastSessionId } from '../lib/lastSession';
@@ -13,9 +14,10 @@ import {
   createActionEntries,
   libraryPageEntries,
   type PaletteEntry,
+  scopeEntries,
   workspacePageEntries,
 } from '../lib/paletteDestinations';
-import { capitalize } from '../lib/scopeNav';
+import { capitalize, extractTeamId } from '../lib/scopeNav';
 import { resolveFallbackPersonalityId } from '../lib/workspaceRoutes';
 import { rpc } from '../rpc';
 
@@ -85,6 +87,7 @@ export function CommandPalette({
   onOpenQuickCreateAgent,
 }: CommandPaletteProps) {
   const navigate = useNavigate();
+  const { pathname } = useLocation();
   const { openNewSessionModal } = useNewSessionModal();
   const [query, setQuery] = useState('');
   const [selectedIdx, setSelectedIdx] = useState(0);
@@ -105,7 +108,18 @@ export function CommandPalette({
     enabled: open,
   });
   const personalitiesQuery = usePersonalityList({ enabled: open });
+  const teamsQuery = useTeamsList({ enabled: open });
   const { data: config } = useConfig();
+  // teams-as-a-scope §10 / D14: the scope switcher's rows as palette entries,
+  // and — inside a team — that team's members ahead of everyone else.
+  const teams = useMemo(() => teamsQuery.data?.items ?? [], [teamsQuery.data]);
+  const activeTeamId = extractTeamId(pathname);
+  const activeTeam = useMemo(() => {
+    const team = teams.find((t) => t.name === activeTeamId);
+    return team
+      ? { id: team.name, memberIds: new Set(team.members.map((m) => m.personalityId)) }
+      : undefined;
+  }, [teams, activeTeamId]);
 
   const allAgents = personalitiesQuery.data?.items ?? [];
   // System personalities (debug, personality-architect, team-architect) are
@@ -147,10 +161,12 @@ export function CommandPalette({
       run: closeAfter(() => navigate(e.path)),
     });
 
-    const agentItems = agentEntries(agents).map(toCommandItem);
+    const agentItems = agentEntries(agents, activeTeam).map(toCommandItem);
+    const scope = scopeEntries(teams);
     const pages = [
       ...libraryPageEntries(config?.adminEnabled ?? false),
       ...workspacePageEntries(fallbackPersonalityId, fallbackPersonalityName),
+      ...scope.filter((e) => e.group === 'Pages'),
     ].map(toCommandItem);
     const registryActions = createActionEntries(fallbackPersonalityId, fallbackPersonalityName).map(
       toCommandItem,
@@ -192,6 +208,7 @@ export function CommandPalette({
         keywords: ['personality', 'new', 'agent', 'wizard', 'scaffold'],
         run: closeAfter(() => navigate('/personality/create')),
       },
+      ...scope.filter((e) => e.group === 'Actions').map(toCommandItem),
       ...registryActions,
       {
         id: 'action:toggle-drawer',
@@ -212,6 +229,8 @@ export function CommandPalette({
     openNewSessionModal,
     sessionsQuery.data,
     agents,
+    activeTeam,
+    teams,
     config?.adminEnabled,
     fallbackPersonalityId,
     fallbackPersonalityName,

@@ -19,11 +19,12 @@ import { personalityAccent } from '../lib/theme';
 // `Card` primitive is still unused here, and each card is a real `<Link>` so
 // it keeps keyboard focus and middle-click.
 //
-// The status word is DERIVED (D8 — no install ledger): a recipe reads as
-// installed when a personality with its bundle's id exists. That id lives on
-// the bundle, not on the list row, so the bundles are fetched alongside — three
-// cached reads of a static catalog. The mono meta line comes off the same
-// bundle.
+// The status word is DERIVED (D8 — no install ledger): a create recipe reads
+// as installed when a personality with its bundle's id exists. That id lives
+// on the bundle, not on the list row, so the bundles are fetched alongside —
+// three cached reads of a static catalog. An attach recipe reads as attached
+// wherever a SOUL.md carries its marker, which the server derives onto the
+// list row as `attachedTo`. The mono meta line comes off the same bundle.
 
 export function Recipes() {
   const { data, isLoading, error } = useRecipeList();
@@ -74,13 +75,35 @@ export function Recipes() {
       <div className="recipes-grid">
         {recipes.map((recipe, index) => {
           const bundle = bundleQueries[index]?.data?.recipe;
-          const personalityId = bundle?.personality.id;
+          const attach = bundle?.personality.mode === 'attach';
+          const personalityId =
+            bundle && bundle.personality.mode !== 'attach' ? bundle.personality.id : undefined;
           // Undefined while either half is still loading — the card says
           // nothing rather than saying "Install" about something you have.
-          const installed =
+          // A `both` recipe carries both signals; "installed" wins over
+          // "attached" for the pill, and the meta line names the attachments.
+          const created =
             personalityId === undefined || personalities.data === undefined
               ? undefined
               : installedIds.has(personalityId);
+          const attached = (recipe.attachedTo?.length ?? 0) > 0;
+          const installed = attach
+            ? attached
+            : created === undefined
+              ? undefined
+              : created || attached;
+          const status =
+            installed === undefined
+              ? null
+              : attach
+                ? installed
+                  ? '✓ Attached'
+                  : 'Attach'
+                : created
+                  ? '✓ Installed'
+                  : attached
+                    ? '✓ Attached'
+                    : 'Install';
           return (
             <Link key={recipe.id} to={`/recipes/${recipe.id}`} className="recipe-card">
               <div className="recipe-card-top">
@@ -91,17 +114,20 @@ export function Recipes() {
                   }
                 />
                 <span className="recipe-card-name">{recipe.title}</span>
-                {installed !== undefined && (
+                {status !== null && (
                   <span
                     className={`recipe-card-status${installed ? ' recipe-card-status--on' : ''}`}
                   >
-                    {installed ? '✓ Installed' : 'Install'}
+                    {status}
                   </span>
                 )}
               </div>
               <p className="recipe-card-summary">{recipe.summary}</p>
               <div className="recipe-card-meta recipe-mono">
                 {bundle ? recipeMetaLine(bundle) : recipe.tags.join(' · ')}
+                {recipe.attachedTo && recipe.attachedTo.length > 0
+                  ? ` · attached to ${recipe.attachedTo.join(', ')}`
+                  : ''}
               </div>
             </Link>
           );

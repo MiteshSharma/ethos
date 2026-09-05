@@ -25,6 +25,7 @@ export const recipesRouter = {
       ...(input.personalityIdOverride !== undefined && {
         personalityIdOverride: input.personalityIdOverride,
       }),
+      ...(input.installMode !== undefined && { installMode: input.installMode }),
       ...(input.secretBindings !== undefined && { secretBindings: input.secretBindings }),
     }),
   ),
@@ -46,6 +47,7 @@ export const recipesRouter = {
       ...(input.personalityIdOverride !== undefined && {
         personalityIdOverride: input.personalityIdOverride,
       }),
+      ...(input.installMode !== undefined && { installMode: input.installMode }),
       ...(input.deliverTo !== undefined && { deliverTo: input.deliverTo }),
       ...(input.channelSetup !== undefined && { channelSetup: input.channelSetup }),
       ...(input.secretBindings !== undefined && { secretBindings: input.secretBindings }),

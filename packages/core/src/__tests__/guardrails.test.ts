@@ -181,7 +181,16 @@ describe('Orchestrator guardrails', () => {
       // reloaded transcript can say `ok`/`failed` instead of `unrecorded`.
       // One field at each of the two sites, plus a two-line comment recording
       // that a hook-rejected call is a failure too.
-      if (lineCount > 820) {
+      // Bumped 820 -> 821 (teams-as-a-scope, role gate per-turn): the turn's
+      // `personalityId` is forwarded onto the `before_tool_call` payload — one
+      // conditional spread; the role resolution lives in
+      // extensions/tools-kanban/src/role-gate.ts.
+      // Merge (feedback-activity-contract + teams-as-a-scope): both landed in
+      // this file, so the ceiling is base + BOTH deltas (816 + 4 + 1), not
+      // either side's number alone — 820 and 817 are each stale by the other's
+      // delta. Merged file measures 820 lines; the cap keeps this file's
+      // one-line convention.
+      if (lineCount > 821) {
         violations.push(`${file}: ${lineCount} lines`);
       }
     }

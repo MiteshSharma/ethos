@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { fnv1a32, generatePersonalityMark } from '../marks';
+import { fnv1a32, generatePersonalityMark, teamRingArcs, teamRingGlyph } from '../marks';
 
 // The personality mark is the load-bearing identity affordance from
 // DESIGN.md. These tests lock the algorithm's contract: determinism,
@@ -96,5 +96,82 @@ describe('generatePersonalityMark', () => {
     const spec = generatePersonalityMark('engineer');
     expect(spec.bgAlpha).toBeCloseTo(0x22 / 0xff, 6);
     expect(spec.ringAlpha).toBeCloseTo(0.55, 2);
+  });
+});
+
+// The team ring (plan/phases/teams-as-a-scope.md D10) — one arc per member,
+// clockwise from 12 o'clock, built from the roster rather than hashed.
+// Locks the prototype's geometry: stroke `max(1.5, size*0.09)`, `r = size/2
+// - sw/2 - 0.5`, circumference-based dasharray, `gap = min(3, 18%)`.
+describe('teamRingArcs', () => {
+  const ACCENTS = ['#4A9EFF', '#4ADE80', '#F59E0B'];
+
+  it('yields one arc per accent, in order, sharing one radius and stroke', () => {
+    const arcs = teamRingArcs(ACCENTS, 22);
+    expect(arcs.map((a) => a.color)).toEqual(ACCENTS);
+    expect(new Set(arcs.map((a) => a.r)).size).toBe(1);
+    expect(new Set(arcs.map((a) => a.strokeWidth)).size).toBe(1);
+  });
+
+  it('stroke width is max(1.5, size * 0.09) and r = size/2 - sw/2 - 0.5', () => {
+    const small = teamRingArcs(ACCENTS, 14)[0];
+    expect(small?.strokeWidth).toBe(1.5);
+    expect(small?.r).toBeCloseTo(14 / 2 - 0.75 - 0.5, 6);
+    const large = teamRingArcs(ACCENTS, 36)[0];
+    expect(large?.strokeWidth).toBeCloseTo(3.24, 6);
+    expect(large?.r).toBeCloseTo(36 / 2 - 1.62 - 0.5, 6);
+  });
+
+  it('each dasharray sums to the circumference and arcs tile it with min(3, 18%) gaps', () => {
+    const arcs = teamRingArcs(ACCENTS, 36);
+    const first = arcs[0];
+    if (!first) throw new Error('no arcs');
+    const circumference = 2 * Math.PI * first.r;
+    const segment = circumference / ACCENTS.length;
+    const gap = Math.min(3, segment * 0.18);
+    for (const arc of arcs) {
+      const [dash, rest] = arc.dashArray.split(' ').map(Number);
+      expect((dash ?? 0) + (rest ?? 0)).toBeCloseTo(circumference, 6);
+      expect(dash).toBeCloseTo(segment - gap, 6);
+    }
+  });
+
+  it('caps the gap at 3px on a large ring and scales it down on a tiny one', () => {
+    const large = teamRingArcs(['a', 'b'], 36)[0];
+    const largeC = 2 * Math.PI * (large?.r ?? 0);
+    expect(Number(large?.dashArray.split(' ')[0])).toBeCloseTo(largeC / 2 - 3, 6);
+    const tiny = teamRingArcs(['a', 'b', 'c', 'd', 'e', 'f'], 14)[0];
+    const tinyC = 2 * Math.PI * (tiny?.r ?? 0);
+    const seg = tinyC / 6;
+    expect(Number(tiny?.dashArray.split(' ')[0])).toBeCloseTo(seg - seg * 0.18, 6);
+  });
+
+  it("walks the offset by one segment per arc, starting at 0 (12 o'clock after the -90° rotation)", () => {
+    const arcs = teamRingArcs(ACCENTS, 22);
+    const first = arcs[0];
+    if (!first) throw new Error('no arcs');
+    const segment = (2 * Math.PI * first.r) / ACCENTS.length;
+    expect(arcs.map((a) => a.dashOffset)).toEqual([0, -segment, -2 * segment]);
+  });
+
+  it('a single member is one arc covering the whole circumference minus the gap', () => {
+    const arc = teamRingArcs(['#4A9EFF'], 22)[0];
+    const circumference = 2 * Math.PI * (arc?.r ?? 0);
+    expect(Number(arc?.dashArray.split(' ')[0])).toBeCloseTo(circumference - 3, 6);
+  });
+
+  it('an empty roster yields no arcs', () => {
+    expect(teamRingArcs([], 22)).toEqual([]);
+  });
+});
+
+describe('teamRingGlyph', () => {
+  it('fills a quarter per member up to a full disc', () => {
+    expect(teamRingGlyph(0)).toBe('○');
+    expect(teamRingGlyph(1)).toBe('◔');
+    expect(teamRingGlyph(2)).toBe('◑');
+    expect(teamRingGlyph(3)).toBe('◕');
+    expect(teamRingGlyph(4)).toBe('●');
+    expect(teamRingGlyph(11)).toBe('●');
   });
 });

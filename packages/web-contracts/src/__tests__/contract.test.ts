@@ -312,6 +312,7 @@ describe('contract router', () => {
       'skills',
       'slashCommands',
       'tasks',
+      'teams',
       'toolSettings',
       'tools',
       'voice',

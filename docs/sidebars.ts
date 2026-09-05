@@ -71,6 +71,7 @@ const sidebars: SidebarsConfig = {
             'using/how-to/set-up-approval-gates',
             'using/how-to/peer-two-ethos-agents',
             'using/how-to/run-a-team-with-kanban',
+            'using/how-to/work-with-a-team',
             'using/how-to/use-team-memory',
             'using/how-to/receive-files-via-telegram',
             'using/how-to/receive-files-via-slack',

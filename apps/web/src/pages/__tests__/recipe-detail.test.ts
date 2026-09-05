@@ -56,15 +56,22 @@ const preflightFn = vi.fn();
 const installFn = vi.fn();
 const deliveryTargetsFn = vi.fn();
 
+const listFn = vi.fn();
+const personalitiesListFn = vi.fn();
+
 vi.mock('../../rpc', () => ({
   rpc: {
     recipes: {
+      list: (...args: unknown[]) => listFn(...args),
       get: (...args: unknown[]) => getFn(...args),
       preflight: (...args: unknown[]) => preflightFn(...args),
       install: (...args: unknown[]) => installFn(...args),
     },
     cron: {
       deliveryTargets: (...args: unknown[]) => deliveryTargetsFn(...args),
+    },
+    personalities: {
+      list: (...args: unknown[]) => personalitiesListFn(...args),
     },
   },
 }));
@@ -81,6 +88,7 @@ const BUNDLE: RecipeBundleWire = {
   summary: 'A digest before you wake up.',
   tags: ['daily'],
   personality: {
+    mode: 'create',
     id: 'briefer',
     name: 'Briefer',
     description: 'Concise morning-briefing agent.',
@@ -131,6 +139,60 @@ const SIMPLE_BUNDLE: RecipeBundleWire = {
   ...BUNDLE,
   requires: { ...BUNDLE.requires, channels: [], inputs: [] },
   cronJobs: [{ name: 'digest', schedule: '20 6 * * *', prompt: 'Do it.', deliverTo: 'inApp' }],
+};
+
+/**
+ * An attach recipe: lands on a personality the user picks, with one path
+ * input. Served under BUNDLE's route id, since the mocked `useParams` is fixed.
+ */
+const ATTACH_BUNDLE: RecipeBundleWire = {
+  ...BUNDLE,
+  title: 'Obsidian second brain',
+  personality: {
+    mode: 'attach',
+    soulSection: 'Vault: {{input.vaultPath}}',
+    toolset: ['read_file'],
+  },
+  requires: {
+    ...BUNDLE.requires,
+    channels: [],
+    tools: ['read_file'],
+    inputs: [
+      {
+        key: 'vaultPath',
+        label: 'Vault folder',
+        kind: 'path',
+        required: true,
+        help: 'Absolute path to the vault root.',
+      },
+    ],
+  },
+  cronJobs: [],
+};
+
+/** The same recipe offered both ways: Archivist, or a personality of yours. */
+const BOTH_BUNDLE: RecipeBundleWire = {
+  ...ATTACH_BUNDLE,
+  personality: {
+    mode: 'both',
+    id: 'obsidian-archivist',
+    name: 'Archivist',
+    description: 'Vault librarian.',
+    soulMd: 'I am Archivist. Vault: {{input.vaultPath}}',
+    toolset: ['read_file'],
+    attach: { soulSection: 'Vault: {{input.vaultPath}}', toolset: ['read_file'] },
+  },
+};
+
+/** Two writable personalities, one with a working directory, plus a built-in. */
+const PERSONALITIES = {
+  items: [
+    { id: 'writer', name: 'Writer', builtin: false, fs_reach: { workdir: ['/Users/you/Notes'] } },
+    { id: 'coder', name: 'Coder', builtin: false, fs_reach: null },
+    { id: 'assistant', name: 'Assistant', builtin: true, fs_reach: null },
+  ],
+  nextCursor: null,
+  defaultId: 'writer',
 };
 
 const TARGETS = [
@@ -263,6 +325,8 @@ function needsYouText(): string {
 beforeEach(() => {
   vi.clearAllMocks();
   getFn.mockResolvedValue({ recipe: BUNDLE });
+  listFn.mockResolvedValue({ recipes: [] });
+  personalitiesListFn.mockResolvedValue(PERSONALITIES);
   preflightFn.mockImplementation(preflightLikeServer);
   deliveryTargetsFn.mockResolvedValue({ targets: TARGETS });
   installFn.mockResolvedValue({
@@ -545,5 +609,196 @@ describe('RecipeDetail — the stepper', () => {
     expect(
       [...container.querySelectorAll('.recipe-step')].some((el) => el.tagName === 'BUTTON'),
     ).toBe(false);
+  });
+});
+
+describe('RecipeDetail — attach mode', () => {
+  it('offers a personality picker, sends the pick to preflight, and prefills the path from its workdir', async () => {
+    getFn.mockResolvedValue({ recipe: ATTACH_BUNDLE });
+    preflightFn.mockImplementation((input: { personalityIdOverride?: string }) =>
+      Promise.resolve(
+        report({
+          blocking: input.personalityIdOverride
+            ? []
+            : [
+                {
+                  code: 'PERSONALITY_REQUIRED',
+                  message: 'Pick the personality this recipe attaches to.',
+                  action: 'Choose one of your personalities above.',
+                },
+              ],
+          willCreate: {
+            personality: { id: input.personalityIdOverride ?? '', isNew: false },
+            cronJobs: [],
+            mcpAttachments: [],
+          },
+        }),
+      ),
+    );
+    await mount();
+
+    // The recipe step says what an attach is, not "Creates personality X".
+    expect(container.textContent).toContain('Attaches to a personality you choose');
+    expect(container.textContent).not.toContain('Set up ');
+    await click(button('Choose a personality'));
+
+    // The picker is the first row; built-ins are not offered.
+    const select = container.querySelector('#recipe-attach-target');
+    expect(select).not.toBeNull();
+    expect(button('Review what gets created').disabled).toBe(true);
+    expect(container.querySelector<HTMLInputElement>('#recipe-input-vaultPath')?.value).toBe('');
+
+    // Open the Antd select and pick Writer.
+    const trigger = container.querySelector('.recipe-field-select');
+    if (!(trigger instanceof HTMLElement)) throw new Error('no select trigger');
+    await act(async () => {
+      trigger.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+    });
+    await flush();
+    const options = [...document.querySelectorAll('.ant-select-item-option')].map(
+      (el) => el.textContent,
+    );
+    expect(options).toContain('Writer (writer)');
+    expect(options).not.toContain('Assistant (assistant)');
+    const writer = [...document.querySelectorAll('.ant-select-item-option')].find(
+      (el) => el.textContent === 'Writer (writer)',
+    );
+    if (!(writer instanceof HTMLElement)) throw new Error('no Writer option');
+    await click(writer);
+    await settleDebounce();
+
+    // The pick rides on `personalityIdOverride`, and the empty path input took
+    // Writer's workdir, normalised with the trailing slash reach needs.
+    expect(preflightFn).toHaveBeenLastCalledWith({
+      id: 'morning-briefing',
+      inputs: { vaultPath: '/Users/you/Notes/' },
+      secretBindings: {},
+      personalityIdOverride: 'writer',
+    });
+    expect(container.querySelector<HTMLInputElement>('#recipe-input-vaultPath')?.value).toBe(
+      '/Users/you/Notes/',
+    );
+    expect(button('Review what gets created').disabled).toBe(false);
+
+    await click(button('Review what gets created'));
+    // The button names the outcome: an attach, onto the chosen personality.
+    await click(button('Attach to Writer'));
+    expect(installFn).toHaveBeenCalledWith({
+      id: 'morning-briefing',
+      version: 2,
+      inputs: { vaultPath: '/Users/you/Notes/' },
+      personalityIdOverride: 'writer',
+    });
+  });
+
+  it('keeps a path the user typed when the personality changes', async () => {
+    getFn.mockResolvedValue({ recipe: ATTACH_BUNDLE });
+    preflightFn.mockResolvedValue(report());
+    await mount();
+    await click(button('Choose a personality'));
+    await type('recipe-input-vaultPath', '/Users/you/Vault/');
+
+    const trigger = container.querySelector('.recipe-field-select');
+    if (!(trigger instanceof HTMLElement)) throw new Error('no select trigger');
+    await act(async () => {
+      trigger.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+    });
+    await flush();
+    const writer = [...document.querySelectorAll('.ant-select-item-option')].find(
+      (el) => el.textContent === 'Writer (writer)',
+    );
+    if (!(writer instanceof HTMLElement)) throw new Error('no Writer option');
+    await click(writer);
+
+    expect(container.querySelector<HTMLInputElement>('#recipe-input-vaultPath')?.value).toBe(
+      '/Users/you/Vault/',
+    );
+  });
+});
+
+describe('RecipeDetail — a both recipe', () => {
+  /** Open the picker and choose Writer. */
+  async function pickWriter(): Promise<void> {
+    const trigger = container.querySelector('.recipe-field-select');
+    if (!(trigger instanceof HTMLElement)) throw new Error('no select trigger');
+    await act(async () => {
+      trigger.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+    });
+    await flush();
+    const writer = [...document.querySelectorAll('.ant-select-item-option')].find(
+      (el) => el.textContent === 'Writer (writer)',
+    );
+    if (!(writer instanceof HTMLElement)) throw new Error('no Writer option');
+    await click(writer);
+  }
+
+  it('defaults to create, offers the switch, and only prefills the path in attach mode', async () => {
+    getFn.mockResolvedValue({ recipe: BOTH_BUNDLE });
+    preflightFn.mockResolvedValue(report());
+    await mount();
+
+    expect(container.textContent).toContain(
+      'Creates Archivist, or attaches to a personality you choose',
+    );
+    await click(button('Set up Archivist'));
+
+    // Create is the default: the mode rides on `installMode`, no picker yet.
+    expect(container.textContent).toContain('How to install');
+    expect(container.querySelector('#recipe-attach-target')).toBeNull();
+    await settleDebounce();
+    expect(preflightFn).toHaveBeenLastCalledWith({
+      id: 'morning-briefing',
+      inputs: {},
+      secretBindings: {},
+      installMode: 'create',
+    });
+
+    // Switch to attach: the picker appears, the path is still empty.
+    const attachOption = [...container.querySelectorAll('.ant-segmented-item')].find((el) =>
+      el.textContent?.includes('Attach to an existing personality'),
+    );
+    if (!(attachOption instanceof HTMLElement)) throw new Error('no attach option');
+    await click(attachOption);
+    expect(container.querySelector('#recipe-attach-target')).not.toBeNull();
+    expect(container.querySelector<HTMLInputElement>('#recipe-input-vaultPath')?.value).toBe('');
+
+    await pickWriter();
+    await settleDebounce();
+    expect(container.querySelector<HTMLInputElement>('#recipe-input-vaultPath')?.value).toBe(
+      '/Users/you/Notes/',
+    );
+    expect(preflightFn).toHaveBeenLastCalledWith({
+      id: 'morning-briefing',
+      inputs: { vaultPath: '/Users/you/Notes/' },
+      secretBindings: {},
+      personalityIdOverride: 'writer',
+      installMode: 'attach',
+    });
+
+    await click(button('Review what gets created'));
+    await click(button('Attach to Writer'));
+    expect(installFn).toHaveBeenCalledWith({
+      id: 'morning-briefing',
+      version: 2,
+      inputs: { vaultPath: '/Users/you/Notes/' },
+      personalityIdOverride: 'writer',
+      installMode: 'attach',
+    });
+  });
+
+  it('installs as create when the switch is left alone', async () => {
+    getFn.mockResolvedValue({ recipe: BOTH_BUNDLE });
+    preflightFn.mockResolvedValue(report());
+    await mount();
+    await click(button('Set up Archivist'));
+    await type('recipe-input-vaultPath', '/Users/you/Vault/');
+    await click(button('Review what gets created'));
+    await click(button('Create Archivist'));
+    expect(installFn).toHaveBeenCalledWith({
+      id: 'morning-briefing',
+      version: 2,
+      inputs: { vaultPath: '/Users/you/Vault/' },
+      installMode: 'create',
+    });
   });
 });

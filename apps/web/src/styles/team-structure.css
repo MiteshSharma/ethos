@@ -1,0 +1,492 @@
+/* Team panes built in teams-as-a-scope T2 (part b): Structure, Memory,
+   Channels, Settings. Pixel reference is `structure()`, `sheet()`,
+   `memory()`, `channels()` and `settings()` in
+   plan/prototypes/teams-as-a-scope/ethos-team-scope.html. Every class is
+   `team-` prefixed; tokens are `--ethos-*` (DESIGN.md). Node, sheet and
+   ledger rows are bordered containers built from primitives — not the `Card`
+   primitive ("Cards earn existence").
+
+   The primitives every team pane shares — `.team-sec`, `.team-mono`,
+   `.team-dot-*`, `.team-tier`, `.team-idlink`, `.team-feed` / `.team-ev`,
+   `.team-empty`, `.team-btns` — live in team-panes.css (loaded first); this
+   file only adds what the four panes here need on top. */
+
+/* ── Shared: kv grids, mono boxes, tags ────────────────────────────── */
+
+.team-kv {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 6px 12px;
+  font-size: 12px;
+  color: var(--ethos-text);
+}
+
+.team-kv > b {
+  font-weight: 400;
+  color: var(--ethos-text-tertiary);
+}
+
+.team-kv > span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.team-kv .team-kv-inline {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  min-width: 0;
+}
+
+.team-md {
+  font-family: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12.5px;
+  line-height: 1.65;
+  color: var(--ethos-text-dim);
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: var(--ethos-bg-elevated);
+  border: 1px solid var(--ethos-border);
+  border-radius: 8px;
+  padding: 14px 16px;
+  overflow: auto;
+  margin: 0;
+}
+
+.team-tag {
+  font-family: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10px;
+  font-weight: 500;
+  border-radius: 4px;
+  padding: 1px 6px;
+  color: var(--ethos-text-dim);
+  background: var(--ethos-bg-overlay);
+}
+
+.team-btns {
+  display: flex;
+  gap: 8px;
+  margin-top: auto;
+  padding-top: 8px;
+  flex-wrap: wrap;
+}
+
+/* Pane body — the stage's padding, matching the prototype `.body`. */
+.team-pane {
+  flex: 1;
+  padding: 24px 28px;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  min-height: 0;
+  overflow: auto;
+}
+
+/* ── Structure canvas ──────────────────────────────────────────────── */
+
+.team-canvas {
+  display: grid;
+  grid-template-columns: 1fr 340px;
+  flex: 1;
+  min-height: 0;
+  height: 100%;
+}
+
+.team-canvas-area {
+  position: relative;
+  overflow: auto;
+  background:
+    radial-gradient(circle, var(--ethos-border-strong) 1px, transparent 1px) 0 0 / 22px 22px;
+  border-right: 1px solid var(--ethos-border);
+}
+
+.team-canvas-surface {
+  position: relative;
+}
+
+.team-canvas-svg {
+  position: absolute;
+  inset: 0;
+}
+
+.team-canvas-svg .team-edge {
+  stroke: var(--ethos-border-strong);
+  stroke-width: 1.5;
+  fill: none;
+}
+
+.team-canvas-svg .team-edge-shared {
+  stroke-dasharray: 4 4;
+}
+
+.team-canvas-svg .team-edge-label {
+  font-family: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10px;
+  fill: var(--ethos-text-dim);
+}
+
+.team-canvas-svg .team-edge-dot-ok {
+  fill: var(--ethos-success);
+}
+
+.team-canvas-svg .team-edge-dot-err {
+  fill: var(--ethos-error);
+}
+
+.team-canvas-svg .team-edge-dot-dim {
+  fill: var(--ethos-text-tertiary);
+}
+
+.team-legend {
+  display: flex;
+  gap: 14px;
+  font-family: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  color: var(--ethos-text-tertiary);
+  position: absolute;
+  left: 14px;
+  bottom: 10px;
+  pointer-events: none;
+}
+
+.team-legend i {
+  display: inline-block;
+  width: 18px;
+  border-top: 1.5px solid var(--ethos-border-strong);
+  vertical-align: middle;
+  margin-right: 5px;
+}
+
+.team-legend i.team-legend-dashed {
+  border-top-style: dashed;
+}
+
+.team-canvas-hint {
+  font-family: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  color: var(--ethos-text-tertiary);
+  position: absolute;
+  right: 12px;
+  bottom: 10px;
+  pointer-events: none;
+}
+
+/* Nodes: bordered containers from primitives (DESIGN.md "Cards earn
+   existence" names structure-canvas nodes explicitly). */
+.team-node {
+  position: absolute;
+  width: 200px;
+  height: 84px;
+  background: var(--ethos-bg-elevated);
+  border: 1px solid var(--ethos-border-strong);
+  border-radius: 8px;
+  padding: 9px 11px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  text-align: left;
+  color: var(--ethos-text);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  transition:
+    border-color 80ms cubic-bezier(0.16, 1, 0.3, 1),
+    outline-color 80ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.team-node:hover {
+  border-color: var(--ethos-text-tertiary);
+}
+
+.team-node:focus-visible {
+  outline: 2px solid var(--ethos-info);
+  outline-offset: 1px;
+}
+
+.team-node.team-node-sel {
+  border-color: var(--ethos-info);
+  outline: 2px solid rgba(74, 158, 255, 0.35);
+}
+
+/* System nodes are two lines (icon + label, then the mono subtitle), so
+   they take their content height rather than the agent node's 84px. */
+.team-node.team-node-sys {
+  width: 180px;
+  height: auto;
+  border-style: dashed;
+}
+
+.team-node.team-node-missing {
+  border-style: dashed;
+  border-color: var(--ethos-error);
+}
+
+.team-node-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 500;
+  min-width: 0;
+}
+
+.team-node-head .team-node-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.team-node-head .team-tier {
+  margin-left: auto;
+}
+
+.team-node-meta {
+  font-family: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  color: var(--ethos-text-tertiary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.team-node-cur {
+  font-size: 11px;
+  color: var(--ethos-text-dim);
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  min-width: 0;
+}
+
+.team-node-cur .team-node-cur-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.team-node-cur .team-node-id {
+  font-family: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--ethos-text);
+}
+
+/* ── Side sheet ────────────────────────────────────────────────────── */
+
+.team-side {
+  padding: 20px 22px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  overflow: auto;
+  min-height: 0;
+  min-width: 0;
+}
+
+.team-side-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.team-side-head .team-side-name {
+  font-weight: 500;
+  font-size: 15px;
+  color: var(--ethos-text);
+}
+
+.team-side-head .team-side-sub {
+  font-family: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  color: var(--ethos-text-tertiary);
+  display: block;
+}
+
+.team-side-note {
+  font-size: 12px;
+  color: var(--ethos-text-dim);
+  border: 1px solid var(--ethos-border);
+  border-radius: 8px;
+  padding: 8px 10px;
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.team-side-note b {
+  font-weight: 500;
+  color: var(--ethos-text);
+}
+
+.team-side-para {
+  color: var(--ethos-text-dim);
+  font-size: 12px;
+  margin: 4px 0 0;
+}
+
+.team-side-missing {
+  color: var(--ethos-error);
+  font-size: 12px;
+}
+
+/* The member sheet's ledger rows (`LedgerRows` in MemberSheet.tsx) use
+   these cell classes on the shared `.team-ev` grid. */
+.team-ev .team-ev-time {
+  font-family: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-variant-numeric: tabular-nums;
+  font-size: 11px;
+  color: var(--ethos-text-tertiary);
+  padding-top: 1px;
+}
+
+.team-ev .team-ev-dot {
+  padding-top: 3px;
+}
+
+.team-ev .team-ev-head {
+  font-weight: 500;
+}
+
+/* Topic list (the prototype `.toplist`). */
+.team-toplist {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.team-toplist button {
+  font: inherit;
+  font-size: 13px;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: 4px;
+  color: var(--ethos-text-dim);
+  background: none;
+  width: 100%;
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    color 80ms cubic-bezier(0.16, 1, 0.3, 1),
+    background-color 80ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.team-toplist button:hover {
+  background: var(--ethos-hover);
+}
+
+.team-toplist button.team-toplist-on {
+  background: rgba(74, 158, 255, 0.18);
+  color: var(--ethos-text);
+}
+
+.team-toplist button.team-toplist-new {
+  color: var(--ethos-text-tertiary);
+}
+
+.team-toplist button:focus-visible {
+  outline: 2px solid var(--ethos-info);
+  outline-offset: 1px;
+}
+
+/* ── Memory pane — 220px topic list, content right ─────────────────── */
+
+.team-memory-split {
+  display: grid;
+  grid-template-columns: 220px 1fr;
+  flex: 1;
+  min-height: 0;
+}
+
+.team-memory-topics {
+  padding-right: 12px;
+  border-right: 1px solid var(--ethos-border);
+  overflow: auto;
+}
+
+.team-memory-topics .team-sec {
+  padding: 0 8px 6px;
+}
+
+.team-memory-body {
+  padding-left: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+  min-height: 0;
+}
+
+.team-memory-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 0;
+}
+
+.team-memory-editor textarea {
+  font-family: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12.5px;
+  line-height: 1.65;
+}
+
+.team-memory-actions {
+  display: flex;
+  gap: 8px;
+}
+
+/* ── Channels table (the prototype `.tbl`) ─────────────────────────── */
+
+.team-tbl {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12.5px;
+  color: var(--ethos-text);
+}
+
+.team-tbl th {
+  text-align: left;
+  font-family: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10px;
+  font-weight: 500;
+  line-height: 1.4;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ethos-text-tertiary);
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--ethos-border);
+}
+
+.team-tbl td {
+  padding: 9px 8px;
+  border-bottom: 1px solid var(--ethos-border);
+  vertical-align: middle;
+}
+
+.team-tbl .team-tbl-inline {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* ── Settings ──────────────────────────────────────────────────────── */
+
+.team-settings-manifest {
+  max-width: 640px;
+}
+
+.team-settings-kv {
+  max-width: 520px;
+}
+
+.team-settings-commands {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  align-items: flex-start;
+}
+
+.team-settings-actions {
+  display: flex;
+  gap: 8px;
+}

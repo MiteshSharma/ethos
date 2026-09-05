@@ -127,17 +127,30 @@ export function CreatesList({ bundle }: { bundle: RecipeBundleWire }) {
 }
 
 /** Every object the install would create, named. The preview step. */
-export function WillCreateList({ preflight }: { preflight: RecipePreflight }) {
+export function WillCreateList({
+  bundle,
+  preflight,
+}: {
+  bundle: RecipeBundleWire;
+  preflight: RecipePreflight;
+}) {
   const { personality, cronJobs, mcpAttachments } = preflight.willCreate;
+  const attach = bundle.personality.mode === 'attach';
 
   return (
     <section className="recipe-section">
-      <div className="recipe-section-label">Will create</div>
+      <div className="recipe-section-label">{attach ? 'Will change' : 'Will create'}</div>
       <RecipeRowList>
         <RecipeRowItem
           glyph="●"
-          label="Agent"
-          detail={personality.isNew ? undefined : 'already exists — reused'}
+          label={attach ? 'Attaches to' : 'Agent'}
+          detail={
+            attach
+              ? 'its SOUL.md, toolset and filesystem reach'
+              : personality.isNew
+                ? undefined
+                : 'already exists — reused'
+          }
           value={<span className="recipe-mono">{personality.id}</span>}
         />
         {cronJobs.map((job) => (

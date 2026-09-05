@@ -3,12 +3,18 @@ import { delimiter, join } from 'node:path';
 import { nextRunForSchedule } from '@ethosagent/cron';
 import { renderCharacterSheet } from '@ethosagent/personalities';
 import {
+  appendRecipeSoulSection,
   defaultRecipeSafety,
+  hasRecipeSoulSection,
+  type PreflightBlocker,
   preflightRecipe,
+  projectBundle,
   RECIPES,
+  type RecipeAttachPersonality,
   type RecipeBundle,
   RecipeBundleSchema,
   type RecipeCronJob,
+  type RecipeInstallMode,
   type RecipeSecretBinding,
   type RecipeSecretOption,
   type RecipeSecretRef,
@@ -17,6 +23,7 @@ import {
   renderRecipe,
   renderTemplatePreview,
   resolveInputs,
+  resolveInstallMode,
   unresolvedPlaceholders,
 } from '@ethosagent/recipes';
 import {
@@ -67,7 +74,10 @@ import type { ToolSettingsService } from './tool-settings.service';
  * sync, and a test can satisfy the shape without constructing an `McpManager`.
  */
 export interface RecipesServiceOptions {
-  personalities: Pick<PersonalitiesService, 'exists' | 'get' | 'create' | 'update' | 'delete'>;
+  personalities: Pick<
+    PersonalitiesService,
+    'list' | 'exists' | 'get' | 'config' | 'create' | 'update' | 'delete'
+  >;
   cron: Pick<CronService, 'list' | 'create' | 'delete' | 'deliveryTargets'>;
   mcp: Pick<McpService, 'list' | 'catalog' | 'addServer' | 'attachPersonalities' | 'delete'>;
   /** Loaded plugins + their safety findings. Absent → no plugin facts, so a
@@ -114,8 +124,18 @@ const GATEWAY_HEARTBEAT_STALE_MS = 30_000;
 export class RecipesService {
   constructor(private readonly opts: RecipesServiceOptions) {}
 
-  /** The curated catalog. No input: it is static, small and first-party (D11). */
-  list(): { recipes: RecipeListItem[] } {
+  /**
+   * The curated catalog. No input: it is static, small and first-party (D11).
+   *
+   * `attachedTo` is the one non-static column, and it is DERIVED (D8): an
+   * attach recipe is "installed" wherever a SOUL.md carries its marker, so the
+   * row reads every personality's SOUL once per call. A create recipe's state
+   * is derived client-side from its bundle's id, as before; a `both` recipe
+   * gets both signals.
+   */
+  async list(): Promise<{ recipes: RecipeListItem[] }> {
+    const attach = RECIPES.filter((r) => r.personality.mode !== 'create');
+    const souls = attach.length === 0 ? [] : await this.personalitySouls();
     return {
       recipes: RECIPES.map((r) => ({
         id: r.id,
@@ -124,6 +144,12 @@ export class RecipesService {
         summary: r.summary,
         tags: r.tags,
         sourceDoc: r.sourceDoc ?? null,
+        // A `both` recipe exposes both signals: this, and the create-mode
+        // "its personality exists", which the gallery derives from the bundle.
+        attachedTo:
+          r.personality.mode !== 'create'
+            ? souls.filter((s) => hasRecipeSoulSection(s.soulMd, r.id)).map((s) => s.id)
+            : null,
       })),
     };
   }
@@ -140,10 +166,14 @@ export class RecipesService {
     id: string;
     inputs?: Record<string, string>;
     personalityIdOverride?: string;
+    installMode?: RecipeInstallMode;
     secretBindings?: Record<string, RecipeSecretBinding>;
   }): Promise<RecipePreflight> {
-    const bundle = resolveBundle(input.id);
-    const personalityId = input.personalityIdOverride ?? bundle.personality.id;
+    // The effective mode is resolved ONCE, here, and the bundle is projected
+    // to that one view; everything below is the create path or the attach
+    // path, never a third.
+    const bundle = resolveProjected(input.id, input.installMode);
+    const personalityId = targetPersonalityId(bundle, input.personalityIdOverride);
     const { values } = resolveInputs(bundle, input.inputs);
     const snapshot = await this.snapshot(bundle, personalityId, values);
     const report = preflightRecipe({
@@ -151,11 +181,12 @@ export class RecipesService {
       snapshot,
       ...(input.inputs ? { inputs: input.inputs } : {}),
       ...(input.secretBindings ? { secretBindings: input.secretBindings } : {}),
-      personalityId,
+      ...(personalityId ? { personalityId } : {}),
     });
+    report.blocking.push(...pathInputBlockers(bundle, values));
     return {
       ...report,
-      characterSheet: this.previewSheet(bundle, personalityId, values),
+      characterSheet: await this.previewSheet(bundle, personalityId, snapshot, values),
       postInstall: bundle.postInstall,
     };
   }
@@ -219,11 +250,12 @@ export class RecipesService {
     version: number;
     inputs: Record<string, string>;
     personalityIdOverride?: string;
+    installMode?: RecipeInstallMode;
     deliverTo?: CronDeliverTo;
     channelSetup?: RecipeChannelSetup;
     secretBindings?: Record<string, RecipeSecretBinding>;
   }): Promise<RecipeInstallReport> {
-    const bundle = resolveBundle(input.id);
+    const bundle = resolveProjected(input.id, input.installMode);
     if (bundle.version !== input.version) {
       throw new EthosError({
         code: 'RECIPE_STALE',
@@ -232,7 +264,7 @@ export class RecipesService {
       });
     }
 
-    const personalityId = input.personalityIdOverride ?? bundle.personality.id;
+    const personalityId = targetPersonalityId(bundle, input.personalityIdOverride);
     const setupInput = input.channelSetup;
     if (setupInput && input.deliverTo?.kind === 'channel') {
       // Two answers to one question. `deliverTo` names an EXISTING bot's chat;
@@ -275,9 +307,13 @@ export class RecipesService {
       snapshot,
       inputs,
       ...(secretBindings ? { secretBindings } : {}),
-      personalityId,
+      ...(personalityId ? { personalityId } : {}),
     });
-    if (report.blocking.length > 0 || report.needsInput.length > 0) {
+    report.blocking.push(...pathInputBlockers(bundle, values));
+    // `personalityId` is undefined only for an attach with no target, which
+    // preflight has just refused with `PERSONALITY_REQUIRED` — the guard is
+    // one condition so the narrowing below is honest, not a second check.
+    if (report.blocking.length > 0 || report.needsInput.length > 0 || !personalityId) {
       throw new EthosError({
         code: 'RECIPE_BLOCKED',
         cause: [
@@ -410,16 +446,29 @@ export class RecipesService {
     const undo: Array<{ what: string; href: string; run: () => Promise<void> }> = [];
 
     try {
-      // 1 — the personality. Skipped when one this same bundle would produce is
-      // already there; preflight refused any other collision.
+      // 1 — the personality. Create mode: skipped when one this same bundle
+      // would produce is already there; preflight refused any other collision.
+      // Attach mode: ONE update onto the target, with an undo that restores the
+      // exact previous values.
       const existing = snapshot.personalities.find((p) => p.id === personalityId);
-      if (existing) {
+      const p = resolved.personality;
+      if (p.mode === 'attach') {
+        const step = await this.attachTo(bundle, p, personalityId);
+        if (step) {
+          created.personality = personalityId;
+          undo.push(step);
+        } else {
+          skipped.push({
+            what: `SOUL section on '${personalityId}'`,
+            because: 'it is already attached',
+          });
+        }
+      } else if (existing) {
         skipped.push({
           what: `personality '${personalityId}'`,
           because: 'it already matches this recipe',
         });
       } else {
-        const p = resolved.personality;
         await this.opts.personalities.create({
           id: personalityId,
           name: p.name,
@@ -655,6 +704,76 @@ export class RecipesService {
   }
 
   /**
+   * Attach mode's step 1: read the target, compute the additions, and write
+   * them in ONE `personalities.update`. Returns the undo entry, or `null` when
+   * the SOUL already carries this recipe's section — the toolset and reach
+   * unions are then no-ops too, and the step reports as skipped.
+   *
+   * Reach is APPENDED, never replaced. When the target declares no read (or
+   * write) list, the loop derives the defaults (own directory, skills,
+   * workdir — `deriveFsReachPaths` in core); writing only the recipe's paths
+   * would REPLACE those defaults and make the personality's own directory
+   * unreachable. So an absent list is seeded with the same token-form defaults
+   * the loop would have used, then the recipe's entries are appended.
+   */
+  private async attachTo(
+    bundle: RecipeBundle,
+    p: RecipeAttachPersonality,
+    personalityId: string,
+  ): Promise<{ what: string; href: string; run: () => Promise<void> } | null> {
+    const { personality: target, soulMd } = await this.opts.personalities.get(personalityId);
+    if (hasRecipeSoulSection(soulMd, bundle.id)) return null;
+
+    const before = {
+      soulMd,
+      toolset: target.toolset ?? [],
+      plugins: target.plugins,
+      // `[]` is how "declared nothing" is written back: the renderer omits an
+      // empty list, so the reload derives the defaults exactly as before.
+      read: target.fs_reach?.read ?? [],
+      write: target.fs_reach?.write ?? [],
+    };
+    const union = (base: readonly string[], extra: readonly string[]) => [
+      ...base,
+      ...extra.filter((entry) => !base.includes(entry)),
+    ];
+    const addsPlugins = p.plugins !== undefined && p.plugins.length > 0;
+    await this.opts.personalities.update(personalityId, {
+      soulMd: appendRecipeSoulSection(soulMd, bundle.id, p.soulSection),
+      toolset: union(before.toolset, p.toolset),
+      ...(addsPlugins ? { plugins: union(before.plugins ?? [], p.plugins ?? []) } : {}),
+      ...(p.fsReach
+        ? {
+            fs_reach: {
+              read: union(
+                before.read.length > 0 ? before.read : DEFAULT_REACH.read,
+                p.fsReach.read ?? [],
+              ),
+              write: union(
+                before.write.length > 0 ? before.write : DEFAULT_REACH.write,
+                p.fsReach.write ?? [],
+              ),
+            },
+          }
+        : {}),
+    });
+    return {
+      what: `recipe section on '${personalityId}'`,
+      href: `/p/${personalityId}/identity`,
+      run: async () => {
+        await this.opts.personalities.update(personalityId, {
+          soulMd: before.soulMd,
+          toolset: before.toolset,
+          // An undeclared list is written back as `[]` — default-deny, the
+          // same meaning the loader gives an absent one.
+          ...(addsPlugins ? { plugins: before.plugins ?? [] } : {}),
+          fs_reach: { read: before.read, write: before.write },
+        });
+      },
+    };
+  }
+
+  /**
    * Write each answered credential onto the personality's tool settings, and
    * return the compensating restores for the apply's LIFO undo log.
    *
@@ -720,7 +839,8 @@ export class RecipesService {
 
   private async snapshot(
     bundle: RecipeBundle,
-    personalityId: string,
+    /** Undefined for an attach with no target picked yet: nothing personality-scoped to gather. */
+    personalityId: string | undefined,
     values: Record<string, string>,
   ): Promise<RecipeWorldSnapshot> {
     const [
@@ -732,11 +852,11 @@ export class RecipesService {
       gatewayRunning,
       secretStatus,
     ] = await Promise.all([
-      this.candidatePersonality(personalityId),
+      personalityId ? this.candidatePersonality(personalityId) : [],
       this.opts.mcp.list().then((r) => r.servers.map((s) => s.name)),
       this.loadedPlugins(),
-      this.personalityCronJobNames(personalityId),
-      this.opts.cron.deliveryTargets(personalityId).then((r) => r.targets),
+      personalityId ? this.personalityCronJobNames(personalityId) : [],
+      personalityId ? this.opts.cron.deliveryTargets(personalityId).then((r) => r.targets) : [],
       this.gatewayRunning(),
       this.secretStatus(bundle),
     ]);
@@ -767,7 +887,15 @@ export class RecipesService {
   private async candidatePersonality(id: string): Promise<RecipeWorldSnapshot['personalities']> {
     if (!(await this.opts.personalities.exists(id))) return [];
     const { personality, soulMd } = await this.opts.personalities.get(id);
-    return [{ id, soulMd, toolset: personality.toolset ?? [] }];
+    return [{ id, soulMd, toolset: personality.toolset ?? [], builtin: personality.builtin }];
+  }
+
+  /** Every personality's SOUL.md — what `list` derives an attach recipe's installed state from. */
+  private async personalitySouls(): Promise<Array<{ id: string; soulMd: string }>> {
+    const { items } = await this.opts.personalities.list();
+    return Promise.all(
+      items.map(async ({ id }) => ({ id, soulMd: (await this.opts.personalities.get(id)).soulMd })),
+    );
   }
 
   /** Loaded only (D4). `scanFindings` travel verbatim — never summarised. */
@@ -948,14 +1076,55 @@ export class RecipesService {
    * proposed config, with any still-unfilled `{{input.*}}` left standing so the
    * user sees what is missing rather than a wrong value.
    */
-  private previewSheet(
+  private async previewSheet(
     bundle: RecipeBundle,
-    personalityId: string,
+    personalityId: string | undefined,
+    snapshot: RecipeWorldSnapshot,
     values: Record<string, string>,
-  ): string {
+  ): Promise<string> {
     const p = bundle.personality;
+    if (p.mode === 'attach') {
+      // The TARGET's own config with the additions applied — the sheet the
+      // install would leave behind. Until a target is picked (or when the one
+      // named does not exist) there is nothing to draw it from.
+      const target = snapshot.personalities.find((entry) => entry.id === personalityId);
+      if (!personalityId || !target) {
+        return 'Pick the personality this recipe attaches to, and its character sheet appears here with the additions applied.';
+      }
+      const config = await this.opts.personalities.config(personalityId);
+      const union = (base: readonly string[], extra: readonly string[]) => [
+        ...base,
+        ...extra.filter((entry) => !base.includes(entry)),
+      ];
+      const read = p.fsReach?.read?.map((v) => renderTemplatePreview(v, values)) ?? [];
+      const write = p.fsReach?.write?.map((v) => renderTemplatePreview(v, values)) ?? [];
+      const merged: PersonalityConfig = {
+        ...config,
+        toolset: union(config.toolset ?? [], p.toolset),
+        ...(p.plugins && p.plugins.length > 0
+          ? { plugins: union(config.plugins ?? [], p.plugins) }
+          : {}),
+        ...(p.fsReach
+          ? {
+              fs_reach: {
+                ...config.fs_reach,
+                read: union(config.fs_reach?.read ?? DEFAULT_REACH.read, read),
+                write: union(config.fs_reach?.write ?? DEFAULT_REACH.write, write),
+              },
+            }
+          : {}),
+      };
+      return renderCharacterSheet(
+        merged,
+        appendRecipeSoulSection(
+          target.soulMd,
+          bundle.id,
+          renderTemplatePreview(p.soulSection, values),
+        ),
+      );
+    }
     const config: PersonalityConfig = {
-      id: personalityId,
+      id: personalityId ?? p.id,
       name: p.name,
       description: p.description,
       toolset: p.toolset,
@@ -1034,6 +1203,31 @@ interface ToolSecretSchema {
   secretKind: string;
 }
 
+/**
+ * The personality the install would write. Create mode: the bundle's own id
+ * unless overridden. Attach mode: the override IS the target, and there is no
+ * fallback — `undefined` until the user picks one.
+ */
+function targetPersonalityId(
+  bundle: RecipeBundle,
+  override: string | undefined,
+): string | undefined {
+  return bundle.personality.mode === 'create' ? (override ?? bundle.personality.id) : override;
+}
+
+/**
+ * The token-form reach a personality that declares none resolves to — the
+ * same lists `deriveFsReachPaths` (core) derives, spelled with the config
+ * tokens the loader substitutes. Seeded into an attach's `fs_reach` when the
+ * target declares no list, because a written list REPLACES the defaults.
+ */
+const DEFAULT_REACH = {
+  // biome-ignore lint/suspicious/noTemplateCurlyInString: literal config.yaml substitution tokens
+  read: ['${ETHOS_HOME}/personalities/${self}/', '${ETHOS_HOME}/skills/', '${CWD}'],
+  // biome-ignore lint/suspicious/noTemplateCurlyInString: literal config.yaml substitution tokens
+  write: ['${ETHOS_HOME}/personalities/${self}/', '${CWD}'],
+} as const;
+
 /** Stage 1. A bundle that fails to parse in production is an authoring bug the
  *  table test should have caught; the RPC still refuses rather than installing
  *  a partial object. */
@@ -1057,11 +1251,51 @@ function resolveBundle(id: string): RecipeBundle {
   return parsed.data;
 }
 
+/**
+ * The bundle PROJECTED to the view an install runs as. `resolveInstallMode`
+ * decides: a single-mode bundle ignores the request, a `both` bundle takes it
+ * and defaults to create. Preflight and install consume this; `get` shows the
+ * whole bundle.
+ */
+function resolveProjected(id: string, installMode: RecipeInstallMode | undefined): RecipeBundle {
+  const bundle = resolveBundle(id);
+  return projectBundle(bundle, resolveInstallMode(bundle, installMode));
+}
+
 function catalogPresetIds(catalog: {
   remote: Array<{ name: string }>;
   local: Array<{ name: string }>;
 }): string[] {
   return [...catalog.remote.map((p) => p.name), ...catalog.local.map((p) => p.name)];
+}
+
+/**
+ * A `kind: 'path'` input that the personality loader would refuse.
+ *
+ * A path input lands in `fs_reach`, and the loader accepts only absolute paths
+ * (or its `${ETHOS_HOME}` / `${self}` / `${CWD}` tokens) with no `..`.
+ * `PersonalitiesService.create` does not validate reach entries, so without
+ * this the install would write a config.yaml the registry then refuses to
+ * load. Caught here as a preflight row, before the first write, with the fix
+ * named. `~` is not expanded anywhere downstream, so it is refused too.
+ */
+function pathInputBlockers(
+  bundle: RecipeBundle,
+  values: Record<string, string>,
+): PreflightBlocker[] {
+  const blockers: PreflightBlocker[] = [];
+  for (const input of bundle.requires.inputs) {
+    if (input.kind !== 'path') continue;
+    const value = values[input.key];
+    if (value === undefined) continue;
+    if (value.startsWith('/') && !value.includes('..') && value !== '/') continue;
+    blockers.push({
+      code: 'PATH_NOT_ABSOLUTE',
+      message: `'${input.label}' must be an absolute path: "${value}" is not.`,
+      action: `Enter the full path starting with "/" (no ~ and no ..), e.g. ${input.placeholder ?? '/Users/you/folder/'}.`,
+    });
+  }
+  return blockers;
 }
 
 /** The resolved cron expression, or `null` while an input it needs is empty. */

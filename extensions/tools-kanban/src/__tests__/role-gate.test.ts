@@ -199,4 +199,125 @@ describe('kanban role gate', () => {
     });
     expect(result.error).toBeUndefined();
   });
+
+  // ---------------------------------------------------------------------------
+  // Per-turn caller resolution (teams-as-a-scope D4 — one shared loop per team)
+  // ---------------------------------------------------------------------------
+
+  describe('per-turn caller on a coordinator-built gate with coordinatorId', () => {
+    const build = () =>
+      createKanbanRoleGateHook({
+        role: 'coordinator',
+        personalityId: 'coordinator',
+        coordinatorId: 'coordinator',
+        store,
+      });
+
+    it('refuses kanban_assign on a member turn', async () => {
+      const task = store.createTask({ title: 'x' });
+      const result = await build()({
+        sessionId: 's',
+        toolCallId: 'tc',
+        toolName: 'kanban_assign',
+        args: { task_id: task.id, assignee: 'engineer' },
+        personalityId: 'engineer',
+      });
+      expect(result.error).toMatch(/requires role=coordinator \(caller role=member\)/);
+    });
+
+    it("allows kanban_complete on a member turn for the member's own ticket", async () => {
+      const task = store.createTask({ title: 'work', assignee: 'engineer' });
+      const result = await build()({
+        sessionId: 's',
+        toolCallId: 'tc',
+        toolName: 'kanban_complete',
+        args: { task_id: task.id, summary: 'done' },
+        personalityId: 'engineer',
+      });
+      expect(result.error).toBeUndefined();
+    });
+
+    it("refuses kanban_complete on a member turn for someone else's ticket", async () => {
+      const task = store.createTask({ title: 'work', assignee: 'engineer' });
+      const result = await build()({
+        sessionId: 's',
+        toolCallId: 'tc',
+        toolName: 'kanban_complete',
+        args: { task_id: task.id, summary: 'done' },
+        personalityId: 'researcher',
+      });
+      expect(result.error).toMatch(/current assignee=engineer, you=researcher/);
+    });
+
+    it('leaves a coordinator turn unchanged', async () => {
+      const task = store.createTask({ title: 'refactor', assignee: 'engineer' });
+      const hook = build();
+      const assign = await hook({
+        sessionId: 's',
+        toolCallId: 'tc',
+        toolName: 'kanban_assign',
+        args: { task_id: task.id, assignee: 'engineer' },
+        personalityId: 'coordinator',
+      });
+      expect(assign.error).toBeUndefined();
+      const status = await hook({
+        sessionId: 's',
+        toolCallId: 'tc',
+        toolName: 'kanban_update_status',
+        args: { task_id: task.id, status: 'blocked' },
+        personalityId: 'coordinator',
+      });
+      expect(status.error).toBeUndefined();
+      const complete = await hook({
+        sessionId: 's',
+        toolCallId: 'tc',
+        toolName: 'kanban_complete',
+        args: { task_id: task.id, summary: 'x' },
+        personalityId: 'coordinator',
+      });
+      expect(complete.error).toMatch(/requires you to be the assignee/);
+    });
+
+    it('falls back to the constructed caller when the payload has no personalityId', async () => {
+      const task = store.createTask({ title: 'work', assignee: 'engineer' });
+      const hook = build();
+      const assign = await hook({
+        sessionId: 's',
+        toolCallId: 'tc',
+        toolName: 'kanban_assign',
+        args: { task_id: task.id, assignee: 'engineer' },
+      });
+      expect(assign.error).toBeUndefined();
+      const complete = await hook({
+        sessionId: 's',
+        toolCallId: 'tc',
+        toolName: 'kanban_complete',
+        args: { task_id: task.id, summary: 'x' },
+      });
+      expect(complete.error).toMatch(/you=coordinator/);
+    });
+  });
+
+  it('without coordinatorId, a per-turn personalityId keeps the boot-time role', async () => {
+    // Legacy `ethos serve --role member` process: the role is fixed at boot;
+    // only the assignee identity follows the turn.
+    const task = store.createTask({ title: 'work', assignee: 'engineer' });
+    const hook = createKanbanRoleGateHook({ role: 'member', personalityId: 'researcher', store });
+    const assign = await hook({
+      sessionId: 's',
+      toolCallId: 'tc',
+      toolName: 'kanban_assign',
+      args: { task_id: task.id, assignee: 'engineer' },
+      personalityId: 'coordinator',
+    });
+    expect(assign.error).toMatch(/requires role=coordinator/);
+    const complete = await hook({
+      sessionId: 's',
+      toolCallId: 'tc',
+      toolName: 'kanban_complete',
+      args: { task_id: task.id, summary: 'x' },
+      personalityId: 'engineer',
+    });
+    expect(complete.error).toBeUndefined();
+  });
 });

@@ -3,6 +3,7 @@ import {
   agentEntries,
   createActionEntries,
   libraryPageEntries,
+  scopeEntries,
   workspacePageEntries,
 } from '../paletteDestinations';
 
@@ -135,5 +136,85 @@ describe('createActionEntries', () => {
     const entries = createActionEntries('engineer', 'Engineer');
     const dashboards = entries.find((e) => e.id === 'create:dashboards');
     expect(dashboards?.hint).toBeUndefined();
+  });
+});
+
+// teams-as-a-scope §10 / D14 — the switcher's rows as palette entries, and
+// member-first agent ordering inside a team.
+describe('scopeEntries', () => {
+  const entries = scopeEntries([
+    { name: 'marketing', coordinator: 'cmo' },
+    { name: 'dev', coordinator: null },
+  ]);
+
+  it('always offers Switch to Independent, landing on the roster', () => {
+    expect(entries[0]).toMatchObject({
+      id: 'scope:independent',
+      group: 'Actions',
+      label: 'Switch to Independent',
+      path: '/personalities',
+    });
+  });
+
+  it('offers Switch to <team> → overview, and Chat with <team> only with a coordinator', () => {
+    const labels = entries.map((e) => e.label);
+    expect(labels).toContain('Switch to marketing');
+    expect(labels).toContain('Switch to dev');
+    expect(entries.find((e) => e.label === 'Switch to marketing')?.path).toBe(
+      '/t/marketing/overview',
+    );
+    expect(entries.find((e) => e.label === 'Chat with marketing')).toMatchObject({
+      group: 'Actions',
+      path: '/t/marketing/chat',
+      hint: 'via cmo',
+    });
+    expect(labels).not.toContain('Chat with dev');
+  });
+
+  it('lists every non-Chat team pane as a Page with its path as the hint', () => {
+    const panes = entries.filter((e) => e.id.startsWith('page:team:marketing:'));
+    expect(panes.map((e) => e.label)).toEqual([
+      'marketing › Overview',
+      'marketing › Board',
+      'marketing › Structure',
+      'marketing › Memory',
+      'marketing › Activity',
+      'marketing › Channels',
+      'marketing › Settings',
+    ]);
+    for (const p of panes) expect(p.hint).toBe(p.path);
+  });
+
+  it('every id is unique', () => {
+    const ids = entries.map((e) => e.id);
+    expect(new Set(ids).size).toBe(ids.length);
+  });
+});
+
+describe('agentEntries inside a team', () => {
+  const agents = [
+    { id: 'researcher', name: 'Researcher' },
+    { id: 'reddit-scout', name: 'Reddit Scout' },
+    { id: 'cmo', name: 'CMO' },
+  ];
+
+  it('lists members first, under the team prefix; others keep the independent path', () => {
+    const entries = agentEntries(agents, {
+      id: 'marketing',
+      memberIds: new Set(['cmo', 'reddit-scout']),
+    });
+    expect(entries.map((e) => e.path)).toEqual([
+      '/t/marketing/p/reddit-scout/chat',
+      '/t/marketing/p/cmo/chat',
+      '/p/researcher/chat',
+    ]);
+  });
+
+  it('is unchanged without a team', () => {
+    expect(agentEntries(agents).map((e) => e.path)).toEqual([
+      '/p/researcher/chat',
+      '/p/reddit-scout/chat',
+      '/p/cmo/chat',
+    ]);
   });
 });
