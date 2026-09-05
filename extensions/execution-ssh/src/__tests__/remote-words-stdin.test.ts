@@ -38,6 +38,18 @@ function runAsRemoteLoginShell(
     });
     child.on('error', reject);
     child.on('close', (code) => resolve({ stdout, stderr, code }));
+    // Three call sites below hand empty stdin to a wrapped command that never
+    // reads it, so under load the shell can exit — closing the read end —
+    // before this write lands. That is EPIPE on the pipe, and with no listener
+    // Node raises it as an unhandled error that fails the whole run rather than
+    // a test. Ignoring EPIPE cannot mask a genuine broken pipe: nothing here
+    // trusts the write to report delivery. Whether stdin actually reached the
+    // runner is proved by the stdout and exit-status assertions, which still
+    // fail if the bytes never arrive. Any other stream error is real, and
+    // rejects.
+    child.stdin.on('error', (err: NodeJS.ErrnoException) => {
+      if (err.code !== 'EPIPE') reject(err);
+    });
     child.stdin.write(stdin, 'utf-8');
     child.stdin.end();
   });

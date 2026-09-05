@@ -307,17 +307,35 @@ describe('triageMention — every mode still reaches the agent', () => {
     expect(result.envelope?.recordOnly).toBe(false);
   });
 
-  it('an unrecognised stored mode still answers a mention', async () => {
+  it('an unrecognised stored mode drops the mention instead of answering it', async () => {
     const result = await triageMention(mention, {
       botKey: 'bot-a',
-      // A mode written by a newer build, or hand-edited into the JSONL. The
-      // shared evaluator falls through to the mention baseline; the bot must
-      // not go silent because it failed to recognise a word.
+      // A mode written by a newer build, or hand-edited into the JSONL. This
+      // used to fall through to the mention baseline and ANSWER, which turns
+      // a mode the operator chose for silence into an answering bot on the
+      // strength of what a third party typed. The shared evaluator now fails
+      // closed, and this handler honours it: no envelope at all, so the
+      // mention is neither answered nor written to the transcript.
       defaultChannelMode: 'from_the_future' as unknown as ChannelMode,
     });
 
-    expect(result.envelope).toBeDefined();
-    expect(result.envelope?.recordOnly).toBe(false);
+    expect(result.envelope).toBeUndefined();
+    expect(result.drop).toBe('channel_mode');
+    expect(result.effectiveMode).toBe('from_the_future');
+  });
+
+  it('an unrecognised per-channel override drops the mention', async () => {
+    // The override store is the path the failure actually arrives on: a
+    // downgraded binary reading a mode a newer one wrote.
+    const result = await triageMention(mention, {
+      botKey: 'bot-a',
+      defaultChannelMode: 'mention_only',
+      // biome-ignore lint/suspicious/noExplicitAny: minimal stub
+      channelOverrides: { get: () => ({ mode: 'digest_only' }) } as any,
+    });
+
+    expect(result.envelope).toBeUndefined();
+    expect(result.drop).toBe('channel_mode');
   });
 
   // The product decision worth a test of its own: silence in an observed

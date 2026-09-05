@@ -150,11 +150,11 @@ function stubLoop(text = 'three lines of summary') {
 function makeDeps(over: Partial<ChannelDigestDeps> = {}): ChannelDigestDeps & {
   sends: Array<{ botKey: string; chatId: string; text: string }>;
   notices: string[];
-  blocks: Array<{ code?: string; cause?: string }>;
+  blocks: Array<{ code?: string; cause?: string; details?: Record<string, unknown> }>;
 } {
   const sends: Array<{ botKey: string; chatId: string; text: string }> = [];
   const notices: string[] = [];
-  const blocks: Array<{ code?: string; cause?: string }> = [];
+  const blocks: Array<{ code?: string; cause?: string; details?: Record<string, unknown> }> = [];
   return {
     sends,
     notices,
@@ -1140,6 +1140,87 @@ describe('the watermark', () => {
     expect((await runChannelDigest(deps.deps)).summarised).toBe(1);
     expect(deps.calls[0]?.prompt ?? '').toContain('not lost');
     expect(await storage.read(WATERMARK_PATH)).toContain('"id"');
+  });
+
+  // ---- unusable cursor values ---------------------------------------------
+
+  // The cursor is spent as `id > ?` against an autoincrementing row id. A
+  // value no row can ever exceed silences the lane permanently, and
+  // `Number.isFinite` — the check this replaces — waved every one of these
+  // through. They must cold-start the lane instead, and SAY they did.
+  const UNUSABLE: Array<[string, number]> = [
+    ['a negative id', -1],
+    ['a fractional id', 1.5],
+    ['an id far past any row', 1e300],
+    ['an id past MAX_SAFE_INTEGER', Number.MAX_SAFE_INTEGER + 1],
+  ];
+
+  for (const [label, id] of UNUSABLE) {
+    it(`cold-starts the lane on ${label}`, async () => {
+      const storage = await house();
+      await storage.writeAtomic(WATERMARK_PATH, JSON.stringify({ [LANE]: { id } }));
+
+      const deps = run(storage, [message({ text: 'not lost', sentAt: OLD })]);
+      const report = await runChannelDigest(deps.deps);
+
+      // Digested, not silenced.
+      expect(report.summarised).toBe(1);
+      expect(deps.calls[0]?.prompt ?? '').toContain('not lost');
+      // ...and the bad value is replaced by a real one.
+      expect(JSON.parse((await storage.read(WATERMARK_PATH)) ?? '{}')).toEqual({
+        [LANE]: { id: 1 },
+      });
+    });
+
+    it(`reports the dropped entry on ${label}`, async () => {
+      const storage = await house();
+      await storage.writeAtomic(WATERMARK_PATH, JSON.stringify({ [LANE]: { id } }));
+
+      const deps = run(storage, [message({ text: 'not lost', sentAt: OLD })]);
+      await runChannelDigest(deps.deps);
+
+      // A lane that cold-starts must not do it silently — the whole failure
+      // this guard exists for was a lane going quiet with no diagnostic.
+      const dropped = deps.deps.blocks.find((b) => b.code === 'channel.digest_watermark_dropped');
+      expect(dropped).toBeDefined();
+      expect(dropped?.details?.lanes).toEqual([LANE]);
+      expect(dropped?.details?.count).toBe(1);
+    });
+  }
+
+  it('keeps a valid id and reports nothing', async () => {
+    const storage = await house();
+    // The id the store issues for the first row — the one real cursor value
+    // in this set. The range check must not eat it.
+    await storage.writeAtomic(WATERMARK_PATH, JSON.stringify({ [LANE]: { id: 1 } }));
+
+    const deps = run(storage, [message({ text: 'already digested', sentAt: OLD })]);
+    const report = await runChannelDigest(deps.deps);
+
+    expect(report).toMatchObject({ summarised: 0, empty: 1 });
+    expect(deps.calls).toHaveLength(0);
+    expect(deps.deps.blocks.filter((b) => b.code === 'channel.digest_watermark_dropped')).toEqual(
+      [],
+    );
+  });
+
+  it('cold-starts only the damaged lane, keeping the rest of the file', async () => {
+    const storage = await house();
+    // A lane this process does not serve, with a good cursor, alongside the
+    // damaged one. Dropping the whole file would re-digest a day for the
+    // other deployment too.
+    await storage.writeAtomic(
+      WATERMARK_PATH,
+      JSON.stringify({ [LANE]: { id: -3 }, 'telegram:bot-z:-999': { id: 42 } }),
+    );
+
+    const deps = run(storage, [message({ text: 'not lost', sentAt: OLD })]);
+    expect((await runChannelDigest(deps.deps)).summarised).toBe(1);
+
+    expect(JSON.parse((await storage.read(WATERMARK_PATH)) ?? '{}')).toEqual({
+      [LANE]: { id: 1 },
+      'telegram:bot-z:-999': { id: 42 },
+    });
   });
 
   // ---- in-app delivery -----------------------------------------------------

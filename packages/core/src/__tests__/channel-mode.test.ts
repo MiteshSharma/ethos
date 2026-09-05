@@ -6,7 +6,22 @@ import { type ChannelModeInputs, evaluateChannelMode } from '../channel-mode';
 // mode the four enums contain (plus an unrecognised one), crossed with every
 // input that can change the answer. An error here is an error everywhere.
 
-const MODES = ['mention_only', 'thread_follow', 'all', 'regex_match', 'observe', 'nonsense'];
+const MODES = ['mention_only', 'thread_follow', 'all', 'regex_match', 'observe'];
+
+// Values `evaluateChannelMode` does not know. Not one shape of nonsense but
+// every shape that reaches a mode string in practice: a mode from a newer
+// build read by a downgraded one, a hand-edited typo, a case or whitespace
+// slip, and the empty string a half-written override file leaves behind.
+const UNKNOWN_MODES = [
+  'nonsense',
+  'silent_digest_only',
+  'Observe',
+  'mention_only ',
+  '',
+  'all,observe',
+];
+
+const ALL_MODES = [...MODES, ...UNKNOWN_MODES];
 
 type Row = {
   mode: string;
@@ -21,7 +36,7 @@ type Row = {
 /** mode | isDm | mention | botPosted | patternMatch | shouldReply | shouldRecord */
 const TABLE: Row[] = [
   // --- DMs: always a conversation, whatever the mode says -------------------
-  ...MODES.map((mode) => ({
+  ...ALL_MODES.map((mode) => ({
     mode,
     isDm: true,
     isGroupMention: false,
@@ -197,25 +212,39 @@ const TABLE: Row[] = [
     record: false,
   },
 
-  // --- unrecognised mode falls back to mention-only behaviour ---------------
-  {
-    mode: 'nonsense',
-    isDm: false,
-    isGroupMention: true,
-    hasBotPosted: false,
-    matches: false,
-    reply: true,
-    record: true,
-  },
-  {
-    mode: 'nonsense',
-    isDm: false,
-    isGroupMention: false,
-    hasBotPosted: true,
-    matches: true,
-    reply: false,
-    record: false,
-  },
+  // --- unrecognised mode: fail closed, mention or no mention ----------------
+  // This USED to fall through to the mention-only baseline and answer. A mode
+  // string this build cannot read is a mode it cannot be safe about, and the
+  // modes that get added are the silent ones, so it is dropped instead.
+  ...UNKNOWN_MODES.flatMap((mode) => [
+    {
+      mode,
+      isDm: false,
+      isGroupMention: true,
+      hasBotPosted: false,
+      matches: false,
+      reply: false,
+      record: false,
+    },
+    {
+      mode,
+      isDm: false,
+      isGroupMention: false,
+      hasBotPosted: true,
+      matches: true,
+      reply: false,
+      record: false,
+    },
+    {
+      mode,
+      isDm: false,
+      isGroupMention: true,
+      hasBotPosted: true,
+      matches: true,
+      reply: false,
+      record: false,
+    },
+  ]),
 ];
 
 describe('evaluateChannelMode — decision table', () => {
@@ -232,6 +261,58 @@ describe('evaluateChannelMode — decision table', () => {
       expect(decision).toEqual({ shouldReply: row.reply, shouldRecord: row.record });
     });
   }
+});
+
+describe('evaluateChannelMode — unrecognised modes fail closed', () => {
+  for (const mode of UNKNOWN_MODES) {
+    it(`${JSON.stringify(mode)} is never eligible to reply, whatever the inputs`, () => {
+      for (const isGroupMention of [true, false]) {
+        for (const hasBotPosted of [true, false]) {
+          for (const matches of [true, false]) {
+            expect(
+              evaluateChannelMode({
+                isDm: false,
+                isGroupMention,
+                channelMode: mode,
+                hasBotPosted,
+                matchesPattern: () => matches,
+              }),
+            ).toEqual({ shouldReply: false, shouldRecord: false });
+          }
+        }
+      }
+    });
+  }
+
+  it('an @mention does not rescue an unrecognised mode', () => {
+    // The exact case that used to answer: `isGroupMention` was the fallback
+    // branch for anything the evaluator did not recognise.
+    expect(
+      evaluateChannelMode({ isDm: false, isGroupMention: true, channelMode: 'silent_digest_only' }),
+    ).toEqual({ shouldReply: false, shouldRecord: false });
+  });
+
+  it('does not consult matchesPattern for an unrecognised mode', () => {
+    let calls = 0;
+    evaluateChannelMode({
+      isDm: false,
+      isGroupMention: false,
+      channelMode: 'regex_match_v2',
+      matchesPattern: () => {
+        calls += 1;
+        return true;
+      },
+    });
+    expect(calls).toBe(0);
+  });
+
+  it('still answers a DM under an unrecognised mode', () => {
+    // A DM is not a room. Dropping it would deafen the bot to its own owner
+    // and leave no channel to report the bad override through.
+    expect(
+      evaluateChannelMode({ isDm: true, isGroupMention: false, channelMode: 'nonsense' }),
+    ).toEqual({ shouldReply: true, shouldRecord: true });
+  });
 });
 
 describe('evaluateChannelMode — ordering invariants', () => {
@@ -254,7 +335,7 @@ describe('evaluateChannelMode — ordering invariants', () => {
   });
 
   it('never records without replying outside observe mode', () => {
-    for (const mode of MODES.filter((m) => m !== 'observe')) {
+    for (const mode of ALL_MODES.filter((m) => m !== 'observe')) {
       for (const isGroupMention of [true, false]) {
         for (const hasBotPosted of [true, false]) {
           for (const matches of [true, false]) {

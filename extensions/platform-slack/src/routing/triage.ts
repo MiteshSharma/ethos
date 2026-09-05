@@ -153,19 +153,25 @@ export async function triageMention(
   const text = stripMentions(evt.text).trim();
   if (!text) return { drop: 'no_text', effectiveMode: channelMode };
 
-  // An @mention reaches the agent under every mode EXCEPT `observe` — the user
-  // is explicitly addressing the bot, and the mode only decides whether the
-  // bot is allowed to answer out loud. There is deliberately no drop branch
-  // here: with `isGroupMention: true` the shared evaluator engages for every
-  // mode it knows and for every mode it does not, and observes for `observe`,
-  // so `shouldRecord` is true in all of them. What the mode changes is
-  // `recordOnly` — silence in an observed channel must not be conditional on
-  // what a third party types.
+  // An @mention reaches the agent under every mode the evaluator RECOGNISES —
+  // the user is explicitly addressing the bot, and a known mode only decides
+  // whether the bot is allowed to answer out loud. Under `observe` that means
+  // recorded and not answered: silence in an observed channel must not be
+  // conditional on what a third party types.
   const decision = evaluateChannelMode({
     isDm: false,
     isGroupMention: true,
     channelMode,
   });
+
+  // The one reachable drop: a mode string this build cannot read. The shared
+  // evaluator fails closed on it, and a mention is not an exception — an
+  // unreadable mode is as likely to be a newer silent one as a typo, so the
+  // mention is neither answered nor recorded. Without this branch the
+  // evaluator's "do not record" would be ignored here and the message would
+  // land in the transcript anyway, which is the one place a mention could
+  // still leak out of a room that asked for silence.
+  if (!decision.shouldRecord) return { drop: 'channel_mode', effectiveMode: channelMode };
 
   return {
     envelope: buildEnvelope({

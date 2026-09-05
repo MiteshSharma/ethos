@@ -34,14 +34,14 @@ Four readers use this page for four different decisions:
 
 ### The three tiers {#tiers}
 
-Tiers are assigned **per workspace package**, committed and dated in [`.architecture-state.yaml`](https://github.com/ethosagent/ethos/blob/main/.architecture-state.yaml) at the repo root. That file is authoritative for any individual package; the roster below names the members so you can read the shape without opening it. 119 packages: 10 at Tier 0, 23 at Tier 1, 86 at Tier 2.
+Tiers are assigned **per workspace package**, committed and dated in [`.architecture-state.yaml`](https://github.com/ethosagent/ethos/blob/main/.architecture-state.yaml) at the repo root. That file is authoritative for any individual package; the roster below names the members so you can read the shape without opening it. 141 packages: 11 at Tier 0, 27 at Tier 1, 103 at Tier 2.
 
 The assignment is committed **before** any report arrives. A tier decided in the same week a report lands against that module is evidence of nothing, and a reporter reading `git log` can say so with a timestamp.
 
 **Tier 0 — the security kernel.** Guaranteed. CVE-eligible. No exception path under [ARCHITECTURE.md §VIII](https://github.com/ethosagent/ethos/blob/main/ARCHITECTURE.md).
 
 - `@ethosagent/types` — the contracts that shape the boundary
-- The six safety packages: `@ethosagent/safety-injection`, `safety-network`, `safety-redact`, `safety-channel`, `safety-scanner`, `safety-watcher`
+- The seven safety packages: `@ethosagent/safety-injection`, `safety-network`, `safety-redact`, `safety-channel`, `safety-scanner`, `safety-watcher`, `safety-groundtruth`
 - `@ethosagent/core` — **enforcement points only**, not all of core: the tool registry, the per-call enforcement, tool-processing and tool-rejection stages, the injection prelude and post-read downgrade sites in `agent-loop.ts` and `context-assembly.ts`, the approval-posture guard, result defense, the `scoped/*` decorators, `fs-reach.ts`, `path-boundary.ts`, `url-validator.ts`, the capability validator and resolver, the hook registry, `script-safe.ts`
 - `@ethosagent/storage-fs` — `ScopedStorage` and the always-deny floor
 - `@ethosagent/wiring` — **safety composition only**: the `AgentSafety` bundle assembly, `danger-predicate.ts`, `approval-seams.ts`, `smart-approver.ts`, `resolve-execution-posture.ts`
@@ -56,10 +56,10 @@ The per-file lists for core and wiring are in the sidecar under `kernel_paths`. 
 | Execution | `tools-terminal`, `tools-code`, `execution-docker`, `execution-local`, `execution-ssh`, `execution-pi`, `execution-coding-agents` |
 | Third-party code | `tools-mcp`, `skills`, `skill-evolver`, `plugin-loader` |
 | Network surface | `apps/web-api` |
-| Data at rest and credentials | `session-sqlite`, `storage-crypto`, `secrets-aws`, `plugin-sdk` |
+| Data at rest and credentials | `session-sqlite`, `storage-crypto`, `secrets-aws`, `plugin-sdk`, `worker-router` |
 | Audit and delivery | `observability-sqlite`, `delivery-ledger` |
 
-**Tier 2 — extensions, not owned.** The remaining 86 packages. Best-effort. A bug is a bug, not a CVE. They inherit exactly what the kernel enforces and nothing more.
+**Tier 2 — extensions, not owned.** The remaining 103 packages. Best-effort. A bug is a bug, not a CVE. They inherit exactly what the kernel enforces and nothing more.
 
 > **The way to make a Tier 2 extension safe is not to review it harder. It is to make the kernel enforce the property.**
 
@@ -154,7 +154,7 @@ Twelve guarantees. Each carries five fields, and all five are required: a **clai
 ### G-WATCH — Watcher {#g-watch}
 
 - **Claim.** An out-of-band observer reads the agent event stream **across turns** and halts the turn on rate-limit, token-budget, compounding-error, and suspicious-sequence rules. It is out-of-band by design: it does not depend on the in-loop checks getting the classification right.
-- **Enforced at.** [`rules.ts:20`](https://github.com/ethosagent/ethos/blob/main/packages/safety/watcher/src/rules.ts#L20) (`rateLimitRule`), [`:79`](https://github.com/ethosagent/ethos/blob/main/packages/safety/watcher/src/rules.ts#L79) (`tokenBudgetRule`), [`:110`](https://github.com/ethosagent/ethos/blob/main/packages/safety/watcher/src/rules.ts#L110) (`compoundingErrorRule`), [`:161`](https://github.com/ethosagent/ethos/blob/main/packages/safety/watcher/src/rules.ts#L161) (`suspiciousSequenceRule`), composed at [`:205`](https://github.com/ethosagent/ethos/blob/main/packages/safety/watcher/src/rules.ts#L205); constructed in wiring at [`build-agent-loop.ts:481`](https://github.com/ethosagent/ethos/blob/main/packages/wiring/src/build-agent-loop.ts#L481).
+- **Enforced at.** [`rules.ts:20`](https://github.com/ethosagent/ethos/blob/main/packages/safety/watcher/src/rules.ts#L20) (`rateLimitRule`), [`:79`](https://github.com/ethosagent/ethos/blob/main/packages/safety/watcher/src/rules.ts#L79) (`tokenBudgetRule`), [`:110`](https://github.com/ethosagent/ethos/blob/main/packages/safety/watcher/src/rules.ts#L110) (`compoundingErrorRule`), [`:161`](https://github.com/ethosagent/ethos/blob/main/packages/safety/watcher/src/rules.ts#L161) (`suspiciousSequenceRule`), composed at [`:205`](https://github.com/ethosagent/ethos/blob/main/packages/safety/watcher/src/rules.ts#L205); constructed in wiring at [`build-agent-loop.ts:482`](https://github.com/ethosagent/ethos/blob/main/packages/wiring/src/build-agent-loop.ts#L482).
 - **Explicitly not covered.** **It observes and halts; it does not prevent the first bad call.** By construction it fires on a pattern, and a pattern needs at least one instance. A single catastrophic call inside budget is exactly what it does not catch.
 - **Verify it yourself.** `packages/safety/watcher/src/__tests__/`; the `halt` events in `observability.db` after tripping a rule deliberately.
 - **If you need more.** Per-turn budgets you set yourself, and the approval gate for the first-call case the watcher structurally cannot cover.

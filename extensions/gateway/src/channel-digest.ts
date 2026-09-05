@@ -191,6 +191,15 @@ const DIGEST_SYSTEM_PROMPT =
  * not recognise is dropped instead, which cold-starts that lane — one
  * duplicate digest, the direction this file has always erred in.
  *
+ * The RANGE is checked for the same reason the shape is. The cursor is spent
+ * as `id > ?` against an `INTEGER PRIMARY KEY AUTOINCREMENT`, so any value a
+ * real ingestion id can never reach — a negative, a fraction, `1e300`,
+ * anything past `Number.MAX_SAFE_INTEGER` — matches no row this lane will
+ * ever hold and takes the lane silent forever with nothing to show for it.
+ * Only a non-negative safe integer is a cursor; everything else is dropped
+ * and REPORTED, so a lane that cold-starts says so instead of a lane that
+ * quietly stops.
+ *
  * One file rather than a file per lane: a lane key carries a platform, a
  * botKey and a chat id joined by colons, so a per-lane path would need
  * sanitising and could collide. Unknown keys are kept on write — a transcript
@@ -199,26 +208,56 @@ const DIGEST_SYSTEM_PROMPT =
  */
 type Watermarks = Record<string, number>;
 
-async function readWatermarks(from: ChannelDigestDeps['watermarks']): Promise<Watermarks> {
+/**
+ * Is this a value the store could actually have issued as a row id?
+ *
+ * `Number.isFinite` was not enough: it admits `-1`, `1.5`, `1e300` and
+ * `Number.MAX_SAFE_INTEGER + 1`, none of which any row will ever match, so
+ * each of them is a cursor the lane can never advance past.
+ */
+function isCursorId(id: unknown): id is number {
+  return typeof id === 'number' && Number.isSafeInteger(id) && id >= 0;
+}
+
+async function readWatermarks(
+  from: ChannelDigestDeps['watermarks'],
+  observability: ChannelDigestDeps['observability'],
+): Promise<Watermarks> {
   if (!from) return {};
   const raw = await from.storage.read(from.path);
   if (!raw) return {};
   const marks: Watermarks = {};
+  const dropped: string[] = [];
   try {
     const parsed: unknown = JSON.parse(raw);
     if (typeof parsed !== 'object' || parsed === null) return {};
     for (const [key, value] of Object.entries(parsed)) {
       // `{ id: n }`. A bare number is the pre-cursor format — see the note on
       // `Watermarks` for why reading it as an id would silence the lane.
-      if (typeof value !== 'object' || value === null || !('id' in value)) continue;
+      if (typeof value !== 'object' || value === null || !('id' in value)) {
+        dropped.push(key);
+        continue;
+      }
       const id: unknown = value.id;
-      if (typeof id === 'number' && Number.isFinite(id)) marks[key] = id;
+      if (isCursorId(id)) marks[key] = id;
+      else dropped.push(key);
     }
   } catch {
     // Corrupt file — treat as no watermark. Every lane then re-reads from the
     // start of what retention still holds, which duplicates rather than loses
     // (see the semantics note on `runChannelDigest`).
     return {};
+  }
+  // One report per run rather than one per entry: a file damaged at all is
+  // usually damaged throughout, and the operator needs the lane names, not a
+  // flood. Reported at all because the alternative is the failure this check
+  // exists to end — a lane going quiet with nothing said about it.
+  if (dropped.length > 0) {
+    observability?.recordSafetyBlock({
+      code: 'channel.digest_watermark_dropped',
+      cause: 'unusable channel digest watermark entries dropped — those lanes cold-start',
+      details: { path: from.path, lanes: dropped, count: dropped.length },
+    });
   }
   return marks;
 }
@@ -523,7 +562,7 @@ async function digestWatchedLanes(
   const limit = settings.maxMessagesPerLane ?? DEFAULT_MAX_MESSAGES_PER_LANE;
   const costWarnUsd = settings.costWarnUsdPerLane ?? DEFAULT_COST_WARN_USD_PER_LANE;
   const deliverTo = settings.deliverTo ?? 'owner';
-  const watermarks = await readWatermarks(deps.watermarks);
+  const watermarks = await readWatermarks(deps.watermarks, deps.observability);
   let watermarksChanged = false;
 
   // `deliverTo: 'inApp'` makes the feed the ENTIRE delivery. With no feed
