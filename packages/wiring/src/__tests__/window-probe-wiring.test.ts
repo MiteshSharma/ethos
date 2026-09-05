@@ -126,14 +126,14 @@ describe('createLLM — Lane 0 window resolution (stubbed network)', () => {
     const llm = await createLLM(
       {
         provider: 'openrouter',
-        model: 'anthropic/claude-sonnet-4-6',
+        model: 'anthropic/claude-sonnet-5',
         apiKey: 'sk',
         baseUrl: 'https://proxy.corp.example:8080/v1',
       },
       { storage, dataDir: '/data', fetchImpl: forbidden },
     );
-    // Catalog window (200k) uncapped — the 32k architecture cap is local-only.
-    expect(llm.maxContextTokens).toBe(200_000);
+    // Catalog window (1M) uncapped — the 32k architecture cap is local-only.
+    expect(llm.maxContextTokens).toBe(1_000_000);
     // No llamacpp schema sanitizer on a hosted endpoint.
     expect((llm as OpenAICompatProvider).toolSchemaProfile).toBeUndefined();
     expect((llm as OpenAICompatProvider).localRuntime).toBeUndefined();

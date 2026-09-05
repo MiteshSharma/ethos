@@ -1,15 +1,21 @@
 import { personalityAccent } from '@ethosagent/design-tokens';
-import { formatContextWindow, MODEL_CATALOG } from '../catalog/models';
+import {
+  formatContextWindow,
+  lookupContextWindow,
+  type ModelCatalog,
+  useModelCatalog,
+} from '../catalog/models';
 import type { WizardAnswers } from '../reducer';
 
-function modelDisplay(modelId: string): string {
-  const entry = MODEL_CATALOG.find((m) => m.modelId === modelId);
-  if (!entry || entry.contextWindow === 0) return modelId;
-  return `${modelId} · ${formatContextWindow(entry.contextWindow)}`;
+function modelDisplay(catalog: ModelCatalog | undefined, modelId: string): string {
+  const contextWindow = lookupContextWindow(catalog, modelId);
+  if (!contextWindow) return modelId;
+  return `${modelId} · ${formatContextWindow(contextWindow)}`;
 }
 
 export function SummaryStep({ answers, onNext }: { answers: WizardAnswers; onNext: () => void }) {
   const accent = answers.personalityId ? personalityAccent(answers.personalityId) : '#4A9EFF';
+  const { data: catalog } = useModelCatalog();
 
   return (
     <section className="onboarding-step-content">
@@ -29,7 +35,7 @@ export function SummaryStep({ answers, onNext }: { answers: WizardAnswers; onNex
           {answers.model ? (
             <div className="onboarding-summary-row">
               <dt>Model</dt>
-              <dd className="onboarding-summary-mono">{modelDisplay(answers.model)}</dd>
+              <dd className="onboarding-summary-mono">{modelDisplay(catalog, answers.model)}</dd>
             </div>
           ) : null}
           {answers.personalityId ? (

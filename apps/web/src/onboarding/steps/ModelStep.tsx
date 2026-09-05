@@ -1,6 +1,11 @@
 import { Button } from 'antd';
 import { useState } from 'react';
-import { formatContextWindow, LOW_CONTEXT_THRESHOLD, modelsForProvider } from '../catalog/models';
+import {
+  formatContextWindow,
+  LOW_CONTEXT_THRESHOLD,
+  modelsForProvider,
+  useModelCatalog,
+} from '../catalog/models';
 import type { CatalogProviderId } from '../catalog/providers';
 import type { WizardAnswers } from '../reducer';
 
@@ -12,21 +17,25 @@ export function ModelStep({
   onNext: (patch: Partial<WizardAnswers>) => void;
 }) {
   const providerId = (answers.provider as CatalogProviderId | undefined) ?? 'anthropic';
-  const catalogModels = modelsForProvider(providerId);
+  const { data: catalog } = useModelCatalog();
+  const catalogModels = modelsForProvider(catalog, providerId);
   const validatedModels = answers.models ?? [];
 
   // Build display list: catalog entries + "Other" for validated models not in catalog
   const catalogModelIds = new Set(catalogModels.map((m) => m.modelId));
   const otherModelIds = validatedModels.filter((id) => !catalogModelIds.has(id));
 
-  const defaultModel =
-    answers.model ??
+  // The catalog arrives asynchronously, so the default is derived rather than
+  // captured in state: an explicit choice wins, then the catalog default once
+  // it loads, then the first validated id (also the offline/loading list).
+  const [choice, setChoice] = useState<string | undefined>(answers.model);
+  const selected =
+    choice ??
     catalogModels.find((m) => m.default)?.modelId ??
     validatedModels[0] ??
     catalogModels[0]?.modelId ??
     '';
-
-  const [selected, setSelected] = useState(defaultModel);
+  const setSelected = setChoice;
   const selectedEntry = catalogModels.find((m) => m.modelId === selected);
   const lowContext = selectedEntry && selectedEntry.contextWindow < LOW_CONTEXT_THRESHOLD;
 

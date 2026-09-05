@@ -1,4 +1,12 @@
+import { useQuery } from '@tanstack/react-query';
+import { rpc } from '../../rpc';
 import type { CatalogProviderId } from './providers';
+
+// The onboarding model list is the server's catalog (packages/wiring
+// MODEL_CATALOG via the models.catalog RPC) — there is no browser-side copy
+// to drift from it. Same query key as the Personalities page so the two
+// share one cache entry.
+export type ModelCatalog = Awaited<ReturnType<typeof rpc.models.catalog>>;
 
 export interface ModelCatalogEntry {
   providerId: CatalogProviderId;
@@ -8,94 +16,37 @@ export interface ModelCatalogEntry {
   default?: boolean;
 }
 
-export const MODEL_CATALOG: ModelCatalogEntry[] = [
-  // Anthropic
-  {
-    providerId: 'anthropic',
-    modelId: 'claude-opus-4-7',
-    label: 'Claude Opus 4.7',
-    contextWindow: 200_000,
-  },
-  {
-    providerId: 'anthropic',
-    modelId: 'claude-sonnet-4-6',
-    label: 'Claude Sonnet 4.6',
-    contextWindow: 200_000,
-    default: true,
-  },
-  {
-    providerId: 'anthropic',
-    modelId: 'claude-haiku-4-5-20251001',
-    label: 'Claude Haiku 4.5',
-    contextWindow: 200_000,
-  },
-  {
-    providerId: 'anthropic',
-    modelId: 'claude-opus-4-5',
-    label: 'Claude Opus 4.5',
-    contextWindow: 200_000,
-  },
-  // OpenAI (wires as openai-compat)
-  {
-    providerId: 'openai',
-    modelId: 'gpt-4o',
-    label: 'GPT-4o',
-    contextWindow: 128_000,
-    default: true,
-  },
-  { providerId: 'openai', modelId: 'gpt-4o-mini', label: 'GPT-4o Mini', contextWindow: 128_000 },
-  { providerId: 'openai', modelId: 'gpt-4-turbo', label: 'GPT-4 Turbo', contextWindow: 128_000 },
-  { providerId: 'openai', modelId: 'o1', label: 'o1', contextWindow: 200_000 },
-  { providerId: 'openai', modelId: 'o3-mini', label: 'o3-mini', contextWindow: 200_000 },
-  // OpenRouter
-  {
-    providerId: 'openrouter',
-    modelId: 'anthropic/claude-sonnet-4-6',
-    label: 'Claude Sonnet 4.6',
-    contextWindow: 200_000,
-    default: true,
-  },
-  { providerId: 'openrouter', modelId: 'openai/gpt-4o', label: 'GPT-4o', contextWindow: 128_000 },
-  {
-    providerId: 'openrouter',
-    modelId: 'meta-llama/llama-3.3-70b-instruct',
-    label: 'Llama 3.3 70B',
-    contextWindow: 128_000,
-  },
-  {
-    providerId: 'openrouter',
-    modelId: 'google/gemini-2.5-pro',
-    label: 'Gemini 2.5 Pro',
-    contextWindow: 1_000_000,
-  },
-  // Ollama (no fixed catalog — users get their local models)
-  // Codex
-  { providerId: 'codex', modelId: 'gpt-5.4', label: 'GPT-5.4', contextWindow: 0 },
-  {
-    providerId: 'codex',
-    modelId: 'gpt-5.4-mini',
-    label: 'GPT-5.4 Mini',
-    contextWindow: 0,
-    default: true,
-  },
-  { providerId: 'codex', modelId: 'gpt-5.3-codex', label: 'GPT-5.3 Codex', contextWindow: 0 },
-  { providerId: 'codex', modelId: 'gpt-5.2-codex', label: 'GPT-5.2 Codex', contextWindow: 0 },
-  {
-    providerId: 'codex',
-    modelId: 'gpt-5.1-codex-max',
-    label: 'GPT-5.1 Codex Max',
-    contextWindow: 0,
-  },
-  {
-    providerId: 'codex',
-    modelId: 'gpt-5.1-codex-mini',
-    label: 'GPT-5.1 Codex Mini',
-    contextWindow: 0,
-  },
-];
+export function useModelCatalog() {
+  return useQuery({
+    queryKey: ['models', 'catalog'],
+    queryFn: () => rpc.models.catalog(),
+  });
+}
 
-export function modelsForProvider(providerId: CatalogProviderId): ModelCatalogEntry[] {
-  return MODEL_CATALOG.filter((m) => m.providerId === providerId);
+export function modelsForProvider(
+  catalog: ModelCatalog | undefined,
+  providerId: CatalogProviderId,
+): ModelCatalogEntry[] {
+  const models = catalog?.providers[providerId]?.models ?? [];
+  return models.map((m) => ({
+    providerId,
+    modelId: m.id,
+    label: m.label,
+    contextWindow: m.contextWindow,
+    ...(m.default ? { default: true } : {}),
+  }));
+}
+
+/** Context window for a model id across every provider; undefined on a miss. */
+export function lookupContextWindow(
+  catalog: ModelCatalog | undefined,
+  modelId: string,
+): number | undefined {
+  for (const provider of Object.values(catalog?.providers ?? {})) {
+    const hit = provider.models.find((m) => m.id === modelId);
+    if (hit) return hit.contextWindow;
+  }
+  return undefined;
 }
 
 export function formatContextWindow(n: number): string {

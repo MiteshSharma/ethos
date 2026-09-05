@@ -5,7 +5,7 @@ kind: how-to
 audience: user
 slug: use-chatgpt-subscription-via-codex
 time: "5 min"
-updated: 2026-05-17
+updated: 2026-09-05
 ---
 
 ## Task
@@ -76,6 +76,20 @@ codex exec --cd <workingDir> "implement a debounce hook in apps/web/src/hooks/..
 ```
 
 Codex output streams back through the agent loop's `tool_progress` channel. You'll see the same stream-and-edit cadence Codex produces in standalone mode.
+
+#### Pick a model
+
+Codex defaults to `gpt-5.6-terra`. To pin a different one, name it in the prompt and the adapter passes `--model` through:
+
+| Model | Use for |
+|---|---|
+| `gpt-5.6-terra` | Default — everyday, balanced |
+| `gpt-5.6-luna` | Fast, cheap — well-scoped edits |
+| `gpt-5.6-sol` | Flagship — complex, multi-file work |
+| `gpt-6-astra` | Top reasoning |
+| `gpt-5.5` | Prior generation |
+
+GPT-5.4 and GPT-5.4 mini retired from Codex sign-in on 2026-08-31 — a delegation that names them fails with an unknown-model error; see [developers.openai.com/codex/models](https://developers.openai.com/codex/models).
 
 ### 5. Confirm the bill landed where you wanted
 
