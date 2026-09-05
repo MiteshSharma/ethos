@@ -1212,6 +1212,116 @@ export const KanbanAgentSchema = z.object({
 export type KanbanAgent = z.infer<typeof KanbanAgentSchema>;
 
 // ---------------------------------------------------------------------------
+// Teams — the team altitude (plan/phases/teams-as-a-scope.md §7, §9)
+//
+// A team as the browser sees it: the kanban summary plus what the manifest
+// and `<team>.runtime.json` say about its members. Everything here is derived
+// from files the supervisor already writes; nothing is stored for the UI.
+// ---------------------------------------------------------------------------
+
+/** `MemberStatus` from the runtime file, plus `offline` for "not in it". */
+export const TeamMemberStatusSchema = z.enum([
+  'starting',
+  'running',
+  'degraded',
+  'restarting',
+  'failed',
+  'stopped',
+  'offline',
+]);
+export type TeamMemberStatus = z.infer<typeof TeamMemberStatusSchema>;
+
+export const TeamMemberSummarySchema = z.object({
+  personalityId: z.string(),
+  role: z.enum(['coordinator', 'member']),
+  /** Autonomy tier from the board's member stats; null when the team has no board yet. */
+  tier: z.enum(['probationary', 'standard', 'trusted']).nullable(),
+  /** From the runtime file; `offline` when the team is not started or the member is absent. */
+  status: TeamMemberStatusSchema,
+  capabilities: z.array(z.string()),
+});
+export type TeamMemberSummary = z.infer<typeof TeamMemberSummarySchema>;
+
+export const TeamChannelSchema = z.object({
+  platform: z.string(),
+  botKey: z.string(),
+});
+export type TeamChannel = z.infer<typeof TeamChannelSchema>;
+
+export const TeamSummarySchema = KanbanTeamSummarySchema.extend({
+  /** `manifest.coordinator ?? members[0]`; null for an empty broadcast/self-routing team. */
+  coordinator: z.string().nullable(),
+  members: z.array(TeamMemberSummarySchema),
+  channels: z.array(TeamChannelSchema),
+  /** ISO-8601 supervisor start time from the runtime file; null when stopped. */
+  startedAt: z.string().nullable(),
+});
+export type TeamSummary = z.infer<typeof TeamSummarySchema>;
+
+export const TeamTrustPolicySchema = z.object({
+  mode: z.enum(['flat', 'tiered']),
+  thresholds: z
+    .object({
+      standard_min_completed: z.number().int().nonnegative().optional(),
+      standard_min_ratio: z.number().min(0).max(1).optional(),
+      trusted_min_completed: z.number().int().nonnegative().optional(),
+      trusted_min_ratio: z.number().min(0).max(1).optional(),
+    })
+    .optional(),
+});
+export type TeamTrustPolicy = z.infer<typeof TeamTrustPolicySchema>;
+
+export const TeamRuntimeSchema = z.object({
+  supervisorPid: z.number().int(),
+  startedAt: z.string(),
+  members: z.array(
+    z.object({
+      personality: z.string(),
+      port: z.number().int(),
+      pid: z.number().int().nullable(),
+      status: z.string(),
+      failureCount: z.number().int(),
+    }),
+  ),
+});
+export type TeamRuntimeView = z.infer<typeof TeamRuntimeSchema>;
+
+export const TeamDetailSchema = TeamSummarySchema.extend({
+  /** The manifest source file, verbatim — not a re-serialisation. */
+  manifestYaml: z.string(),
+  manifestPath: z.string(),
+  trustPolicy: TeamTrustPolicySchema.nullable(),
+  /** Dispatcher tuning with the supervisor's defaults filled in. */
+  kanban: z.object({
+    staleMs: z.number().int(),
+    pollMs: z.number().int(),
+    stalenessThresholdMs: z.number().int(),
+  }),
+  /** Team-memory topic names (`<topic>.md` under `teams/<name>/memory/`, without the suffix). */
+  memoryTopics: z.array(z.string()),
+  runtime: TeamRuntimeSchema.nullable(),
+});
+export type TeamDetail = z.infer<typeof TeamDetailSchema>;
+
+export const LedgerSeveritySchema = z.enum(['ok', 'warn', 'err', 'info', 'dim']);
+export type LedgerSeverity = z.infer<typeof LedgerSeveritySchema>;
+
+/** One supervisor-voiced line derived from a `task_events` row (§7). */
+export const LedgerEventSchema = z.object({
+  /** The underlying `task_events.id`. */
+  id: z.number().int(),
+  at: z.string(), // ISO-8601
+  kind: z.string(),
+  taskId: z.string().nullable(),
+  taskTitle: z.string().nullable(),
+  personalityId: z.string().nullable(),
+  headline: z.string(),
+  detail: z.string(),
+  severity: LedgerSeveritySchema,
+});
+export type LedgerEvent = z.infer<typeof LedgerEventSchema>;
+
+// ---------------------------------------------------------------------------
 // API Keys — Control-Plane SDK auth
 //
 // Metadata returned by the admin namespace. The plaintext secret is only

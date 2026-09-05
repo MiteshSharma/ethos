@@ -250,7 +250,7 @@ register_anchors:
     - { path: packages/safety/injection/src/downgrade.ts, line: 23, contains: "export function resolveDowngradedTools" }
     - { path: packages/core/src/agent-loop/stages/context-assembly.ts, line: 422, contains: "deps.safety.injection.prelude" }
     - { path: packages/core/src/agent-loop.ts, line: 648, contains: "resolveDowngradedTools(dgConfig?.tools)" }
-    - { path: packages/core/src/agent-loop/stages/tool-processing.ts, line: 722, contains: "await handleUntrustedResult(" }
+    - { path: packages/core/src/agent-loop/stages/tool-processing.ts, line: 723, contains: "await handleUntrustedResult(" }
     - { path: packages/core/src/agent-loop/result-defense.ts, line: 26, contains: "export async function handleUntrustedResult" }
 
   G-SEC:
@@ -274,7 +274,7 @@ register_anchors:
     - { path: packages/wiring/src/danger-predicate.ts, line: 241, contains: "SMART_MODE_CONSEQUENTIAL_TOOLS" }
     - { path: packages/wiring/src/smart-approver.ts, line: 144, contains: "reviewer gave no usable verdict" }
     - { path: packages/wiring/src/smart-approver.ts, line: 149, contains: "reviewer error (fail-closed)" }
-    - { path: packages/core/src/agent-loop/stages/per-call-enforcement.ts, line: 40, contains: "export async function enforceBeforeToolCall" }
+    - { path: packages/core/src/agent-loop/stages/per-call-enforcement.ts, line: 43, contains: "export async function enforceBeforeToolCall" }
     - { path: packages/core/src/hook-registry.ts, line: 94, contains: "async fireModifying" }
     - { path: packages/wiring/src/approval-seams.ts, line: 106, contains: "export function createApprovalDangerPredicate" }
     - { path: packages/core/src/agent-loop/approval-posture.ts, line: 38, contains: "export function createApprovalPostureGuard" }

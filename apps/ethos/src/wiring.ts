@@ -449,7 +449,8 @@ export async function createLLM(
 }
 
 export async function createAgentLoop(
-  config: EthosConfig & Pick<WiringConfig, 'teamName' | 'role' | 'postmortems' | 'trustPolicy'>,
+  config: EthosConfig &
+    Pick<WiringConfig, 'teamName' | 'role' | 'coordinatorId' | 'postmortems' | 'trustPolicy'>,
   opts: {
     profile?: WiringProfile;
     meshRegistryPath?: string;
@@ -513,6 +514,7 @@ export async function createAgentLoop(
     ...rotated,
     ...(config.teamName !== undefined ? { teamName: config.teamName } : {}),
     ...(config.role !== undefined ? { role: config.role } : {}),
+    ...(config.coordinatorId !== undefined ? { coordinatorId: config.coordinatorId } : {}),
     ...(config.auxiliary?.compression
       ? { auxiliaryCompression: config.auxiliary.compression }
       : {}),
@@ -588,6 +590,8 @@ export interface TeamLoopInfo {
    * configured call capture, same as the non-team `createAgentLoop` path.
    */
   runCallCapture?: import('@ethosagent/wiring').CreateAgentLoopResult['runCallCapture'];
+  /** Re-load this loop's personality registry — same seam `createAgentLoop` returns. */
+  refreshPersonalities: import('@ethosagent/wiring').CreateAgentLoopResult['refreshPersonalities'];
 }
 
 /** Resolve a team manifest by name (local ./team.yaml or ~/.ethos/teams/<n>.yaml). */
@@ -645,12 +649,14 @@ export async function createTeamAgentLoop(
     jobStore,
     backgroundExecutor,
     runCallCapture,
+    refreshPersonalities,
   } = await createAgentLoop(
     {
       ...coordinatorConfig,
       personality: coordinatorPersonality,
       teamName,
       role: opts.role ?? 'coordinator',
+      coordinatorId: coordinatorPersonality,
       postmortems: manifest.postmortems,
       trustPolicy: manifest.trust_policy,
     },
@@ -678,6 +684,7 @@ export async function createTeamAgentLoop(
     ...(jobStore ? { jobStore } : {}),
     ...(backgroundExecutor ? { backgroundExecutor } : {}),
     ...(runCallCapture ? { runCallCapture } : {}),
+    refreshPersonalities,
   };
 }
 

@@ -26,6 +26,9 @@ export interface BeforeToolCallInput {
   /** Set when the turn arrived as speech — forwarded verbatim onto the hook
    *  payload so the danger predicate can apply the spoken-confirmation gate. */
   voiceOrigin?: VoiceTurnOrigin;
+  /** The turn's personality — forwarded onto the hook payload so a gate on a
+   *  loop shared across personalities can authorise the actual caller. */
+  personalityId?: string;
 }
 
 export type BeforeToolCallDecision =
@@ -49,6 +52,7 @@ export async function enforceBeforeToolCall(
       toolName: input.toolName,
       args: input.args,
       ...(input.voiceOrigin ? { voiceOrigin: input.voiceOrigin } : {}),
+      ...(input.personalityId !== undefined ? { personalityId: input.personalityId } : {}),
     },
     input.allowedPlugins,
   );

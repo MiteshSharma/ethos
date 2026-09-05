@@ -90,4 +90,8 @@ describe('buildNewSessionPath', () => {
   it('url-encodes special characters in the id', () => {
     expect(buildNewSessionPath('team architect')).toBe('/p/team%20architect/chat?new=1');
   });
+
+  it('stays in the team Chat pane when given its path (teams-as-a-scope T4)', () => {
+    expect(buildNewSessionPath('cmo', '/t/marketing/chat')).toBe('/t/marketing/chat?new=1');
+  });
 });

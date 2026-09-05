@@ -3,12 +3,22 @@ import { useFenceResolver } from '../../features/renderers/resolver';
 import type { AssistantTurn, ChatMessage } from '../../lib/chat-reducer';
 import { SaveToDashboardContextMenu } from '../dashboard/SaveToDashboardContextMenu';
 import { SaveToDashboardModal } from '../dashboard/SaveToDashboardModal';
+import { TeamRing } from '../ui/TeamRing';
 import { AssistantBubble, UserBubble } from './MessageBubble';
 import type { RunSurface } from './RunCard';
 
 // Scrollable history. Auto-scrolls to the bottom as content arrives —
 // but only when the user was already pinned to the bottom, so reading
 // older messages doesn't get yanked back down by every text_delta.
+
+/** The team Chat pane's empty state (plan/phases/teams-as-a-scope.md §8):
+ *  the team's ring and name, and who answers for it. */
+export interface MessageListTeamContext {
+  teamName: string;
+  /** Member accents in manifest order — what the ring is built from. */
+  accents: string[];
+  coordinatorName: string;
+}
 
 export interface MessageListProps {
   messages: ChatMessage[];
@@ -23,6 +33,8 @@ export interface MessageListProps {
   onTryVoice?: () => void;
   /** Live delegated-run state for the transcript's run anchors (§4.1). */
   runSurface?: RunSurface;
+  /** Present on the team Chat pane — swaps the empty state for the team's. */
+  teamContext?: MessageListTeamContext;
 }
 
 export function MessageList({
@@ -34,6 +46,7 @@ export function MessageList({
   onSuggestPrompt,
   onTryVoice,
   runSurface,
+  teamContext,
 }: MessageListProps) {
   const listRef = useRef<HTMLDivElement>(null);
   const pinnedToBottomRef = useRef(true);
@@ -74,6 +87,9 @@ export function MessageList({
   }, [messages.length, currentTurn]);
 
   if (messages.length === 0 && !currentTurn) {
+    if (teamContext) {
+      return <TeamEmptyState teamContext={teamContext} onSuggestPrompt={onSuggestPrompt} />;
+    }
     return (
       <EmptyState
         personalityId={personalityId}
@@ -184,6 +200,44 @@ const DEFAULT_PILLS = [
   'Search memory',
   'Run a skill',
 ] as const;
+
+// Team-shaped suggestions: questions you ask a team's coordinator, not a
+// single agent (§8 "Chat").
+const TEAM_PILLS = [
+  'Who is on what right now?',
+  'What needs me?',
+  'What did we decide this week?',
+  "Give me today's summary",
+] as const;
+
+function TeamEmptyState({
+  teamContext,
+  onSuggestPrompt,
+}: {
+  teamContext: MessageListTeamContext;
+  onSuggestPrompt?: (prompt: string) => void;
+}) {
+  return (
+    <div className="message-list-empty team-chat-empty">
+      <TeamRing accents={teamContext.accents} size={48} title={teamContext.teamName} />
+      <div className="empty-state-name">{teamContext.teamName}</div>
+      <div className="empty-state-model">{teamContext.coordinatorName} answers for the team</div>
+      <div className="empty-state-tagline">Ready.</div>
+      <div className="empty-state-pills">
+        {TEAM_PILLS.map((p) => (
+          <button
+            key={p}
+            type="button"
+            className="empty-state-pill"
+            onClick={() => onSuggestPrompt?.(p)}
+          >
+            {p}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
 
 function EmptyState({
   personalityId,

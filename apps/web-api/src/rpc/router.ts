@@ -44,6 +44,7 @@ import { recipesRouter } from './recipes';
 import { skillsRouter } from './skills';
 import { slashCommandsRouter } from './slash-commands';
 import { tasksRouter } from './tasks';
+import { teamsRouter } from './teams';
 import { toolSettingsRouter } from './tool-settings';
 import { toolsRouter } from './tools';
 import { voiceRouter } from './voice';
@@ -92,6 +93,7 @@ export const apiRouter = {
   batch: batchRouter,
   eval: evalRouter,
   kanban: kanbanRouter,
+  teams: teamsRouter,
   tasks: tasksRouter,
   apiKeys: apiKeysRouter,
   meta: metaRouter,

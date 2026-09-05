@@ -175,7 +175,11 @@ describe('Orchestrator guardrails', () => {
       // every tool call twice. One field, plus the comment recording why the
       // link cannot come from the span id (generated inside the store) or from
       // the in-memory `spanIds` map (never persisted).
-      if (lineCount > 816) {
+      // Bumped 816 -> 817 (teams-as-a-scope, role gate per-turn): the turn's
+      // `personalityId` is forwarded onto the `before_tool_call` payload — one
+      // conditional spread; the role resolution lives in
+      // extensions/tools-kanban/src/role-gate.ts.
+      if (lineCount > 817) {
         violations.push(`${file}: ${lineCount} lines`);
       }
     }

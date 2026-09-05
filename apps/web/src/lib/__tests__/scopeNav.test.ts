@@ -2,11 +2,13 @@ import { describe, expect, it } from 'vitest';
 import {
   capitalize,
   currentAltitude,
+  extractTeamId,
   extractWorkspacePersonalityId,
   filterRecentSessions,
   formatFraction,
   type RecentSessionRow,
   resolveBreadcrumb,
+  TEAM_PANES,
 } from '../scopeNav';
 
 // P1b — plan/phases/personality-first-ui.md. AltitudeRail + ScopeNav chrome
@@ -35,6 +37,44 @@ describe('extractWorkspacePersonalityId', () => {
   it('returns null for the bare root', () => {
     expect(extractWorkspacePersonalityId('/')).toBeNull();
   });
+
+  it('extracts the id from a workspace inside a team (teams-as-a-scope T1)', () => {
+    expect(extractWorkspacePersonalityId('/t/marketing/p/reddit-scout/chat')).toBe('reddit-scout');
+    expect(extractWorkspacePersonalityId('/t/marketing/p/reddit-scout/goals/g-1')).toBe(
+      'reddit-scout',
+    );
+  });
+
+  it('accepts the bare forms with no trailing pane', () => {
+    expect(extractWorkspacePersonalityId('/t/marketing/p/reddit-scout')).toBe('reddit-scout');
+    expect(extractWorkspacePersonalityId('/p/engineer')).toBe('engineer');
+  });
+
+  it('returns null at the team altitude (no /p/ segment)', () => {
+    expect(extractWorkspacePersonalityId('/t/marketing/overview')).toBeNull();
+    expect(extractWorkspacePersonalityId('/t/marketing')).toBeNull();
+  });
+});
+
+describe('extractTeamId', () => {
+  it('extracts the team from a team-altitude route', () => {
+    expect(extractTeamId('/t/marketing/overview')).toBe('marketing');
+  });
+
+  it('extracts the team from a workspace inside a team', () => {
+    expect(extractTeamId('/t/marketing/p/reddit-scout/chat')).toBe('marketing');
+  });
+
+  it('accepts the bare /t/:teamId', () => {
+    expect(extractTeamId('/t/marketing')).toBe('marketing');
+  });
+
+  it('returns null for an independent workspace and at Library', () => {
+    expect(extractTeamId('/p/engineer/chat')).toBeNull();
+    expect(extractTeamId('/teams')).toBeNull();
+    expect(extractTeamId('/teams/marketing')).toBeNull();
+    expect(extractTeamId('/')).toBeNull();
+  });
 });
 
 describe('currentAltitude — the accent-lifting decision', () => {
@@ -42,9 +82,19 @@ describe('currentAltitude — the accent-lifting decision', () => {
     expect(currentAltitude('/p/engineer/skills')).toBe('workspace');
   });
 
+  it('is "workspace" inside a member workspace within a team — the accent wrapper keys off this (D9)', () => {
+    expect(currentAltitude('/t/marketing/p/reddit-scout/chat')).toBe('workspace');
+  });
+
+  it('is "team" inside a team route with no /p/ segment', () => {
+    expect(currentAltitude('/t/marketing/overview')).toBe('team');
+    expect(currentAltitude('/t/marketing')).toBe('team');
+  });
+
   it('is "library" everywhere else', () => {
     expect(currentAltitude('/skills')).toBe('library');
     expect(currentAltitude('/personalities')).toBe('library');
+    expect(currentAltitude('/teams/marketing')).toBe('library');
     expect(currentAltitude('/')).toBe('library');
   });
 });
@@ -138,11 +188,75 @@ describe('resolveBreadcrumb', () => {
     });
   });
 
+  it('team altitude: "{team} / {pane}" for every team pane', () => {
+    for (const pane of TEAM_PANES) {
+      expect(resolveBreadcrumb(`/t/marketing/${pane.key}`, null, 'Marketing')).toEqual({
+        altitude: 'team',
+        scopeLabel: 'Marketing',
+        paneLabel: pane.label,
+      });
+    }
+  });
+
+  it('team altitude: falls back to the capitalized id when the team name has not loaded', () => {
+    expect(resolveBreadcrumb('/t/marketing/board', null)).toEqual({
+      altitude: 'team',
+      scopeLabel: 'Marketing',
+      paneLabel: 'Board',
+    });
+  });
+
+  it('team altitude: a bare /t/:teamId reads as Overview, and an unknown pane is capitalized', () => {
+    expect(resolveBreadcrumb('/t/marketing', null, 'Marketing')?.paneLabel).toBe('Overview');
+    expect(resolveBreadcrumb('/t/marketing/future', null, 'Marketing')?.paneLabel).toBe('Future');
+  });
+
+  it('workspace inside a team: team root, agent middle crumb, workspace pane (D6)', () => {
+    expect(
+      resolveBreadcrumb('/t/marketing/p/reddit-scout/chat', 'Reddit Scout', 'Marketing'),
+    ).toEqual({
+      altitude: 'workspace',
+      scopeLabel: 'Marketing',
+      personalityLabel: 'Reddit Scout',
+      paneLabel: 'Chat',
+    });
+  });
+
+  it('workspace inside a team: both names fall back to capitalized ids', () => {
+    expect(resolveBreadcrumb('/t/marketing/p/reddit-scout/goals/g-1', null)).toEqual({
+      altitude: 'workspace',
+      scopeLabel: 'Marketing',
+      personalityLabel: 'Reddit-scout',
+      paneLabel: 'Goals',
+    });
+  });
+
+  it('independent workspace: no personalityLabel — the agent is already the root', () => {
+    expect(resolveBreadcrumb('/p/engineer/skills', 'Engineer')).not.toHaveProperty(
+      'personalityLabel',
+    );
+  });
+
   it('returns null for chromeless flow routes (onboarding, setup, signing-in, oauth)', () => {
     expect(resolveBreadcrumb('/onboarding', null)).toBeNull();
     expect(resolveBreadcrumb('/setup/provider', null)).toBeNull();
     expect(resolveBreadcrumb('/signing-in', null)).toBeNull();
     expect(resolveBreadcrumb('/oauth/callback', null)).toBeNull();
+  });
+});
+
+describe('TEAM_PANES', () => {
+  it('lists the team column in row order (plan §3)', () => {
+    expect(TEAM_PANES.map((p) => p.key)).toEqual([
+      'chat',
+      'overview',
+      'board',
+      'structure',
+      'memory',
+      'activity',
+      'channels',
+      'settings',
+    ]);
   });
 });
 
@@ -257,5 +371,37 @@ describe('filterRecentSessions — scoped in a workspace, unscoped at Library (P
   it('an empty query returns everything in scope', () => {
     const { pinned, unpinned } = filterRecentSessions(sessions, '   ', null);
     expect(pinned.length + unpinned.length).toBe(4);
+  });
+
+  it('at the team altitude (member set, no active workspace), keeps only members’ sessions', () => {
+    const team = new Set(['engineer', 'writer']);
+    const { pinned, unpinned } = filterRecentSessions(sessions, '', null, team);
+    expect(pinned.map((s) => s.id)).toEqual(['s1', 's4']);
+    expect(unpinned.map((s) => s.id)).toEqual(['s3']);
+  });
+
+  it('a session with no personality is never a team session', () => {
+    const orphan: RecentSessionRow = {
+      id: 's5',
+      title: 'Orphan',
+      key: 'k5',
+      personalityId: null,
+      updatedAt: '2026-08-05T00:00:00Z',
+      pinned: false,
+    };
+    const { unpinned } = filterRecentSessions([...sessions, orphan], '', null, new Set(['writer']));
+    expect(unpinned.map((s) => s.id)).toEqual(['s3']);
+  });
+
+  it('inside a member workspace within a team, the active personality wins over the member set', () => {
+    const team = new Set(['engineer', 'writer']);
+    const { pinned, unpinned } = filterRecentSessions(sessions, '', 'writer', team);
+    expect(pinned).toEqual([]);
+    expect(unpinned.map((s) => s.id)).toEqual(['s3']);
+  });
+
+  it('the text filter still applies on top of the member set', () => {
+    const { pinned } = filterRecentSessions(sessions, 'flaky', null, new Set(['engineer']));
+    expect(pinned.map((s) => s.id)).toEqual(['s4']);
   });
 });

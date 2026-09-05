@@ -4,6 +4,7 @@ import { voiceLaneKey } from '@ethosagent/core';
 import type { PersonalityConfig } from '@ethosagent/types';
 import type { AgentTurnRunner, VoiceSession } from '@ethosagent/voice-session';
 import type { VoiceStack } from '@ethosagent/wiring';
+import { runOnLoop } from '../features/chat/team-loops';
 import type { VoiceLaneSessionOpener } from './voice-lane';
 
 // Opens the browser PIPELINE lane's `VoiceSession` — the pipeline-tier twin of
@@ -41,6 +42,12 @@ export interface BrowserVoiceSessionDeps {
   /** The turn driver. `AgentLoop.run()` satisfies `AgentTurnRunner`
    *  structurally once bound to a lane key and a personality. */
   agentLoop: AgentLoop;
+  /**
+   * Per-personality loop resolution (teams-as-a-scope D4): a spoken turn for
+   * a team member runs on its team's loop. Absent → `agentLoop` drives every
+   * turn.
+   */
+  loopFor?: (personalityId: string | undefined) => Promise<AgentLoop>;
   personalities: { get(id: string): PersonalityConfig | undefined };
   /** Bot this web surface answers as. Same single-bot-per-process rule the
    *  realtime tier's `createRealtimeControlDeps` uses. */
@@ -97,18 +104,21 @@ export function createBrowserVoiceSessionOpener(
       fallbackId: fallbackClientId,
     });
     const personality = info.personalityId ? deps.personalities.get(info.personalityId) : undefined;
+    const loop = deps.loopFor ? deps.loopFor(info.personalityId) : Promise.resolve(deps.agentLoop);
     const runner: AgentTurnRunner = {
       run: (text, runOpts) =>
-        deps.agentLoop.run(text, {
-          sessionKey: laneKey,
-          ...(info.personalityId ? { personalityId: info.personalityId } : {}),
-          ...(runOpts?.abortSignal ? { abortSignal: runOpts.abortSignal } : {}),
-          ...(runOpts?.modelOverride ? { modelOverride: runOpts.modelOverride } : {}),
-          // Same stamp `chat.send({origin:'voice'})` and the realtime tier
-          // use: the operator's own browser session, behind the same auth as
-          // the rest of the surface.
-          voiceOrigin: { transport: 'browser-talk-mode', speaker: 'owner' },
-        }),
+        runOnLoop(loop, (agentLoop) =>
+          agentLoop.run(text, {
+            sessionKey: laneKey,
+            ...(info.personalityId ? { personalityId: info.personalityId } : {}),
+            ...(runOpts?.abortSignal ? { abortSignal: runOpts.abortSignal } : {}),
+            ...(runOpts?.modelOverride ? { modelOverride: runOpts.modelOverride } : {}),
+            // Same stamp `chat.send({origin:'voice'})` and the realtime tier
+            // use: the operator's own browser session, behind the same auth as
+            // the rest of the surface.
+            voiceOrigin: { transport: 'browser-talk-mode', speaker: 'owner' },
+          }),
+        ),
     };
 
     // `surface: 'browser'` — since L1 (plan §7 "Conflict 2"), this lane tunes

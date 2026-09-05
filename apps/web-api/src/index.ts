@@ -40,6 +40,7 @@ import { formatRunHandBack } from './features/chat/handback';
 import { resolveJobSessionId } from './features/chat/job-session';
 import { ChatRepository } from './features/chat/repository';
 import { type ChatDefaults, ChatService } from './features/chat/service';
+import { runOnLoop, type TeamLoopHandle, TeamLoopRegistry } from './features/chat/team-loops';
 import { CompletionsRepository } from './features/completions/repository';
 import { CompletionsService } from './features/completions/service';
 import { DebugService } from './features/debug/service';
@@ -91,6 +92,7 @@ import { RecipesService } from './services/recipes.service';
 import { SkillsService } from './services/skills.service';
 import { SystemEventBus } from './services/system-event-bus';
 import { TasksService } from './services/tasks.service';
+import { TeamsService } from './services/teams.service';
 import { ToolSettingsService } from './services/tool-settings.service';
 import { VoiceService } from './services/voice.service';
 import { VoiceLaneModeService } from './services/voice-lane-mode.service';
@@ -145,6 +147,17 @@ export interface CreateWebApiOptions {
    *  hooks, providers etc. (typically via `@ethosagent/wiring`). When omitted
    *  (onboarding mode), a stub loop that yields a SETUP_REQUIRED error is used. */
   agentLoop?: AgentLoop;
+  /**
+   * Team-scoped loop factory (plan/phases/teams-as-a-scope.md D4, §9). The
+   * composition root builds one loop per team on demand — `ethos serve` hands
+   * in `createTeamAgentLoop` — so a chat turn for a personality that belongs
+   * to a team runs with that team's board, memory, role gate and `ctx.teamId`.
+   * Absent → every turn runs on `agentLoop`, as before.
+   */
+  createTeamLoop?: (teamName: string) => Promise<TeamLoopHandle>;
+  /** The team `agentLoop` already runs as (`ethos serve --team <name>`); its
+   *  members stay on `agentLoop` rather than getting a second loop. */
+  mainLoopTeam?: string;
   /** Loop-bearing goal runner from `createAgentLoop`. When provided, web-created
    *  goals execute on the same runner+store as the CLI/gateway path. */
   goalRunner?: GoalRunner;
@@ -565,6 +578,8 @@ export interface CreateWebApiResult {
    * (plan/phases/idle-watcher.md §1 check #12).
    */
   pendingApprovalCount: () => number;
+  /** Dispose every lazily built team loop (D4). No-op without `createTeamLoop`. */
+  disposeTeamLoops: () => Promise<void>;
 }
 
 export function createWebApi(opts: CreateWebApiOptions): CreateWebApiResult {
@@ -745,6 +760,30 @@ export function createWebApi(opts: CreateWebApiOptions): CreateWebApiResult {
     }).store,
   });
   const kanbanService = new KanbanService({ mesh, hooks: agentLoop.hooks });
+  const teamsService = new TeamsService({ kanban: kanbanService, storage });
+  // Per-team loop map (D4). Membership comes from the same read model
+  // `teams.list` serves, so the two never disagree about who is on a team.
+  // `wireTurnLoop` (below) gives each built loop the same web hooks the main
+  // loop gets; it is declared later and only ever runs after boot.
+  const teamLoops = opts.createTeamLoop
+    ? new TeamLoopRegistry({
+        factory: opts.createTeamLoop,
+        listTeams: async () =>
+          (await teamsService.list()).items.map((t) => ({
+            name: t.name,
+            members: t.members.map((m) => m.personalityId),
+            coordinator: t.coordinator,
+          })),
+        ...(opts.mainLoopTeam ? { mainLoopTeam: opts.mainLoopTeam } : {}),
+        onCreate: (_teamName, handle) => wireTurnLoop(handle.loop, handle.notificationRouter),
+      })
+    : undefined;
+  /** The loop a turn for `personalityId` runs on — its team's, else the main one. */
+  const loopForPersonality = async (personalityId: string | undefined): Promise<AgentLoop> => {
+    if (!teamLoops || !personalityId) return agentLoop;
+    const handle = await teamLoops.handleFor(personalityId);
+    return handle?.loop ?? agentLoop;
+  };
   const tasksService = new TasksService(opts.jobStore ? { store: opts.jobStore } : {});
   const apiKeysService = new ApiKeysService(opts.apiKeys ?? null);
   // Phase 2 — global named-secrets vault + generic per-tool settings surface.
@@ -898,6 +937,8 @@ export function createWebApi(opts: CreateWebApiOptions): CreateWebApiResult {
         {
           voiceStack: opts.voiceStack,
           agentLoop,
+          // A spoken turn for a team member runs on its team's loop too (D4).
+          loopFor: loopForPersonality,
           personalities: opts.personalities,
           legacyBargeInTuning,
         },
@@ -975,16 +1016,19 @@ export function createWebApi(opts: CreateWebApiOptions): CreateWebApiResult {
         if (!config) return { exists: false, privileged: true };
         return { exists: true, privileged: isPrivilegedPersonality(config) };
       },
+      // A wake turn for a team member runs on its team's loop (D4).
       runTurn: ({ text, sessionKey, personalityId, signal }) =>
-        agentLoop.run(text, {
-          sessionKey,
-          personalityId,
-          abortSignal: signal,
-          // A wake turn IS a spoken turn even though the transcript is text by
-          // the time the loop sees it — the annotation is what the approval
-          // gate reads to tell a spoken request from a typed one.
-          voiceOrigin: { transport: 'satellite-wake', speaker: 'owner' },
-        }),
+        runOnLoop(loopForPersonality(personalityId), (loop) =>
+          loop.run(text, {
+            sessionKey,
+            personalityId,
+            abortSignal: signal,
+            // A wake turn IS a spoken turn even though the transcript is text by
+            // the time the loop sees it — the annotation is what the approval
+            // gate reads to tell a spoken request from a typed one.
+            voiceOrigin: { transport: 'satellite-wake', speaker: 'owner' },
+          }),
+        ),
       voiceMode: (laneKey) => voiceLaneModeService.getForLane(laneKey),
       // One bot identity per web-api, the same single value the browser
       // realtime lane assumes (`createRealtimeControlDeps`).
@@ -1109,6 +1153,7 @@ export function createWebApi(opts: CreateWebApiOptions): CreateWebApiResult {
     systemBus,
     ...(opts.attachmentCache ? { attachmentCache: opts.attachmentCache } : {}),
     ...(opts.refreshPersonalities ? { refreshPersonalities: opts.refreshPersonalities } : {}),
+    ...(teamLoops ? { teamLoops } : {}),
   });
   buffer.onReap = (sessionId) => {
     chatService.forget(sessionId);
@@ -1120,10 +1165,12 @@ export function createWebApi(opts: CreateWebApiOptions): CreateWebApiResult {
   // `sessionId` (what the SSE buffer is keyed by) and `sessionKey` (what the
   // router routes by) are known. Deregistration piggybacks on the buffer's
   // onReap (which already drives chatService.forget).
-  if (opts.notificationRouter && opts.agentLoop) {
-    const router = opts.notificationRouter;
+  const wireNotificationRouter = (
+    loop: AgentLoop,
+    router: import('@ethosagent/types').NotificationRouter,
+  ): void => {
     const sessionKeysById = new Map<string, string>();
-    agentLoop.hooks.registerVoid('session_start', async (payload) => {
+    loop.hooks.registerVoid('session_start', async (payload) => {
       sessionKeysById.set(payload.sessionId, payload.sessionKey);
       router.register(payload.sessionKey, {
         send: async (message: string) => {
@@ -1145,6 +1192,9 @@ export function createWebApi(opts: CreateWebApiOptions): CreateWebApiResult {
       }
       originalOnReap?.(sessionId);
     };
+  };
+  if (opts.notificationRouter && opts.agentLoop) {
+    wireNotificationRouter(agentLoop, opts.notificationRouter);
   }
 
   // Bridge approvals → SSE. The hook fires when the agent reaches a
@@ -1172,10 +1222,13 @@ export function createWebApi(opts: CreateWebApiOptions): CreateWebApiResult {
   // `BackgroundJob.parentSessionKey` into the same session id the same way.
   const sessionIdsByKey = new Map<string, string>();
   const sessionKeysById = new Map<string, string>();
-  agentLoop.hooks.registerVoid('session_start', async (payload) => {
-    sessionIdsByKey.set(payload.sessionKey, payload.sessionId);
-    sessionKeysById.set(payload.sessionId, payload.sessionKey);
-  });
+  const trackSessionKeys = (loop: AgentLoop): void => {
+    loop.hooks.registerVoid('session_start', async (payload) => {
+      sessionIdsByKey.set(payload.sessionKey, payload.sessionId);
+      sessionKeysById.set(payload.sessionId, payload.sessionKey);
+    });
+  };
+  trackSessionKeys(agentLoop);
   const previousOnReapForSessionKeys = buffer.onReap;
   buffer.onReap = (sessionId: string) => {
     const key = sessionKeysById.get(sessionId);
@@ -1198,8 +1251,7 @@ export function createWebApi(opts: CreateWebApiOptions): CreateWebApiResult {
   // job's `childSessionKey` — not a session the SSE buffer knows about. For
   // that case, resolve the job's `parentSessionKey` and translate it through
   // the map above instead.
-  const clarifyBridge = agentLoop.clarifyBridge;
-  if (clarifyBridge) {
+  const presentClarify = (clarifyBridge: NonNullable<AgentLoop['clarifyBridge']>): void => {
     clarifyBridge.registerPresenter('web', async (req) => {
       // ClarifyBridge.presentNow() awaits this presenter inside a bare
       // `.catch(() => {})` (see clarify-bridge.ts) — a throw here is
@@ -1255,7 +1307,9 @@ export function createWebApi(opts: CreateWebApiOptions): CreateWebApiResult {
     // registered — hydrate() only adopts rows this bridge can present).
     void clarifyBridge.hydrate();
     void clarifyBridge.sweep();
-  }
+  };
+  const clarifyBridge = agentLoop.clarifyBridge;
+  if (clarifyBridge) presentClarify(clarifyBridge);
 
   // Bridge delegated runs → SSE (pi-delegation G9/D11/D20 = I15, §4.9/D27 = I18).
   //
@@ -1347,14 +1401,39 @@ export function createWebApi(opts: CreateWebApiOptions): CreateWebApiResult {
   // the web profile skips that registration so this hook is the sole
   // gatekeeper for dangerous calls. Without a predicate (e.g. tests) every
   // tool call passes through unattended.
-  if (opts.dangerPredicate) {
-    agentLoop.hooks.registerModifying(
+  const registerApprovalHook = (loop: AgentLoop): void => {
+    if (!opts.dangerPredicate) return;
+    loop.hooks.registerModifying(
       'before_tool_call',
       createWebApprovalHook({
         approvals: approvalsService,
         isDangerous: opts.dangerPredicate,
       }),
     );
+  };
+  registerApprovalHook(agentLoop);
+
+  // A team loop built by `teamLoops` (D4) gets the same per-loop web hooks the
+  // main loop got above: its notification router, session key ↔ id tracking
+  // (clarify + run hand-back need it), its clarify presenter, and the web
+  // approval hook. Hoisted declaration on purpose — it is only ever invoked
+  // after boot, from the registry's `onCreate`.
+  //
+  // Not re-wired for team loops: `opts.dangerPredicate` learns each session's
+  // personality from `session_start` on the registries it was BUILT with (the
+  // main loop's), so on a team loop an unknown session falls back to the
+  // predicate's `manual` default — it asks, never applies another
+  // personality's `approvalMode: 'off'`. The realtime voice tier and the
+  // batch `voice.runTurn` RPC stay on the main loop (their tool registry and
+  // hooks are bound at construction).
+  function wireTurnLoop(
+    loop: AgentLoop,
+    router: import('@ethosagent/types').NotificationRouter | undefined,
+  ): void {
+    if (router) wireNotificationRouter(loop, router);
+    trackSessionKeys(loop);
+    if (loop.clarifyBridge) presentClarify(loop.clarifyBridge);
+    registerApprovalHook(loop);
   }
 
   const app = createRoutes({
@@ -1379,6 +1458,7 @@ export function createWebApi(opts: CreateWebApiOptions): CreateWebApiResult {
       platforms: platformsService,
       lab: labService,
       kanban: kanbanService,
+      teams: teamsService,
       tasks: tasksService,
       completions: completionsService,
       debug: debugService,
@@ -1466,6 +1546,7 @@ export function createWebApi(opts: CreateWebApiOptions): CreateWebApiResult {
     satelliteSocket,
     forceSettleApprovals: () => approvalsService.forceSettleAll(),
     pendingApprovalCount: () => approvalsService.pendingCount(),
+    disposeTeamLoops: () => teamLoops?.disposeAll() ?? Promise.resolve(),
   };
 }
 
@@ -1518,6 +1599,7 @@ function createPassiveMcpManager(): McpManager {
 }
 
 export { type ChatDefaults, ChatService } from './features/chat/service';
+export { type TeamLoopHandle, TeamLoopRegistry } from './features/chat/team-loops';
 // Re-exports so boot code can read tokens / inspect contract surfaces directly.
 export type { WakeRoute, WakeRoutingTable } from './repositories/config.repository';
 export { WebTokenRepository } from './repositories/web-token.repository';

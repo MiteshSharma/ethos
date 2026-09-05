@@ -1,4 +1,7 @@
 import './styles.css';
+import './styles/team-panes.css';
+import './styles/team-structure.css';
+import './styles/team-chat.css';
 import { tokensToAntd, tokensToCssVariables } from '@ethosagent/design-tokens/antd';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { App as AntApp, ConfigProvider, type ThemeConfig } from 'antd';

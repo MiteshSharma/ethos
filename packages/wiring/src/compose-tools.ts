@@ -1062,6 +1062,7 @@ export async function composeAllTools(
         role: config.role,
         personalityId: activePerson.id,
         store: kanbanStore,
+        ...(config.coordinatorId !== undefined ? { coordinatorId: config.coordinatorId } : {}),
       }),
     );
   }

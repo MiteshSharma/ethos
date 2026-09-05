@@ -66,6 +66,7 @@ import {
   createWebApi,
   IdempotencyStore,
   type RouteModule,
+  type TeamLoopHandle,
   WebTokenRepository,
 } from '@ethosagent/web-api';
 import {
@@ -1037,6 +1038,36 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
     getObservabilityStore().recordHttpRequest(method, status);
   };
 
+  // Team-scoped loops for web chat (plan/phases/teams-as-a-scope.md D4, §9).
+  // web-api never composes a loop (Law 5); it asks this factory for one per
+  // team, on the first turn of a personality that belongs to that team.
+  //
+  // ONE loop per team, built as the coordinator. The role gate
+  // (`createKanbanRoleGateHook`, extensions/tools-kanban/src/role-gate.ts)
+  // resolves the caller PER TURN: the loop stamps the turn's personality on
+  // every `before_tool_call` payload, and `createTeamAgentLoop` hands the
+  // gate the manifest's coordinator id, so a turn is authorised as
+  // `coordinator` iff its personality is the coordinator, else `member`
+  // (plan §9). A member completing its own ticket from the web is therefore
+  // allowed, and a member's turn cannot reach coordinator-only tools. The
+  // coordinator prompt (`before_prompt_build`) keys on the turn's personality
+  // the same way, so member turns do not get it.
+  //
+  // Not threaded (same as the `--team` coordinator path above): serve's cron
+  // scheduler and watcher manager, so the agent-callable `cron`/`watcher_*`
+  // tools on a team loop are not bound to this process's engines.
+  const createTeamLoop = async (teamName: string): Promise<TeamLoopHandle> => {
+    const team = await createTeamAgentLoop(config, teamName, {
+      profile: loopProfile,
+      role: 'coordinator',
+    });
+    return {
+      loop: team.loop,
+      refreshPersonalities: team.refreshPersonalities,
+      notificationRouter: team.notificationRouter,
+    };
+  };
+
   const created = buildServeWebApi({
     config,
     dir,
@@ -1048,6 +1079,10 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
     attachmentCache,
     apiKeys,
     idempotencyStore,
+    createTeamLoop,
+    // With `--team`, `loop` IS that team's loop already; keep that behaviour
+    // and let the registry skip it.
+    ...(teamFlag ? { mainLoopTeam: teamFlag } : {}),
     toolRegistry,
     mcpManager,
     pluginLoader,
@@ -1118,7 +1153,11 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
   const exposureWarning = formatNonLoopbackWarning(webHost, port);
   if (exposureWarning) console.warn(`\n${exposureWarning}`);
   webShutdown = () =>
-    Promise.all([created.voiceSocket.close(), created.satelliteSocket.close()]).then(
+    Promise.all([
+      created.voiceSocket.close(),
+      created.satelliteSocket.close(),
+      created.disposeTeamLoops(),
+    ]).then(
       () =>
         new Promise<void>((resolve) => {
           server.close(() => resolve());
@@ -1804,6 +1843,14 @@ export interface BuildServeWebApiOptions {
   a2aPeering: ReturnType<typeof buildA2aPeeringService>;
   isA2aEnabled: () => boolean;
   setA2aEnabled: (enabled: boolean) => Promise<void>;
+  /**
+   * Team-scoped loop factory for web chat (teams-as-a-scope D4). Optional so
+   * the merged `ethos boot` profile, which does not build team loops, is
+   * unchanged.
+   */
+  createTeamLoop?: (teamName: string) => Promise<TeamLoopHandle>;
+  /** `--team <name>` — the team `loop` already runs as; the registry skips it. */
+  mainLoopTeam?: string;
 }
 
 /**
@@ -1860,6 +1907,8 @@ export function buildServeWebApi(opts: BuildServeWebApiOptions): ReturnType<type
     a2aPeering,
     isA2aEnabled,
     setA2aEnabled,
+    createTeamLoop,
+    mainLoopTeam,
   } = opts;
   return createWebApi({
     dataDir: dir,
@@ -1867,6 +1916,10 @@ export function buildServeWebApi(opts: BuildServeWebApiOptions): ReturnType<type
     sessionStore: session,
     contextLog,
     personalitiesLlm: () => createLLM(config),
+    // Per-team loops for web chat (D4): a team member's turn runs on its
+    // team's loop, built on demand through this factory.
+    ...(createTeamLoop ? { createTeamLoop } : {}),
+    ...(mainLoopTeam ? { mainLoopTeam } : {}),
     memoryProvider: createMemoryProvider({
       dataDir: dir,
       storage: getStorage(),

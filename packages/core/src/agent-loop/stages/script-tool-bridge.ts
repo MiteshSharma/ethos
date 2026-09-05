@@ -215,7 +215,9 @@ export class ScriptToolBridge {
     // Step 2 — the single production `before_tool_call` fire site. A rejection
     // returns {ok:false} to the script; NO tool_result persistence — inner
     // calls never appear as tool_use blocks, so the Anthropic contract binds
-    // nothing here.
+    // nothing here. The turn's personality rides the payload (same as the
+    // batch path) so a gate on a shared team loop authorises the real caller.
+    const callerPersonality = getCtx().personalityId;
     const decision = await enforceBeforeToolCall(
       { hooks: d.hooks, observability: d.observability },
       {
@@ -225,6 +227,7 @@ export class ScriptToolBridge {
         args,
         allowedPlugins: d.allowedPlugins,
         traceId: d.traceId,
+        ...(callerPersonality !== undefined ? { personalityId: callerPersonality } : {}),
       },
     );
     if (!decision.allowed) {

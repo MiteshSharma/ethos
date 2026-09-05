@@ -42,6 +42,7 @@ import {
   KanbanTaskStatusSchema,
   KanbanTeamSummarySchema,
   KeyCategorySchema,
+  LedgerEventSchema,
   McpAddServerInputSchema,
   McpAddServerOutputSchema,
   McpAttachInputSchema,
@@ -103,6 +104,8 @@ import {
   SkillSchema,
   SlackAppEntrySchema,
   StoredMessageSchema,
+  TeamDetailSchema,
+  TeamSummarySchema,
   TelegramBotEntrySchema,
   WhatsAppEntrySchema,
 } from './schemas';
@@ -2903,6 +2906,57 @@ const kanban = {
 };
 
 // ---------------------------------------------------------------------------
+// Teams — the team altitude (plan/phases/teams-as-a-scope.md §9)
+//
+// Read-only over the manifest, runtime file and board, plus thin wrappers
+// over the team-scoped memory provider (`scopeId = team:<name>`). The
+// supervisor ledger is a labelling of `task_events` rows, newest first.
+// ---------------------------------------------------------------------------
+
+const TeamsListOutput = z.object({ items: z.array(TeamSummarySchema) });
+
+const TeamsGetInput = z.object({ team: z.string().min(1) });
+
+const TeamsLedgerInput = z.object({
+  team: z.string().min(1),
+  /** Newest-first cap. */
+  limit: z.number().int().min(1).max(200).default(50),
+  /** Only lines that concern this member (the member sheet's filter). */
+  personalityId: z.string().min(1).optional(),
+});
+const TeamsLedgerOutput = z.object({ items: z.array(LedgerEventSchema) });
+
+/** A team-memory topic name: the file's basename without `.md`. */
+const TeamMemoryKeySchema = z.string().regex(/^[A-Za-z0-9_-]+$/);
+
+const TeamsMemoryListInput = z.object({ team: z.string().min(1) });
+const TeamsMemoryListOutput = z.object({ items: z.array(z.object({ key: z.string() })) });
+
+const TeamsMemoryReadInput = z.object({ team: z.string().min(1), key: TeamMemoryKeySchema });
+/** `content` is `''` when the topic does not exist. */
+const TeamsMemoryReadOutput = z.object({ key: z.string(), content: z.string() });
+
+const TeamsMemoryWriteInput = z.object({
+  team: z.string().min(1),
+  key: TeamMemoryKeySchema,
+  /** `add` appends, `replace` overwrites, `delete` removes the topic file. */
+  action: z.enum(['add', 'replace', 'delete']),
+  /** Required for `add` and `replace`. */
+  content: z.string().optional(),
+});
+const TeamsMemoryWriteOutput = z.object({ ok: z.literal(true) });
+
+/** @experimental */
+const teams = {
+  list: oc.output(TeamsListOutput),
+  get: oc.input(TeamsGetInput).output(TeamDetailSchema),
+  ledger: oc.input(TeamsLedgerInput).output(TeamsLedgerOutput),
+  memoryList: oc.input(TeamsMemoryListInput).output(TeamsMemoryListOutput),
+  memoryRead: oc.input(TeamsMemoryReadInput).output(TeamsMemoryReadOutput),
+  memoryWrite: oc.input(TeamsMemoryWriteInput).output(TeamsMemoryWriteOutput),
+};
+
+// ---------------------------------------------------------------------------
 // API Keys — admin CRUD (cookie-auth-gated only)
 //
 // Minting, listing, and revoking API keys for external Mission Controls.
@@ -4428,6 +4482,7 @@ export const contract = {
   batch,
   eval: evalNs,
   kanban,
+  teams,
   apiKeys,
   meta,
   models,

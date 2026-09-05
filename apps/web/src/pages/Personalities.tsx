@@ -56,6 +56,9 @@ import { TabSaveBar } from '../components/personality/TabSaveBar';
 import { ToolDetailModal } from '../components/personality/ToolDetailModal';
 import { PersonalityMark } from '../components/ui/PersonalityMark';
 import { PersonalityRingAvatar } from '../components/ui/PersonalityRingAvatar';
+import { TeamRing } from '../components/ui/TeamRing';
+import { useTeamMembership } from '../features/teams/api/queries';
+import { teamAccents } from '../features/teams/lib/membership';
 import { useCreateFlag } from '../hooks/useCreateFlag';
 import { toolAffordance } from '../lib/execution-posture';
 import { wizardFsReach } from '../lib/personalityFsReach';
@@ -65,6 +68,7 @@ import {
   categorizeGroup,
   categoryDetail,
 } from '../lib/toolset-categories';
+import { buildTeamPath } from '../lib/workspaceRoutes';
 import { rpc } from '../rpc';
 
 // Shape of one suggestion entry returned by the models.catalog RPC.
@@ -119,6 +123,11 @@ export function Personalities() {
     queryKey: ['personalities', 'list'],
     queryFn: () => rpc.personalities.list({}),
   });
+  // teams-as-a-scope T1 (§10, D3): a personality in a team is listed under
+  // "In a team" — dimmed, with the team's ring — and opens the team's scope;
+  // only the independent ones keep the full row. Derived from `teams.list`,
+  // never stored on the personality.
+  const membership = useTeamMembership();
 
   if (listQuery.isLoading) {
     return (
@@ -139,6 +148,8 @@ export function Personalities() {
   const defaultId = listQuery.data?.defaultId ?? null;
   const userPersonalities = personalities.filter((p) => !p.system);
   const systemPersonalities = personalities.filter((p) => p.system);
+  const inTeam = userPersonalities.filter((p) => membership.byPersonality.has(p.id));
+  const independent = userPersonalities.filter((p) => !membership.byPersonality.has(p.id));
 
   const columns = [
     {
@@ -251,9 +262,19 @@ export function Personalities() {
         </button>
       </header>
 
+      {membership.teams.length > 0 ? (
+        <div className="personalities-group-label">
+          Independent
+          <span className="personalities-group-sub">
+            {' '}
+            · {independent.length} {independent.length === 1 ? 'personality' : 'personalities'} in
+            no team
+          </span>
+        </div>
+      ) : null}
       <Table<Personality>
         rowKey="id"
-        dataSource={userPersonalities}
+        dataSource={independent}
         pagination={false}
         size="small"
         locale={{
@@ -266,6 +287,67 @@ export function Personalities() {
         }}
         columns={columns}
       />
+
+      {inTeam.length > 0 ? (
+        <>
+          <div className="personalities-group-label">
+            In a team
+            <span className="personalities-group-sub">
+              {' '}
+              · shown under their team's scope, not here
+            </span>
+          </div>
+          <Table<Personality>
+            rowKey="id"
+            dataSource={inTeam}
+            pagination={false}
+            size="small"
+            showHeader={false}
+            rowClassName={() => 'personalities-row-in-team'}
+            columns={[
+              ...columns.slice(0, 2),
+              {
+                title: 'Team',
+                key: 'team',
+                render: (_: unknown, p: Personality) => (
+                  <span className="personalities-team-chips">
+                    {(membership.byPersonality.get(p.id) ?? []).map((team) => (
+                      <button
+                        key={team.name}
+                        type="button"
+                        className="personalities-team-chip"
+                        onClick={() => navigate(buildTeamPath(team.name))}
+                      >
+                        <TeamRing accents={teamAccents(team)} size={12} title={team.name} />
+                        {team.name}
+                        {team.coordinator === p.id ? ' · coordinator' : ''}
+                      </button>
+                    ))}
+                  </span>
+                ),
+              },
+              {
+                title: '',
+                key: 'open',
+                width: 120,
+                align: 'right' as const,
+                render: (_: unknown, p: Personality) => {
+                  const first = membership.byPersonality.get(p.id)?.[0];
+                  return first ? (
+                    <button
+                      type="button"
+                      className="personalities-open-team"
+                      onClick={() => navigate(buildTeamPath(first.name))}
+                    >
+                      open team →
+                    </button>
+                  ) : null;
+                },
+              },
+            ]}
+          />
+        </>
+      ) : null}
 
       {systemPersonalities.length > 0 ? (
         <>

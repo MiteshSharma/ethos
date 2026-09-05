@@ -87,6 +87,16 @@ export interface BeforeToolCallPayload {
    * `speaker` is `far_end`.
    */
   voiceOrigin?: VoiceTurnOrigin;
+  /**
+   * Personality running the TURN that issued this call. Set by the loop on
+   * both fire sites (the LLM batch path and the script bridge). It rides the
+   * payload for the same reason `voiceOrigin` does: a loop shared by several
+   * personalities (one team-scoped loop per team, teams-as-a-scope D4) runs
+   * a different personality per turn, and only the loop knows which one. The
+   * kanban role gate reads it to authorise the caller instead of the
+   * personality the loop was constructed with.
+   */
+  personalityId?: string;
 }
 
 export interface BeforeToolCallResult {

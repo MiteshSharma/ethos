@@ -13,6 +13,7 @@ import { ACTIVITY_EVENT_TYPES } from '@ethosagent/web-contracts';
 import type { SystemEventBus } from '../../services/system-event-bus';
 import { gateStructuredCard } from './card-gate';
 import type { ChatRepository } from './repository';
+import type { TeamLoopRegistry } from './team-loops';
 
 // Chat orchestrator. The one place that touches `AgentBridge` per the spec
 // (architecture rule #6). Three jobs:
@@ -79,6 +80,13 @@ export interface ChatServiceOptions {
    */
   refreshPersonalities?: () => Promise<void>;
   /**
+   * Per-team loop map (plan/phases/teams-as-a-scope.md D4, §9). When wired, a
+   * turn whose personality belongs to a team runs on that team's loop — team
+   * board, `team_memory_*`, role gate, `ctx.teamId` — and every other turn
+   * runs on `loop` as before. Absent → every turn runs on `loop`.
+   */
+  teamLoops?: TeamLoopRegistry;
+  /**
    * Called on every completed turn (`done` event). Boot code wires this to
    * the W4.1 funnel tracker (`funnel.first_reply`) — the tracker itself
    * no-ops after the first stamp, so the callback stays cheap.
@@ -144,6 +152,8 @@ const ACTIVITY_KEY = '__activity__';
 
 export class ChatService {
   private readonly bridges = new Map<string, AgentBridge>();
+  /** sessionId -> the loop its bridge was built on, so a re-route rebuilds it. */
+  private readonly bridgeLoops = new Map<string, AgentLoop>();
   private readonly firstUserMessages = new Map<string, string>();
   private readonly emitter = new EventEmitter<InternalEventMap>();
   /**
@@ -189,7 +199,12 @@ export class ChatService {
       this.firstUserMessages.set(session.id, input.text);
     }
 
-    const bridge = this.getOrCreateBridge(session.id);
+    // The loop IS the scope (D4): a team member's turn runs on its team's
+    // loop whichever URL the browser reached it from. Resolved before the
+    // bridge so the bridge is bound to the loop the turn actually runs on.
+    const personalityId = input.personalityId ?? session.personalityId ?? undefined;
+    const runtime = await this.resolveLoop(personalityId);
+    const bridge = this.getOrCreateBridge(session.id, runtime.loop);
 
     const MAX_ATTACHMENTS = 10;
     const MAX_TOTAL_BYTES = 10 * 1024 * 1024; // 10 MB
@@ -251,7 +266,7 @@ export class ChatService {
     // (e.g. malformed personality YAML on disk) must not abort the turn — serve
     // the last-good registry (stale-but-alive beats a dead turn).
     try {
-      await this.opts.refreshPersonalities?.();
+      await runtime.refreshPersonalities?.();
     } catch (err) {
       console.warn(
         `[chat] personality refresh failed (serving last-good): ${err instanceof Error ? err.message : String(err)}`,
@@ -459,6 +474,7 @@ export class ChatService {
       bridge.abortTurn();
       this.bridges.delete(sessionId);
     }
+    this.bridgeLoops.delete(sessionId);
     this.firstUserMessages.delete(sessionId);
     this.pendingHandBacks.delete(sessionId);
     this.sessionPersonalityIds.delete(sessionId);
@@ -486,13 +502,56 @@ export class ChatService {
     return session;
   }
 
-  private getOrCreateBridge(sessionId: string): AgentBridge {
-    const existing = this.bridges.get(sessionId);
-    if (existing) return existing;
+  /**
+   * Which loop runs a turn for `personalityId`: the team loop when the
+   * personality belongs to a team and a registry is wired, else the main loop.
+   * A team loop that fails to build is an error, not a silent fallback — a
+   * team member answering WITHOUT its board and team memory is exactly the
+   * confusion D4 exists to prevent.
+   */
+  private async resolveLoop(
+    personalityId: string | undefined,
+  ): Promise<{ loop: AgentLoop; refreshPersonalities?: () => Promise<void> }> {
+    const main = {
+      loop: this.opts.loop,
+      ...(this.opts.refreshPersonalities
+        ? { refreshPersonalities: this.opts.refreshPersonalities }
+        : {}),
+    };
+    if (!this.opts.teamLoops || !personalityId) return main;
+    const teamName = await this.opts.teamLoops.teamFor(personalityId);
+    if (teamName === null) return main;
+    try {
+      const handle = await this.opts.teamLoops.loopFor(teamName);
+      return {
+        loop: handle.loop,
+        ...(handle.refreshPersonalities
+          ? { refreshPersonalities: handle.refreshPersonalities }
+          : {}),
+      };
+    } catch (err) {
+      throw new EthosError({
+        code: 'CONFIG_INVALID',
+        cause: `Team "${teamName}" loop failed to start for ${personalityId}: ${err instanceof Error ? err.message : String(err)}`,
+        action: `Fix the team manifest (~/.ethos/teams/${teamName}.yaml) and retry.`,
+      });
+    }
+  }
 
-    const bridge = new AgentBridge(this.opts.loop);
+  private getOrCreateBridge(sessionId: string, loop: AgentLoop): AgentBridge {
+    const existing = this.bridges.get(sessionId);
+    if (existing && this.bridgeLoops.get(sessionId) === loop) return existing;
+    if (existing) {
+      // The session was re-routed (its personality changed team). The bridge
+      // is bound to one loop, so rebuild it on the new one.
+      existing.removeAllListeners();
+      this.bridges.delete(sessionId);
+    }
+
+    const bridge = new AgentBridge(loop);
     this.wireBridge(sessionId, bridge);
     this.bridges.set(sessionId, bridge);
+    this.bridgeLoops.set(sessionId, loop);
     return bridge;
   }
 

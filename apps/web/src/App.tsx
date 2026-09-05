@@ -1,6 +1,6 @@
 import { useQueryClient } from '@tanstack/react-query';
 import { ConfigProvider } from 'antd';
-import { useCallback, useEffect, useState } from 'react';
+import { type ReactNode, useCallback, useEffect, useRef, useState } from 'react';
 import {
   Navigate,
   Route,
@@ -19,17 +19,36 @@ import { RightDrawer } from './components/RightDrawer';
 import { ScopeNav } from './components/ScopeNav';
 import { StageHeader } from './components/StageHeader';
 import { StatusBar } from './components/StatusBar';
+import {
+  LegacyTeamRedirect,
+  TeamHomeRedirect,
+  TeamMemberRedirect,
+  TeamScopeGuard,
+} from './components/TeamRouteGuards';
+import { NeedsYouPill } from './components/team/NeedsYouPill';
+import { SupervisorStatus } from './components/team/SupervisorStatus';
 import { useConfig, useOnboardingState } from './features/config/api/queries';
 import { useGoalDetail } from './features/goals/api/queries';
 import { useSessionGet } from './features/sessions/api/queries';
+import { useCrossHighlight } from './hooks/useCrossHighlight';
 import { useNewSessionModal } from './hooks/useNewSessionModal';
 import { usePushEventToasts } from './hooks/usePushEventToasts';
 import { useRunStream } from './hooks/useRunStream';
 import { useSessionTitleSync } from './hooks/useSessionTitleSync';
 import { bridge, isDesktop } from './lib/desktop';
-import { getLastPersonalityId, setLastPersonalityId } from './lib/lastPersonality';
+import {
+  clearLastTeamId,
+  getLastPersonalityId,
+  setLastPersonalityId,
+  setLastTeamId,
+} from './lib/lastPersonality';
 import { runsNeedingYou } from './lib/pi-run-reducer';
-import { extractWorkspacePersonalityId } from './lib/scopeNav';
+import {
+  extractTeamId,
+  extractWorkspacePersonalityId,
+  TEAM_PANES,
+  type TeamPaneKey,
+} from './lib/scopeNav';
 import { accentVars, personalityAccent, personalityTheme } from './lib/theme';
 import {
   buildIdentityRedirectPath,
@@ -73,15 +92,56 @@ import { Skills } from './pages/Skills';
 import { SettingsPaneRoute } from './pages/settings/SettingsPaneRoute';
 import { SettingsShell } from './pages/settings/SettingsShell';
 import { Tasks } from './pages/Tasks';
-import { TeamControlCenter } from './pages/TeamControlCenter';
 import { TeamCreate } from './pages/TeamCreate';
 import { Teams } from './pages/Teams';
+import { TeamActivity } from './pages/team/TeamActivity';
+import { TeamBoard } from './pages/team/TeamBoard';
+import { TeamChannels } from './pages/team/TeamChannels';
+import { TeamChat } from './pages/team/TeamChat';
+import { TeamMemory } from './pages/team/TeamMemory';
+import { TeamOverview } from './pages/team/TeamOverview';
+import { TeamSettings } from './pages/team/TeamSettings';
+import { TeamStructure } from './pages/team/TeamStructure';
 import { rpc } from './rpc';
 
 // Top-level route map. v0 ships only Talk-group routes (Chat + Sessions)
 // plus the onboarding flow and the signing-in placeholder. v0.5 adds the
 // right-side activity drawer and the surfaces it observes (Skills, Mesh
 // — landing alongside this commit). Lab / System groups arrive in v1.
+
+// The workspace route table — ONE list rendered under both prefixes
+// (`/p/:personalityId/…` and, teams-as-a-scope T1 D6, `/t/:teamId/p/
+// :personalityId/…`), so a member's workspace inside a team is the same
+// twelve pages by construction, never a hand-copied second list.
+const WORKSPACE_ROUTES: ReadonlyArray<{ path: string; element: ReactNode }> = [
+  { path: 'chat', element: <ChatRoute /> },
+  { path: 'sessions', element: <Sessions /> },
+  { path: 'memory', element: <Memory /> },
+  { path: 'documents', element: <Documents /> },
+  { path: 'schedule', element: <Cron /> },
+  { path: 'goals', element: <Goals /> },
+  { path: 'goals/:goalId', element: <GoalDetail /> },
+  { path: 'tasks', element: <Tasks /> },
+  { path: 'skills', element: <Skills /> },
+  { path: 'mcp', element: <Mcp /> },
+  { path: 'plugins', element: <Plugins /> },
+  { path: 'activity', element: <Activity /> },
+  { path: 'identity', element: <PersonalityDetail /> },
+];
+
+// T1 placeholders for the team panes (`/t/:teamId/<pane>`), keyed by
+// `TEAM_PANES` so the route table and the column can't disagree; T2/T3
+// swap the bodies.
+const TEAM_PANE_ELEMENTS: Record<TeamPaneKey, ReactNode> = {
+  chat: <TeamChat />,
+  overview: <TeamOverview />,
+  board: <TeamBoard />,
+  structure: <TeamStructure />,
+  memory: <TeamMemory />,
+  activity: <TeamActivity />,
+  channels: <TeamChannels />,
+  settings: <TeamSettings />,
+};
 
 const DRAWER_BREAKPOINT = 1280; // px — plan IA: drawer "default visible ≥1280px"
 // P1b's AltitudeRail + ScopeNav have no collapsed mode of their own — the
@@ -111,6 +171,13 @@ export function App() {
   const { pathname } = useLocation();
   const isChat = isChatPathname(pathname);
   const workspacePersonalityId = extractWorkspacePersonalityId(pathname);
+  const teamId = extractTeamId(pathname);
+
+  // teams-as-a-scope T4 (D12): one delegated hover handler on the shell
+  // root lights up every `data-p` carrier of the hovered member, across
+  // panes. Only inside a team — at the Library the attribute is inert.
+  const shellRef = useRef<HTMLDivElement>(null);
+  useCrossHighlight(shellRef, teamId !== null);
 
   // Remember the last personality workspace the user was inside — the `/`
   // and `/chat` fallback chain's second link (P1a), after `?session=` and
@@ -118,6 +185,13 @@ export function App() {
   useEffect(() => {
     if (workspacePersonalityId) setLastPersonalityId(workspacePersonalityId);
   }, [workspacePersonalityId]);
+
+  // And the last team scope (teams-as-a-scope T1) — set on every
+  // `/t/:teamId/…` route, cleared the moment the user is back at Independent.
+  useEffect(() => {
+    if (teamId) setLastTeamId(teamId);
+    else clearLastTeamId();
+  }, [teamId]);
 
   // Hide the activity drawer when crossing below the breakpoint it needs
   // grid space at. We don't *force* it open/closed on every resize tick —
@@ -174,7 +248,12 @@ export function App() {
     needsYou: runsNeedingYou(runs.runs).length,
   };
 
-  const shellClass = ['app-shell', drawerOpen ? 'drawer-open' : ''].filter(Boolean).join(' ');
+  // The drawer column is reserved only where `RightDrawer` is mounted (chat
+  // routes, below) — every other route (Library, team panes) keeps the full
+  // stage width instead of a blank right third.
+  const shellClass = ['app-shell', isChat && drawerOpen ? 'drawer-open' : '']
+    .filter(Boolean)
+    .join(' ');
 
   // Per DESIGN.md's P0 amendment: global chrome (the rail) stays neutral
   // forever; the contextual column and the stage carry the active scope's
@@ -186,7 +265,18 @@ export function App() {
   const scopeAndStage = (
     <>
       <ScopeNav needsYouCount={runStream.needsYou} />
-      <StageHeader />
+      {/* T4 (D11): the Needs-you pill lives at the TEAM altitude only — a
+          member's workspace inside the team keeps the plain breadcrumb. */}
+      <StageHeader
+        needsYouSlot={
+          teamId && !workspacePersonalityId ? (
+            <>
+              <NeedsYouPill teamId={teamId} />
+              <SupervisorStatus teamId={teamId} />
+            </>
+          ) : undefined
+        }
+      />
       <main className="app-main">
         <Routes>
           <Route path="/" element={<ChatRedirect />} />
@@ -196,19 +286,34 @@ export function App() {
               page bodies; StatusBar/MobileTabBar are unchanged. (Sidebar
               rendered this chrome at P1a time — P1b replaces it with
               AltitudeRail + ScopeNav, see the shell's return below.) */}
-          <Route path="/p/:personalityId/chat" element={<ChatRoute />} />
-          <Route path="/p/:personalityId/sessions" element={<Sessions />} />
-          <Route path="/p/:personalityId/memory" element={<Memory />} />
-          <Route path="/p/:personalityId/documents" element={<Documents />} />
-          <Route path="/p/:personalityId/schedule" element={<Cron />} />
-          <Route path="/p/:personalityId/goals" element={<Goals />} />
-          <Route path="/p/:personalityId/goals/:goalId" element={<GoalDetail />} />
-          <Route path="/p/:personalityId/tasks" element={<Tasks />} />
-          <Route path="/p/:personalityId/skills" element={<Skills />} />
-          <Route path="/p/:personalityId/mcp" element={<Mcp />} />
-          <Route path="/p/:personalityId/plugins" element={<Plugins />} />
-          <Route path="/p/:personalityId/activity" element={<Activity />} />
-          <Route path="/p/:personalityId/identity" element={<PersonalityDetail />} />
+          {WORKSPACE_ROUTES.map((r) => (
+            <Route
+              key={`p:${r.path}`}
+              path={`/p/:personalityId/${r.path}`}
+              element={<TeamMemberRedirect>{r.element}</TeamMemberRedirect>}
+            />
+          ))}
+
+          {/* The team altitude (teams-as-a-scope T1, §1): a bare `/t/:teamId`
+              lands on Overview (D5); each pane; and a member's workspace
+              under the team prefix — the SAME elements as above (D6). Every
+              `/t/` route is guarded: an unknown team bounces to `/teams`, a
+              non-member to the team's overview, each with a toast. */}
+          <Route path="/t/:teamId" element={<TeamHomeRedirect />} />
+          {TEAM_PANES.map((pane) => (
+            <Route
+              key={`t:${pane.key}`}
+              path={`/t/:teamId/${pane.key}`}
+              element={<TeamScopeGuard>{TEAM_PANE_ELEMENTS[pane.key]}</TeamScopeGuard>}
+            />
+          ))}
+          {WORKSPACE_ROUTES.map((r) => (
+            <Route
+              key={`t:p:${r.path}`}
+              path={`/t/:teamId/p/:personalityId/${r.path}`}
+              element={<TeamScopeGuard>{r.element}</TeamScopeGuard>}
+            />
+          ))}
 
           {/* Old URLs — permanent redirects to the workspace routes above. */}
           <Route path="/chat" element={<ChatRedirect />} />
@@ -242,7 +347,9 @@ export function App() {
           <Route path="/activity" element={<Activity />} />
           <Route path="/teams" element={<Teams />} />
           <Route path="/teams/create" element={<TeamCreate />} />
-          <Route path="/teams/:name" element={<TeamControlCenter />} />
+          {/* The pre-T1 Control Center address — permanent redirect into the
+              team's Board pane. */}
+          <Route path="/teams/:name" element={<LegacyTeamRedirect />} />
           {/* The shell is the layout route: it owns the one <Form>, and the
               panes mount inside it through its <Outlet/>. Every child renders
               SettingsPaneRoute, which resolves the URL to a real
@@ -296,7 +403,7 @@ export function App() {
   );
 
   return (
-    <div className={shellClass}>
+    <div ref={shellRef} className={shellClass}>
       <AltitudeRail onOpenQuickCreate={() => setQuickCreateOpen(true)} />
       {workspacePersonalityId ? (
         <ConfigProvider theme={personalityTheme(workspacePersonalityId)}>
@@ -440,8 +547,8 @@ function useOnboardingRedirect(): void {
  * unmounting the route).
  */
 function ChatRoute() {
-  const { personalityId } = useParams<{ personalityId: string }>();
-  return <Chat key={personalityId} />;
+  const { personalityId, teamId } = useParams<{ personalityId: string; teamId?: string }>();
+  return <Chat key={`${teamId ?? ''}:${personalityId}`} />;
 }
 
 // --- P1a permanent redirects — plan/phases/personality-first-ui.md ---------

@@ -68,6 +68,7 @@ export interface RpcContext {
   platforms: PlatformsService;
   lab: LabService;
   kanban: KanbanService;
+  teams: import('../services/teams.service').TeamsService;
   tasks: TasksService;
   apiKeys: ApiKeysService;
   digest: DigestService;

@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   buildIdentityRedirectPath,
   buildRailSwitchPath,
+  buildTeamPath,
   buildWorkspaceChatPath,
   buildWorkspaceRedirectPath,
   currentWorkspacePane,
@@ -91,6 +92,19 @@ describe('resolveChatRedirectPath — `/` and `/chat`', () => {
       }),
     ).toBe('/p/coder/chat?personality=engineer&new=1');
   });
+
+  it('emits the team-prefixed workspace when a teamId is given (teams-as-a-scope T1)', () => {
+    expect(
+      resolveChatRedirectPath({
+        sessionId: 'sess-1',
+        sessionLoading: false,
+        sessionPersonalityId: 'cmo',
+        fallbackPersonalityId: 'coder',
+        search: '?session=sess-1',
+        teamId: 'marketing',
+      }),
+    ).toBe('/t/marketing/p/cmo/chat?session=sess-1');
+  });
 });
 
 describe('buildWorkspaceRedirectPath — the eight flat old routes', () => {
@@ -108,6 +122,12 @@ describe('buildWorkspaceRedirectPath — the eight flat old routes', () => {
   it('preserves a query string', () => {
     expect(buildWorkspaceRedirectPath('researcher', 'sessions', '?q=foo')).toBe(
       '/p/researcher/sessions?q=foo',
+    );
+  });
+
+  it('emits the team-prefixed workspace when a teamId is given', () => {
+    expect(buildWorkspaceRedirectPath('cmo', 'memory', '', 'marketing')).toBe(
+      '/t/marketing/p/cmo/memory',
     );
   });
 });
@@ -148,6 +168,19 @@ describe('resolveGoalRedirectPath — `/goals/:id`', () => {
       }),
     ).toBe('/p/researcher/goals/goal-1');
   });
+
+  it('emits the team-prefixed workspace when a teamId is given', () => {
+    expect(
+      resolveGoalRedirectPath({
+        goalId: 'goal-1',
+        goalLoading: false,
+        goalPersonalityId: 'cmo',
+        fallbackPersonalityId: 'researcher',
+        search: '',
+        teamId: 'marketing',
+      }),
+    ).toBe('/t/marketing/p/cmo/goals/goal-1');
+  });
 });
 
 describe('buildIdentityRedirectPath — `/personalities/:id`', () => {
@@ -160,11 +193,29 @@ describe('buildIdentityRedirectPath — `/personalities/:id`', () => {
       '/p/engineer/identity?tab=soul',
     );
   });
+
+  it('emits the team-prefixed workspace when a teamId is given', () => {
+    expect(buildIdentityRedirectPath('cmo', '', 'marketing')).toBe('/t/marketing/p/cmo/identity');
+  });
 });
 
 describe('buildWorkspaceChatPath — onboarding success', () => {
   it('builds the workspace chat path for a known personality', () => {
     expect(buildWorkspaceChatPath('researcher')).toBe('/p/researcher/chat');
+  });
+
+  it('emits the team-prefixed workspace when a teamId is given', () => {
+    expect(buildWorkspaceChatPath('cmo', 'marketing')).toBe('/t/marketing/p/cmo/chat');
+  });
+});
+
+describe('buildTeamPath — team-altitude destinations', () => {
+  it('defaults to the team home, Overview (D5)', () => {
+    expect(buildTeamPath('marketing')).toBe('/t/marketing/overview');
+  });
+
+  it('builds any team pane', () => {
+    expect(buildTeamPath('marketing', 'board')).toBe('/t/marketing/board');
   });
 });
 
@@ -188,6 +239,15 @@ describe('isChatPathname', () => {
   it('does not match unrelated paths', () => {
     expect(isChatPathname('/sessions')).toBe(false);
   });
+
+  it('matches a member workspace chat inside a team', () => {
+    expect(isChatPathname('/t/marketing/p/cmo/chat')).toBe(true);
+    expect(isChatPathname('/t/marketing/p/cmo/chat/extra')).toBe(false);
+  });
+
+  it('does not match the team Chat pane itself (that surface lands in T3)', () => {
+    expect(isChatPathname('/t/marketing/chat')).toBe(false);
+  });
 });
 
 describe('currentWorkspacePane', () => {
@@ -201,6 +261,11 @@ describe('currentWorkspacePane', () => {
 
   it('falls back to "chat" for a bare /p/:id with no trailing segment', () => {
     expect(currentWorkspacePane('/p/engineer')).toBe('chat');
+  });
+
+  it('reads the pane from a workspace inside a team', () => {
+    expect(currentWorkspacePane('/t/marketing/p/cmo/memory')).toBe('memory');
+    expect(currentWorkspacePane('/t/marketing/p/cmo')).toBe('chat');
   });
 });
 
@@ -218,6 +283,18 @@ describe('buildRailSwitchPath — AltitudeRail personality-switch target', () =>
   it('never carries a query string — a foreign ?session= on Chat is dropped by construction', () => {
     expect(buildRailSwitchPath('/p/engineer/chat', 'researcher')).toBe('/p/researcher/chat');
   });
+
+  it('stays inside the team when a teamId is given, keeping the pane', () => {
+    expect(buildRailSwitchPath('/t/marketing/p/cmo/memory', 'reddit-scout', 'marketing')).toBe(
+      '/t/marketing/p/reddit-scout/memory',
+    );
+  });
+
+  it('without a teamId, a team-prefixed pathname switches to the independent form', () => {
+    expect(buildRailSwitchPath('/t/marketing/p/cmo/memory', 'researcher')).toBe(
+      '/p/researcher/memory',
+    );
+  });
 });
 
 describe('sessionOpenPath — Sessions.tsx row-open actions and desktop nav', () => {
@@ -227,5 +304,15 @@ describe('sessionOpenPath — Sessions.tsx row-open actions and desktop nav', ()
 
   it('falls back to the unscoped deep link (still a permanent redirect) when unknown', () => {
     expect(sessionOpenPath('sess-1', null)).toBe('/chat?session=sess-1');
+  });
+
+  it('emits the team-prefixed workspace when a teamId is given and the personality is known', () => {
+    expect(sessionOpenPath('sess-1', 'cmo', 'marketing')).toBe(
+      '/t/marketing/p/cmo/chat?session=sess-1',
+    );
+  });
+
+  it('ignores teamId on the unscoped deep link — there is no personality to put under a team', () => {
+    expect(sessionOpenPath('sess-1', null, 'marketing')).toBe('/chat?session=sess-1');
   });
 });

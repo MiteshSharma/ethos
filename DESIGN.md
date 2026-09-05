@@ -88,6 +88,13 @@ altitude rail is global chrome and keeps `--ethos-info` forever. The contextual
 column and the stage carry the active scope's accent. The furniture moves only
 when you have walked into a different room.
 
+**Team chrome is neutral**, because a team's identity is plural. The team panes
+(Overview, Board, Structure, Memory, Activity, Channels, Settings) run on
+`--ethos-info` like the Library. Inside a team, a member's workspace
+(`/t/:teamId/p/:id/*`) carries that member's accent exactly as `/p/:id/*` does. The
+team **Chat** pane carries the coordinator's accent, because it is the coordinator's
+surface. The rail stays neutral at every altitude.
+
 | Personality | Hex | Reasoning |
 |---|---|---|
 | researcher | `#4A9EFF` | Blue — knowledge, exploration |
@@ -178,7 +185,9 @@ three exemptions above share a property that is the actual test: each is a
 **repeated list unit** whose alternative was a dense row, and each was granted
 because the unit did not fit the row. A one-off container inline in a stream has
 no dense-row alternative to be measured against, so there is nothing for an
-exemption to buy — build it from primitives.
+exemption to buy — build it from primitives. The team Overview's attention tiles are
+the Task tile exemption reused, not a new one; structure-canvas nodes, scope-switcher
+rows and supervisor-ledger rows are bordered containers assembled from primitives.
 
 #### The one approved card grid: the Recipes gallery
 
@@ -433,6 +442,10 @@ Icon assignments:
 | Eval | Checkmark in a box |
 | Plugins | Plug (rectangle + 2 prongs) |
 | Settings | Gear / cog (circle + teeth) |
+| Overview | House (roof + walls) |
+| Structure | Three circles linked by lines (one above two) |
+| Channels | Envelope (same glyph as Communications) |
+| Board | Three vertical bars (same glyph as Kanban) |
 
 ### Active state
 `background: rgba(74,158,255,0.18); border-left: 2px solid #4A9EFF; padding-left: 10px` (compensate padding for the 2px border). Text color: `var(--text-primary)` (full brightness — not dimmed blue).
@@ -444,6 +457,23 @@ Nav group separators are **thin lines** (`height: 1px; background: var(--border)
 
 ### Desktop icon-only rail
 Desktop sidebar is 64px wide and always icon-only. Active state uses background + a 2px × 16px rounded bar flush to the left edge (not a full left-border since there's no label text to offset against).
+
+### Teams (third altitude)
+
+A team is a scope beside Library and Workspace, not a page inside the Library. It
+keeps the rail and gets its own contextual column. The column's rows, in order:
+
+1. **Chat** — with a `via <coordinator>` hint in Geist Mono 11px beside a 12px mark
+2. divider
+3. **Overview**, **Board**, **Structure**, **Memory**, **Activity**, **Channels**, **Settings**
+4. divider
+5. `RECENT IN <TEAM>` — the recent-sessions block filtered to the team's members
+
+The breadcrumb reads `<ring> <team> ▾ / <pane>`. The `▾` on the team name is the
+**scope switcher**, and it is the breadcrumb root at every altitude: Independent
+(the Library and per-agent workspaces), each team, and New team. Team chrome is
+neutral (see "Per-personality accent"); the segmented ring is the team mark (see
+"Personality marks → Altitude convention").
 
 ## Interaction states
 
@@ -493,9 +523,20 @@ Deterministic geometric marks per personality. Same algorithm runs at render tim
 
 **Altitude convention:** the Ethos annulus (`apps/desktop/assets/brand/ethos-mark.svg`)
 marks the machine altitude — the Library, not any single agent. Agents get generative
-marks (this algorithm, per personality); Ethos gets the ring. The two never trade
-places: a personality does not inherit the annulus, and the machine altitude does not
-generate a mark.
+marks (this algorithm, per personality); Ethos gets the ring. A team gets a
+**segmented ring** — one arc per member, in that member's accent, in manifest order
+starting at 12 o'clock, with a faint neutral fill inside. It is built from the members,
+so it is neither a generative mark (an agent) nor the annulus (the machine). Three
+marks, three altitudes; none inherits another: a personality does not inherit the
+annulus, the machine altitude does not generate a mark, and a team's ring is assembled
+from its members, not hashed from an id.
+
+The segmented ring renders at 14px (breadcrumb), 18px (switcher rows), 22–30px
+(column identity, rail) and 36px (team Overview). Arc stroke width is
+`max(1.5, size * 0.09)`; the gap between arcs is `min(3px, 18% of an arc)`. Same
+algorithm on every surface. TUI fallback: `◔ ◑ ◕ ●` by member count. Reference
+implementation in `apps/web/src/components/ui/TeamRing.tsx`, with the algorithm twin
+in `packages/web-contracts/src/marks.ts`.
 
 Reference implementation in `apps/web/src/components/ui/PersonalityMark.tsx`. Same algorithm available as `packages/web-contracts/src/marks.ts` so server-side rendering and TUI ASCII fallback can use it.
 
@@ -592,3 +633,4 @@ The web UI specifically must avoid these patterns. Code review checks for them.
 | 2026-08-20 | Runner accent `#2DD4BF` dark / `#0D9488` light — a sixth hue that is deliberately NOT a personality accent, consumed only through the `RUNNERS` identity map | Pi-delegation D19/D26. Ethos can now hand a job to an external coding harness, and the run has to be attributable on sight — but a runner is a foreign process, not an agent that lives here, and giving it a sixth row in the per-personality table would say it is one. So it gets its own subsection and a teal that sits outside both the five personality hues and the semantic four, where it can be mistaken for neither an identity nor a status. The consumption rule is the half that has to hold: accent, label, and badge text all come from one `RUNNERS` map (`{id, label, accent, badgeText}`, `apps/web/src/lib/runners.ts`), copy is templated `{runner}`, and no component hardcodes a hex or the literal `pi` — a second harness must be a map entry, not a diff across the render tree. The per-personality accent swap is untouched: a run's own surface carries the runner's hue, the scope around it keeps the personality's. Blocking amendment, landed before the run card (constitutional decision, not implementation detail). |
 | 2026-08-20 | The delegated-run card is NOT a fourth "Cards earn existence" exemption | Ruled on while landing the runner accent, and recorded so it is not relitigated when the card gets built. The run card is heavy — header, task line, live `now` line, meta row, an 18-row collapsible detail grid, a nested question card, a button row — and "does it fit a dense row" answers *no*. But that is the wrong test for it, because the rule governs the `Card` **primitive**, not the word "card": `ClarifyCard`, the composer and `CallStrip` are all bordered containers of comparable weight built from raw primitives, and none of them needed an exemption. The three granted exemptions share a property the run card lacks — each is a **repeated list unit** measured against the dense row it replaced. The run card is a singleton inline in a transcript with no row alternative to lose to, and Antd's `Card` (title slot, `extra`, fixed body padding) buys it nothing it would not immediately override, while its state-varying border and warm blocked tint want explicit CSS anyway. So: built from primitives, and the surfaces that ARE lists stay lists — the drawer Runs pane and the Tasks page rows remain dense rows, which is where the rule was doing real work all along. |
 | 2026-09-04 | The Recipes gallery is an approved exception to "no card grids anywhere" | User-directed. The gallery shipped as stacked rows, correctly, because this file names card grids as slop. The user then reviewed a clickable prototype alongside the shipped rows and asked for the grid, and this file's rule is "do not deviate without explicit user approval" — so the deviation is recorded rather than re-litigated the next time someone reads the anti-slop table. Scoped to that one page: not a precedent for Skills / MCP / Plugins / Personalities / Dashboards, and not a fourth `Card`-primitive exemption, since the cards are raw primitives and each is a real `<Link>` (focusable, middle-clickable). The rest of the Recipes flow stays rows — preflight groups, the install summary and the post-install checklist are all the same bordered row list. |
+| 2026-09-04 | Teams are a third altitude | Teams-as-a-scope plan (`plan/phases/teams-as-a-scope.md`, D9/D10, §12). A team is a scope beside Library and Workspace, not a page in the Library: the scope switcher (Independent · teams · New team) is the breadcrumb root at every altitude. Team chrome is **neutral** (`--ethos-info`) because a team's identity is plural; a member's workspace inside a team (`/t/:teamId/p/:id/*`) carries that member's accent exactly as `/p/:id/*` does; the team Chat pane is the coordinator's session and carries the coordinator's accent. The team mark is the **segmented ring** — one arc per member in that member's accent, manifest order from 12 o'clock — built from the members, so it can be mistaken for neither the generative mark nor the annulus. No new `Card` exemption: the Overview's attention tiles reuse the Task tile. Prototype: `plan/prototypes/teams-as-a-scope/ethos-team-scope.html` (artifact https://claude.ai/code/artifact/ca79190e-4d8a-4f1a-b4ec-29c53df17fb2). Blocking amendment, landed before any code. |

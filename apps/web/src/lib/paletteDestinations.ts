@@ -5,6 +5,8 @@
 // `scopeNav.ts` / `workspaceRoutes.ts` / `createActions.ts`.
 
 import { CREATE_ACTIONS, createActionHref } from './createActions';
+import { TEAM_PANES } from './scopeNav';
+import { buildTeamPath, buildWorkspaceChatPath } from './workspaceRoutes';
 
 export interface PaletteEntry {
   id: string;
@@ -25,16 +27,89 @@ interface AgentSummary {
   description?: string | null;
 }
 
-/** "Agents" group — jump straight to an agent's Chat, its workspace home. */
-export function agentEntries(agents: readonly AgentSummary[]): PaletteEntry[] {
-  return agents.map((p) => ({
+/** The team in scope, for `agentEntries` (teams-as-a-scope §10): its members
+ *  list first and open under the team prefix. */
+export interface PaletteTeamScope {
+  id: string;
+  memberIds: ReadonlySet<string>;
+}
+
+/** "Agents" group — jump straight to an agent's Chat, its workspace home.
+ *  Inside a team, the members come first, at `/t/:teamId/p/:id/chat`. */
+export function agentEntries(
+  agents: readonly AgentSummary[],
+  team?: PaletteTeamScope,
+): PaletteEntry[] {
+  const isMember = (p: AgentSummary) => team?.memberIds.has(p.id) ?? false;
+  const ordered = team
+    ? [...agents.filter(isMember), ...agents.filter((p) => !isMember(p))]
+    : agents;
+  return ordered.map((p) => ({
     id: `agent:${p.id}`,
     group: 'Agents',
     label: p.name,
-    path: `/p/${p.id}/chat`,
+    path: buildWorkspaceChatPath(p.id, isMember(p) ? team?.id : null),
     hint: 'Chat',
     keywords: [p.id, ...(p.description ? [p.description] : [])],
   }));
+}
+
+interface TeamScopeSummary {
+  name: string;
+  coordinator: string | null;
+}
+
+/**
+ * The scope switcher's destinations, as palette rows (D14 — the prototype's
+ * number keys don't ship; ⌘K is the keyboard path): `Switch to Independent`,
+ * then per team `Switch to <team>`, `Chat with <team>` (only when the team
+ * resolves a coordinator, D4) as Actions, and `<team> › <Pane>` for every
+ * team pane as Pages.
+ */
+export function scopeEntries(teams: readonly TeamScopeSummary[]): PaletteEntry[] {
+  const entries: PaletteEntry[] = [
+    {
+      id: 'scope:independent',
+      group: 'Actions',
+      label: 'Switch to Independent',
+      path: '/personalities',
+      hint: 'personalities in no team',
+      keywords: ['scope', 'library', 'team', 'switch'],
+    },
+  ];
+  for (const team of teams) {
+    entries.push({
+      id: `scope:team:${team.name}`,
+      group: 'Actions',
+      label: `Switch to ${team.name}`,
+      path: buildTeamPath(team.name),
+      hint: 'team',
+      keywords: ['scope', 'team', 'switch', team.name],
+    });
+    if (team.coordinator) {
+      entries.push({
+        id: `scope:chat:${team.name}`,
+        group: 'Actions',
+        label: `Chat with ${team.name}`,
+        path: buildTeamPath(team.name, 'chat'),
+        hint: `via ${team.coordinator}`,
+        keywords: ['team', 'chat', 'coordinator', team.name, team.coordinator],
+      });
+    }
+    for (const pane of TEAM_PANES) {
+      if (pane.key === 'chat') continue;
+      const path = buildTeamPath(team.name, pane.key);
+      entries.push({
+        id: `page:team:${team.name}:${pane.key}`,
+        group: 'Pages',
+        label: `${team.name} › ${pane.label}`,
+        path,
+        hint: path,
+        keywords: ['team', team.name, pane.key],
+      });
+    }
+  }
+  return entries;
 }
 
 /** Library (machine-wide) destinations — context-free, same address
