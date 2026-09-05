@@ -826,6 +826,7 @@ const SETTINGS_PATCH_KEYS = [
   'logsRotation',
   'webSearchBackend',
   'webExtractBackend',
+  'webSearxngUrl',
   'auxCompression',
   'auxVision',
   'auxWeb',
@@ -883,6 +884,17 @@ function checkInt(
   }
 }
 
+/**
+ * A strict boolean. `checkInt`'s sibling for the `browser.*` flags, which
+ * `@ethosagent/config`'s `buildBrowser` treats as FATAL at boot when malformed
+ * rather than dropping — a direct (non-RPC) caller handing us `'yes'` would
+ * write a config.yaml the next `ethos` start refuses to load.
+ */
+function checkBool(field: string, v: boolean | null | undefined): void {
+  if (v === undefined || v === null) return;
+  if (typeof v !== 'boolean') invalidValue(field, 'must be true or false');
+}
+
 function checkNonNegative(field: string, v: number | null | undefined): void {
   if (v === undefined || v === null) return;
   if (!Number.isFinite(v) || v < 0) invalidValue(field, 'must be a non-negative number');
@@ -891,6 +903,47 @@ function checkNonNegative(field: string, v: number | null | undefined): void {
 function checkPositive(field: string, v: number | null | undefined): void {
   if (v === undefined || v === null) return;
   if (!Number.isFinite(v) || v <= 0) invalidValue(field, 'must be a positive number');
+}
+
+/**
+ * Proxy schemes Playwright accepts. Mirrors `BROWSER_PROXY_SCHEMES` /
+ * `browserProxyServerProblem` / `BROWSER_PROXY_ENDPOINT_ONLY` in
+ * `@ethosagent/config`, which are module-private there — duplicated rather
+ * than exported, and the two must change together.
+ *
+ * A bare `host:port` is refused rather than guessed at: `new URL('p:3128')`
+ * parses `p:` as the scheme, so guessing would accept a string that points
+ * nowhere and every request would silently go direct.
+ *
+ * `browser.proxy.server` is an ENDPOINT, never a URL with credentials in it.
+ * `http://user:pass@proxy.example:3128` is the form most proxy documentation
+ * uses and the one form that must not be accepted: the password would sit in
+ * `config.yaml` in plaintext, come back unredacted through `proxyServer` on
+ * the read path (which, unlike `proxyPasswordPreview`, is not redacted), and
+ * route around the vaulting `proxyPassword` gets. The offending value is never
+ * echoed back — it is the credential.
+ */
+const BROWSER_PROXY_SCHEMES = new Set(['http:', 'https:', 'socks4:', 'socks5:']);
+
+const BROWSER_PROXY_ENDPOINT_ONLY =
+  'must be an endpoint only — scheme, host and port, e.g. http://proxy.example.com:3128. ' +
+  'A username, password, path, query or fragment in the URL is refused: put credentials in ' +
+  'browser.proxy.username and browser.proxy.password, which are vaulted in the secret store ' +
+  'instead of written into config.yaml in plaintext.';
+
+function browserProxyServerProblem(value: string): 'scheme' | 'endpoint' | null {
+  let u: URL;
+  try {
+    u = new URL(value);
+  } catch {
+    return 'scheme';
+  }
+  if (!BROWSER_PROXY_SCHEMES.has(u.protocol) || u.hostname.length === 0) return 'scheme';
+  if (u.username !== '' || u.password !== '') return 'endpoint';
+  if (u.search !== '' || u.hash !== '') return 'endpoint';
+  // `''` for a non-special scheme (socks4/socks5), `'/'` for http(s).
+  if (u.pathname !== '' && u.pathname !== '/') return 'endpoint';
+  return null;
 }
 
 function checkRecordKey(field: string, key: string): void {
@@ -1011,8 +1064,40 @@ function validateSettingsPatch(patch: ConfigUpdateInput): void {
     checkInt('toolLoop.maxIdenticalToolCallsWarnAt', patch.toolLoop.maxIdenticalToolCallsWarnAt, 1);
   }
   if (patch.browser) {
-    checkInt('browser.navigationTimeoutMs', patch.browser.navigationTimeoutMs, 1_000, 600_000);
-    checkInt('browser.commandTimeoutMs', patch.browser.commandTimeoutMs, 1_000, 600_000);
+    const b = patch.browser;
+    checkInt('browser.navigationTimeoutMs', b.navigationTimeoutMs, 1_000, 600_000);
+    checkInt('browser.commandTimeoutMs', b.commandTimeoutMs, 1_000, 600_000);
+    // 60000–86400000 mirrors `buildBrowser` in @ethosagent/config — under a
+    // minute the sweeper reaps a session between two tool calls of one turn,
+    // past a day an open session is a leak. The two MUST agree: a value this
+    // layer accepts and that one drops is a setting the pane shows as live and
+    // the runtime is not using.
+    checkInt('browser.idleTimeoutMs', b.idleTimeoutMs, 60_000, 86_400_000);
+    // `headed`, the two flags and `proxy.server` are the fields `buildBrowser`
+    // refuses BOOT over rather than dropping, so a value it would refuse must
+    // not be written here. `checkInt` cannot express a three-state or an enum;
+    // the shape below is the one `voiceTrunkProvider` above already uses.
+    if (
+      b.headed !== undefined &&
+      b.headed !== null &&
+      b.headed !== 'auto' &&
+      typeof b.headed !== 'boolean'
+    ) {
+      invalidValue('browser.headed', "must be true, false or 'auto'");
+    }
+    checkBool('browser.stealth.enabled', b.stealthEnabled);
+    checkBool('browser.profiles.enabled', b.profilesEnabled);
+    if (b.proxyServer !== undefined && b.proxyServer !== null) {
+      const problem = browserProxyServerProblem(b.proxyServer);
+      if (problem === 'scheme') {
+        invalidValue(
+          'browser.proxy.server',
+          'must be a URL with an http, https, socks4 or socks5 scheme',
+        );
+      } else if (problem === 'endpoint') {
+        invalidValue('browser.proxy.server', BROWSER_PROXY_ENDPOINT_ONLY);
+      }
+    }
   }
   if (patch.teamSupervisorRestartLoopGuard) {
     const g = patch.teamSupervisorRestartLoopGuard;
@@ -1446,8 +1531,27 @@ export interface ConfigGetResult {
   cronMaxParallelJobs: number | null;
   /** `toolLoop.*` soft-warn tiers; null = no warn tier. */
   toolLoop: { maxToolCallsWarnAt: number | null; maxIdenticalToolCallsWarnAt: number | null };
-  /** `browser.*` Playwright budgets, ms. */
-  browser: { navigationTimeoutMs: number; commandTimeoutMs: number };
+  /** `browser.*` — Playwright budgets plus launch posture. */
+  browser: {
+    navigationTimeoutMs: number;
+    commandTimeoutMs: number;
+    /** Three-state. `'auto'` is carried verbatim — the session factory, the
+     *  only layer that may probe this machine, resolves it. */
+    headed: boolean | 'auto';
+    idleTimeoutMs: number;
+    /** Absent = off. Nothing may read absence as on. */
+    stealthEnabled: boolean;
+    /** Absent = off, matching the runtime: `buildLaunchOptions` in
+     *  `@ethosagent/tools-browser` opens a persistent profile only on an
+     *  explicit `=== true`. */
+    profilesEnabled: boolean;
+    proxyServer: string | null;
+    proxyUsername: string | null;
+    /** REDACTED. The raw proxy password never leaves this layer. */
+    proxyPasswordPreview: string | null;
+  };
+  /** `web.searxng.url` — self-hosted metasearch endpoint; null = not configured. */
+  webSearxngUrl: string | null;
   /** `gateway.maxInboundMediaBytes`; null = each adapter's platform default. */
   gatewayMaxInboundMediaBytes: number | null;
   /** `teamSupervisor.restartLoopGuard.*` — member auto-restart brake. Unset =
@@ -1701,7 +1805,23 @@ export interface ConfigUpdateInput {
   kanban?: { maxInProgress?: number | null; maxInProgressPerProfile?: number | null };
   cronMaxParallelJobs?: number | null;
   toolLoop?: { maxToolCallsWarnAt?: number | null; maxIdenticalToolCallsWarnAt?: number | null };
-  browser?: { navigationTimeoutMs?: number | null; commandTimeoutMs?: number | null };
+  /** Per-field merge; null clears one key. `proxyServer: null` is the one
+   *  exception — it clears the WHOLE `browser.proxy.*` block, credentials
+   *  included, because `@ethosagent/config` refuses boot on credentials with
+   *  no server to carry them. */
+  browser?: {
+    navigationTimeoutMs?: number | null;
+    commandTimeoutMs?: number | null;
+    headed?: boolean | 'auto' | null;
+    idleTimeoutMs?: number | null;
+    stealthEnabled?: boolean | null;
+    profilesEnabled?: boolean | null;
+    proxyServer?: string | null;
+    proxyUsername?: string | null;
+    /** Write-only; blank keeps the stored secret, null clears the block. */
+    proxyPassword?: string | null;
+  };
+  webSearxngUrl?: string | null;
   gatewayMaxInboundMediaBytes?: number | null;
   teamSupervisorRestartLoopGuard?: { maxRestarts?: number | null; windowSeconds?: number | null };
   discordMissedMessageBackfill?: {
@@ -1985,6 +2105,7 @@ export class ConfigService {
         maxFiles: passNumOrNull(p, 'logs.rotation.maxFiles'),
       },
       webSearchBackend: parseWebSearchBackend(p['web.search_backend']),
+      webSearxngUrl: passStr(p, 'web.searxng.url'),
       webExtractBackend: p['web.extract_backend'] === 'htmltext' ? 'htmltext' : null,
       auxCompression: await parseAuxModel(p, 'auxiliary.compression', (v) => this.keyPreview(v)),
       auxVision: await parseAuxModel(p, 'auxiliary.vision', (v) => this.keyPreview(v)),
@@ -2034,6 +2155,20 @@ export class ConfigService {
         navigationTimeoutMs:
           passBoundedInt(p, 'browser.navigationTimeoutMs', 1_000, 600_000) ?? 30_000,
         commandTimeoutMs: passBoundedInt(p, 'browser.commandTimeoutMs', 1_000, 600_000) ?? 10_000,
+        headed: parseBrowserHeaded(p['browser.headed']),
+        idleTimeoutMs: passBoundedInt(p, 'browser.idleTimeoutMs', 60_000, 86_400_000) ?? 600_000,
+        stealthEnabled: passBool(p, 'browser.stealth.enabled', false),
+        // `false`, not `true`. `buildBrowser` emits no `browser.profiles` block
+        // when the key is absent, so `buildLaunchOptions` sees `undefined` and
+        // its `profilesEnabled === true` test fails — the browser opens no
+        // persistent profile. Reporting `true` here told the operator their
+        // logged-in sessions persisted when they did not.
+        profilesEnabled: passBool(p, 'browser.profiles.enabled', false),
+        proxyServer: passStr(p, 'browser.proxy.server'),
+        proxyUsername: passStr(p, 'browser.proxy.username'),
+        // Redacted, exactly like `voice.trunk.password`: the resolved proxy
+        // credential must never reach the browser.
+        proxyPasswordPreview: await this.keyPreview(p['browser.proxy.password']),
       },
       gatewayMaxInboundMediaBytes: passBoundedInt(
         p,
@@ -2322,10 +2457,9 @@ export class ConfigService {
       set('toolLoop.maxToolCallsWarnAt', patch.toolLoop.maxToolCallsWarnAt);
       set('toolLoop.maxIdenticalToolCallsWarnAt', patch.toolLoop.maxIdenticalToolCallsWarnAt);
     }
-    if (patch.browser) {
-      set('browser.navigationTimeoutMs', patch.browser.navigationTimeoutMs);
-      set('browser.commandTimeoutMs', patch.browser.commandTimeoutMs);
-    }
+    // `patch.browser` is written below, next to the other anchored blocks: its
+    // proxy sub-block needs `deletePrefix`/`carrySecret`, which are declared
+    // further down.
     if (patch.teamSupervisorRestartLoopGuard) {
       const g = patch.teamSupervisorRestartLoopGuard;
       set('teamSupervisor.restartLoopGuard.maxRestarts', g.maxRestarts);
@@ -2339,6 +2473,7 @@ export class ConfigService {
     }
     set('web.search_backend', patch.webSearchBackend);
     set('web.extract_backend', patch.webExtractBackend);
+    set('web.searxng.url', patch.webSearxngUrl);
     const setAux = (prefix: string, aux: AuxModelUpdateInput | undefined): void => {
       if (!aux) return;
       set(`${prefix}.model`, aux.model);
@@ -2396,8 +2531,15 @@ export class ConfigService {
     // secret has to re-write the value already on disk, and the required-field
     // check below asks what the block looks like AFTER the patch lands.
     const touchesTelephony = TELEPHONY_PATCH_KEYS.some((key) => patch[key] !== undefined);
+    // `browser.proxy.*` needs the same read for the same two reasons: the
+    // write-only password re-writes the value already on disk, and the
+    // required-together check asks what the block looks like AFTER the patch.
+    const touchesBrowserProxy =
+      patch.browser?.proxyServer !== undefined ||
+      patch.browser?.proxyUsername !== undefined ||
+      patch.browser?.proxyPassword !== undefined;
     const currentPassthrough =
-      replacesRecords || touchesTelephony
+      replacesRecords || touchesTelephony || touchesBrowserProxy
         ? ((await this.opts.config.read())?.passthrough ?? {})
         : {};
     const deletePrefix = (prefix: string): void => {
@@ -2570,6 +2712,26 @@ export class ConfigService {
       carrySecret('voice.livekit.apiKey', patch.voiceLivekitApiKey);
       carrySecret('voice.livekit.apiSecret', patch.voiceLivekitApiSecret);
     }
+    if (patch.browser) {
+      set('browser.navigationTimeoutMs', patch.browser.navigationTimeoutMs);
+      set('browser.commandTimeoutMs', patch.browser.commandTimeoutMs);
+      set('browser.headed', patch.browser.headed);
+      set('browser.idleTimeoutMs', patch.browser.idleTimeoutMs);
+      set('browser.stealth.enabled', patch.browser.stealthEnabled);
+      set('browser.profiles.enabled', patch.browser.profilesEnabled);
+      // The proxy block is ANCHORED on `server`, the same way the trunk and
+      // LiveKit blocks above are: `@ethosagent/config` refuses BOOT on
+      // credentials with no server to carry them, so clearing the anchor has to
+      // take the username and the vault-backed password with it rather than
+      // leaving half a block that fails to load.
+      if (patch.browser.proxyServer === null) {
+        deletePrefix('browser.proxy.');
+      } else {
+        set('browser.proxy.server', patch.browser.proxyServer);
+        set('browser.proxy.username', patch.browser.proxyUsername);
+        carrySecret('browser.proxy.password', patch.browser.proxyPassword);
+      }
+    }
     // ', ' matches the separator packages/config's writeConfig serializes with.
     setList('voice.inbound.allowlist', patch.voiceInboundAllowlist, ', ');
     set('voice.inbound.receptionist', patch.voiceInboundReceptionist);
@@ -2685,6 +2847,11 @@ export class ConfigService {
         'voice.inbound.owner.chatId',
       ]);
     }
+    // Credentials with nowhere to go: `buildBrowser` refuses boot on a
+    // username/password with no `browser.proxy.server`, because an operator
+    // who believes a proxy is carrying their traffic and has none is the
+    // fail-open case that block exists to catch.
+    if (touchesBrowserProxy) requireTogether('browser.proxy.', ['browser.proxy.server']);
     // A bot bound to a personality that does not exist fails SILENTLY on a
     // ringing phone — the call connects to nothing. The editor is the last place
     // the operator can still see the typo, so it is refused here, the same check
@@ -2732,7 +2899,11 @@ export class ConfigService {
           // (`voiceTrunkProvider: null`, `voiceLivekitUrl: null`), which deletes
           // the only config key pointing at the vault entry.
           /^voice\.trunk\.(?:password|webhookSecret)$/.test(k) ||
-          /^voice\.livekit\.(?:apiKey|apiSecret)$/.test(k),
+          /^voice\.livekit\.(?:apiKey|apiSecret)$/.test(k) ||
+          // Same shape: cleared by dropping the whole block
+          // (`browser.proxyServer: null`), which deletes the only config key
+          // pointing at the vault entry.
+          k === 'browser.proxy.password',
       )
       .map((k) => secretRefFromValue(currentPassthrough[k] ?? ''))
       .filter((ref): ref is string => ref !== null && !survivingRefs.has(ref));
@@ -2861,6 +3032,17 @@ const SECRETS_REF_RE = /\$\{secrets:([^}]+)\}/g;
  *  unrecognized falls back to the effective default, `'dms'`. */
 function parseStreamingEdits(value: string | undefined): 'off' | 'dms' | 'all' {
   return value === 'off' || value === 'all' ? value : 'dms';
+}
+
+/**
+ * `browser.headed` — three-state, not a boolean. Unset or unrecognized reads as
+ * `'auto'`, which is the consumer's own default; `'auto'` is NOT resolved here
+ * (answering it needs an environment probe this layer must not make).
+ */
+function parseBrowserHeaded(value: string | undefined): boolean | 'auto' {
+  if (value === 'true') return true;
+  if (value === 'false') return false;
+  return 'auto';
 }
 
 /** `display.call_style` — the Call Stage treatment. Unset = `personality`,

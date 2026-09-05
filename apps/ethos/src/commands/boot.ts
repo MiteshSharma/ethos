@@ -1419,6 +1419,10 @@ export async function runBoot(args: string[], config: EthosConfig | null): Promi
   const attachWebSockets = (target: Awaited<ReturnType<typeof listenWeb>>['server']): void => {
     created.voiceSocket.attach(target);
     created.satelliteSocket.attach(target);
+    // The browser-takeover screencast lane. Same upgrade router as the two
+    // above, and it must be re-attached on a rebind for the same reason they
+    // are — a lane bound to the previous server is a lane nobody can reach.
+    created.takeoverSocket.attach(target);
   };
   /** The address ASKED for. Not the same as the one landed on — the ladder may
    *  have moved the port — and it is the requested one a rebind diffs against. */
@@ -2182,7 +2186,11 @@ export async function runBoot(args: string[], config: EthosConfig | null): Promi
         inboundDedup.close();
       });
       await guard('sockets', () =>
-        Promise.allSettled([created.voiceSocket.close(), created.satelliteSocket.close()]),
+        Promise.allSettled([
+          created.voiceSocket.close(),
+          created.satelliteSocket.close(),
+          created.takeoverSocket.close(),
+        ]),
       );
       // The ACP listener. `serve.ts` never closes its own, but this profile
       // moved the ACP bind AFTER reconciliation on a correctness argument and

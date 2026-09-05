@@ -1,3 +1,4 @@
+export * from './browser-takeover-socket';
 export * from './cards';
 export * from './desktop-bridge';
 export * from './events';

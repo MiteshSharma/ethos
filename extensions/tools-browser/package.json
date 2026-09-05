@@ -19,6 +19,7 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.120.0",
+    "@ethosagent/core": "workspace:*",
     "@ethosagent/safety-network": "workspace:*",
     "@ethosagent/tools-web": "workspace:*",
     "@ethosagent/types": "workspace:*",

@@ -17,7 +17,7 @@
 // Mirrors `TelegramClarifySurface` and `SlackClarifySurface`. See
 // plan/phases/tool_clarity_plan.md Surface 6.
 
-import type { ClarifyBridge } from '@ethosagent/core';
+import { type ClarifyBridge, clarifyPromptText } from '@ethosagent/core';
 import type { ClarifyResponse, ClarifyStore, PendingClarify } from '@ethosagent/types';
 import {
   type ClarifyModalInput,
@@ -117,7 +117,9 @@ export class DiscordClarifySurface {
 
     const msg = clarifyPendingMessage({
       requestId: row.requestId,
-      question: row.question,
+      // D3 — a `browser_takeover` row renders as the text form; an ordinary
+      // question passes through unchanged.
+      question: clarifyPromptText(row),
       ...(row.options !== undefined ? { options: row.options } : {}),
       ...(row.default !== undefined ? { default: row.default } : {}),
       // `present()` only fires once a row is actually presented (D2), at
@@ -300,13 +302,14 @@ function buildResolved(
 ): ClarifyPendingMessage {
   if (!response) {
     return clarifyResolvedMessage({
-      question: row.question,
+      question: clarifyPromptText(row),
       answer: '',
       source: 'timeout-no-default',
     });
   }
   return clarifyResolvedMessage({
-    question: row.question,
+    // Same head as the pending card — this edits that message in place.
+    question: clarifyPromptText(row),
     answer: response.answer,
     source: response.source,
     ...(answeredBy !== undefined && response.source === 'user' ? { answeredBy } : {}),

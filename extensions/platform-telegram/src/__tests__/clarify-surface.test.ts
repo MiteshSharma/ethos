@@ -478,3 +478,54 @@ describe('TelegramClarifySurface — onResolved edits the prompt in place', () =
     expect(adapter.edits).toHaveLength(0);
   });
 });
+
+// D3 (plan/phases/stealth-browsing-and-takeover.md) — a `browser_takeover` row
+// cannot be answered on Telegram: the browser is open on the machine running
+// Ethos and the hand-back button lives in the web chat. The prompt says so, and
+// names both the host and the link.
+describe('browser takeover (D3)', () => {
+  const TAKEOVER = {
+    kind: 'browser_takeover' as const,
+    question: 'stuck on a login',
+    meta: {
+      url: 'https://accounts.example.com/signin?flow=2',
+      handbackUrl: 'https://ethos.local/chat/sess-1',
+    },
+  };
+
+  it('presents the text form with the host and the hand-back link', async () => {
+    const h = makeHarness();
+    await h.surface.present(makeRow(TAKEOVER));
+    const sent = h.adapter.sentForceReply[0];
+    expect(sent?.text).toContain('accounts.example.com');
+    expect(sent?.text).toContain('https://ethos.local/chat/sess-1');
+    expect(sent?.text).toContain('the browser window is open on the machine running Ethos');
+    // Not the raw reason, which reads as an answerable question here.
+    expect(sent?.text.startsWith('stuck on a login')).toBe(false);
+  });
+
+  // The resolved edit replaces the SAME message, so its head must not change
+  // identity between the two — same degraded-mode respond path as the
+  // `onResolved` suite above.
+  it('edits the same message to the same head when it resolves', async () => {
+    const { adapter, bridge, store, surface } = makeHarness();
+    void surface;
+    const row = makeRow({
+      ...TAKEOVER,
+      surfaceContext: { chatId: 'chat-1', botKey: BOT_KEY, messageId: 'msg-1' },
+    });
+    await store.add(row);
+
+    await bridge.respond({ requestId: row.requestId, answer: 'handed back', source: 'user' });
+
+    expect(adapter.edits).toHaveLength(1);
+    expect(adapter.edits[0]?.text).toContain('accounts.example.com');
+    expect(adapter.edits[0]?.text).toContain('→ handed back');
+  });
+
+  it('leaves an ordinary question exactly as it was', async () => {
+    const h = makeHarness();
+    await h.surface.present(makeRow());
+    expect(h.adapter.sentForceReply[0]?.text.startsWith('Which database?')).toBe(true);
+  });
+});

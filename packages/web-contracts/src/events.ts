@@ -141,6 +141,25 @@ export const ClarifyRequestEventSchema = z.object({
    * type-level parity with `PendingClarify.defaultDeadlineAt`.
    */
   defaultDeadlineAt: z.string().nullable(),
+  /**
+   * D3 (stealth-browsing-and-takeover) — what this clarify is asking FOR.
+   * Absent means `question`: every row written before the field existed, and
+   * every ordinary question since. `browser_takeover` is drawn as a panel with
+   * a hand-back button, not as a question box.
+   *
+   * This schema is strict — an unlisted key is stripped silently — so a surface
+   * cannot read `kind`/`meta` unless they are declared HERE. See the parse test
+   * in `__tests__/clarify-event.test.ts`.
+   */
+  kind: z.enum(['question', 'browser_takeover']).optional(),
+  /** D3 — kind-specific detail. `browser_takeover`: the page and where to hand back. */
+  meta: z
+    .object({
+      url: z.string().optional(),
+      sessionId: z.string().optional(),
+      handbackUrl: z.string().optional(),
+    })
+    .optional(),
 });
 
 // A delegated run's coalesced liveness digest, published by the executor onto

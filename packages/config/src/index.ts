@@ -920,6 +920,13 @@ export interface WebConfig {
   port?: number;
   /** `ETHOS_API_CORS_ORIGINS` default when unset. Comma-separated origins or `*`. */
   corsOrigins?: string;
+  /**
+   * Self-hosted SearXNG metasearch endpoint (`web.searxng.url`) — an optional
+   * extra rung for `web_search`. Absent means the rung is not offered. Taken
+   * verbatim, like `host` and `corsOrigins`: every other string in this block
+   * is unvalidated and a wrong endpoint fails loudly at the first search.
+   */
+  searxng?: { url: string };
 }
 
 /**
@@ -2237,19 +2244,62 @@ export interface EthosConfig {
     };
   };
   /**
-   * Playwright timeouts for the `browser` toolset. Both were hardcoded at the
-   * call sites before they became configurable, so the defaults below are
-   * exactly what those literals were.
+   * Launch posture and Playwright timeouts for the `browser` toolset. The two
+   * timeouts were hardcoded at the call sites before they became configurable,
+   * so their defaults below are exactly what those literals were.
+   *
+   * Everything here is an OPERATOR concern — how this machine's browser is
+   * launched — not personality identity. Which personality may reach the
+   * stealth tier is its toolset's business, not this block's.
    *
    * Config format:
    *   browser.navigationTimeoutMs: 30000
    *   browser.commandTimeoutMs: 10000
+   *   browser.headed: auto
+   *   browser.idleTimeoutMs: 600000
+   *   browser.stealth.enabled: false
+   *   browser.profiles.enabled: true
+   *   browser.proxy.server: http://proxy.example.com:3128
+   *   browser.proxy.username: ethos
+   *   browser.proxy.password: ${secrets:browser/proxy/password}
    */
   browser?: {
     /** Budget for one page load (`goto`/`goBack`), ms. 1000–600000. Default 30000. */
     navigationTimeoutMs?: number;
     /** Budget for one element interaction (`click`), ms. 1000–600000. Default 10000. */
     commandTimeoutMs?: number;
+    /**
+     * Whether a session launches with a visible window. Three-state, not a
+     * boolean: `'auto'` is the operator saying "decide from the machine" —
+     * headed on a desktop, headless on a server.
+     *
+     * `'auto'` is NOT resolved here. Answering it needs an environment probe
+     * (`DISPLAY`/`WAYLAND_DISPLAY`, platform), and this layer has to parse and
+     * re-serialize the same file on every machine — resolving would make
+     * `writeConfig` rewrite the operator's `auto` as `true` on a laptop and
+     * `false` on a VPS, so the file would stop meaning what they wrote. The
+     * session factory resolves it; config carries the choice.
+     *
+     * Absent = the consumer's own default (`'auto'`).
+     */
+    headed?: boolean | 'auto';
+    /** Idle sweep budget for an open session, ms. 60000–86400000. Default 600000. */
+    idleTimeoutMs?: number;
+    /** Stealth tier. Absent, or `enabled: false`, is OFF — nothing may read
+     *  absence as on. */
+    stealth?: { enabled?: boolean };
+    /** Persistent per-personality browser profiles (`~/.ethos/browser-profiles/`). */
+    profiles?: { enabled?: boolean };
+    /**
+     * Upstream proxy for browser sessions. `server` carries an explicit scheme
+     * (`http:`/`https:`/`socks4:`/`socks5:`); a bare `host:port` is refused
+     * rather than guessed at.
+     *
+     * `password` is a credential — `SECRET_FIELD_NAMES` requires it to be
+     * entirely `${secrets:…}` when a resolver is configured, and it is
+     * externalized on write and resolved on read like every other one.
+     */
+    proxy?: { server: string; username?: string; password?: string };
   };
   /**
    * Gateway-wide knobs that are not per-adapter credentials.
@@ -2699,6 +2749,16 @@ async function externalizeConfigSecrets(
       http: {
         ...http,
         token: await externalizeSecret(http.token, ref('pauseLifecycle.http.token'), secrets),
+      },
+    };
+  }
+  if (r.browser?.proxy?.password) {
+    const proxy = r.browser.proxy;
+    r.browser = {
+      ...r.browser,
+      proxy: {
+        ...proxy,
+        password: await externalizeSecret(proxy.password, ref('browser.proxy.password'), secrets),
       },
     };
   }
@@ -3217,6 +3277,7 @@ export async function writeConfig(
   if (config.web?.host) lines.push(`web.host: ${config.web.host}`);
   if (config.web?.port !== undefined) lines.push(`web.port: ${config.web.port}`);
   if (config.web?.corsOrigins) lines.push(`web.corsOrigins: ${config.web.corsOrigins}`);
+  if (config.web?.searxng?.url) lines.push(`web.searxng.url: ${config.web.searxng.url}`);
   if (config.webhooks) {
     for (const [hookId, hook] of Object.entries(config.webhooks)) {
       lines.push(`webhooks.${hookId}.personalityId: ${hook.personalityId}`);
@@ -3415,10 +3476,26 @@ export async function writeConfig(
       );
   }
   if (config.browser) {
-    if (config.browser.navigationTimeoutMs !== undefined)
-      lines.push(`browser.navigationTimeoutMs: ${config.browser.navigationTimeoutMs}`);
-    if (config.browser.commandTimeoutMs !== undefined)
-      lines.push(`browser.commandTimeoutMs: ${config.browser.commandTimeoutMs}`);
+    const brw = config.browser;
+    if (brw.navigationTimeoutMs !== undefined)
+      lines.push(`browser.navigationTimeoutMs: ${brw.navigationTimeoutMs}`);
+    if (brw.commandTimeoutMs !== undefined)
+      lines.push(`browser.commandTimeoutMs: ${brw.commandTimeoutMs}`);
+    if (brw.headed !== undefined) lines.push(`browser.headed: ${brw.headed}`);
+    if (brw.idleTimeoutMs !== undefined) lines.push(`browser.idleTimeoutMs: ${brw.idleTimeoutMs}`);
+    if (brw.stealth?.enabled !== undefined)
+      lines.push(`browser.stealth.enabled: ${brw.stealth.enabled}`);
+    if (brw.profiles?.enabled !== undefined)
+      lines.push(`browser.profiles.enabled: ${brw.profiles.enabled}`);
+    if (brw.proxy) {
+      // `server` is required by the type — a proxy block without one never
+      // survives the parse, so there is nothing to guard here.
+      lines.push(`browser.proxy.server: ${brw.proxy.server}`);
+      if (brw.proxy.username) lines.push(`browser.proxy.username: ${brw.proxy.username}`);
+      // Already a `${secrets:…}` reference by this point: writeConfig
+      // externalizes before serializing, so no credential value is written.
+      if (brw.proxy.password) lines.push(`browser.proxy.password: ${brw.proxy.password}`);
+    }
   }
   if (config.gateway?.maxInboundMediaBytes !== undefined) {
     lines.push(`gateway.maxInboundMediaBytes: ${config.gateway.maxInboundMediaBytes}`);
@@ -3676,6 +3753,14 @@ export async function resolveConfigSecrets(
       http: { ...http, token: await resolveSecretValue(token, secrets) },
     };
   }
+  if (r.browser?.proxy?.password) {
+    const proxy = r.browser.proxy;
+    const password = r.browser.proxy.password;
+    r.browser = {
+      ...r.browser,
+      proxy: { ...proxy, password: await resolveSecretValue(password, secrets) },
+    };
+  }
   return r;
 }
 
@@ -3727,7 +3812,10 @@ function parseConfigYaml(src: string): EthosConfig {
   const groundingKanbanKv: Record<string, string> = {};
   // toolLoop.<field>: <n> — soft-warn tiers under the loop's hard tool caps.
   const toolLoopKv: Record<string, string> = {};
-  // browser.<navigationTimeoutMs|commandTimeoutMs>: <ms> — Playwright budgets.
+  // browser.<field>: <value> — Playwright budgets plus launch posture. The
+  // nested keys are stored under their DOTTED sub-path (`proxy.server`,
+  // `stealth.enabled`) rather than in per-level maps: no flat key contains a
+  // dot, so the two levels cannot collide on one map.
   const browserKv: Record<string, string> = {};
   // gateway.<field>: <value> — gateway-wide, non-credential knobs.
   const gatewayKv: Record<string, string> = {};
@@ -4214,6 +4302,13 @@ function parseConfigYaml(src: string): EthosConfig {
       auxiliaryTtsKv[auxTts[1]] = auxTts[2].trim().replace(/^["']|["']$/g, '');
       continue;
     }
+    // web.searxng.url: <url>  — two levels deep, so the `web.<\w+>` branch
+    // below cannot see it. Stored under its dotted sub-path in the same map.
+    const searx = line.match(/^web\.searxng\.url:\s*(.+)$/);
+    if (searx) {
+      webKv['searxng.url'] = searx[1].trim().replace(/^["']|["']$/g, '');
+      continue;
+    }
     // web.<field>: <value>
     const web = line.match(/^web\.(\w+):\s*(.+)$/);
     if (web) {
@@ -4476,8 +4571,13 @@ function parseConfigYaml(src: string): EthosConfig {
       executionSshKv[exs[1]] = exs[2].trim().replace(/^["']|["']$/g, '');
       continue;
     }
-    // browser.<navigationTimeoutMs|commandTimeoutMs>: <ms>  (Playwright budgets).
-    const brw = line.match(/^browser\.(navigationTimeoutMs|commandTimeoutMs):\s*(.+)$/);
+    // browser.<field>: <value>  (Playwright budgets + launch posture). The
+    // alternation is an ALLOWLIST: an unlisted `browser.*` key matches nothing
+    // here, and the generic `key: value` catch-all at the end of this loop is
+    // `\w+` only — so it is dropped, like every other stray dotted key.
+    const brw = line.match(
+      /^browser\.(navigationTimeoutMs|commandTimeoutMs|headed|idleTimeoutMs|stealth\.enabled|profiles\.enabled|proxy\.(?:server|username|password)):\s*(.+)$/,
+    );
     if (brw) {
       browserKv[brw[1]] = brw[2].trim().replace(/^["']|["']$/g, '');
       continue;
@@ -4613,7 +4713,8 @@ function parseConfigYaml(src: string): EthosConfig {
     webKv.extract_backend ||
     webKv.host ||
     webPort !== undefined ||
-    webKv.corsOrigins
+    webKv.corsOrigins ||
+    webKv['searxng.url']
       ? {
           ...(webKv.search_backend === 'exa' ||
           webKv.search_backend === 'tavily' ||
@@ -4626,6 +4727,7 @@ function parseConfigYaml(src: string): EthosConfig {
           ...(webKv.host ? { host: webKv.host } : {}),
           ...(webPort !== undefined ? { port: webPort } : {}),
           ...(webKv.corsOrigins ? { corsOrigins: webKv.corsOrigins } : {}),
+          ...(webKv['searxng.url'] ? { searxng: { url: webKv['searxng.url'] } } : {}),
         }
       : undefined;
   const modelCatalogProviders: Record<string, { url: string }> | undefined =
@@ -4855,8 +4957,10 @@ function parseConfigYaml(src: string): EthosConfig {
   const channelToolsets = buildChannelToolsets(channelToolsetsKv);
   const channelFilter = buildChannelFilter(channelFilterKv);
   const groundingResult = buildGrounding(groundingKv, groundingKanbanKv);
+  const browserResult = buildBrowser(browserKv);
   const parseErrors = [
     ...groundingResult.errors,
+    ...browserResult.errors,
     ...telegramResult.errors,
     ...slackResult.errors,
     ...whatsappResult.errors,
@@ -5086,7 +5190,7 @@ function parseConfigYaml(src: string): EthosConfig {
     toolLoop: buildToolLoop(toolLoopKv),
     kanban: buildKanban(kanbanKv),
     grounding: groundingResult.grounding,
-    browser: buildBrowser(browserKv),
+    browser: browserResult.browser,
     gateway: buildGateway(gatewayKv),
     teamSupervisor: restartLoopGuard ? { restartLoopGuard } : undefined,
     discord:
@@ -7299,21 +7403,167 @@ function buildToolLoop(kv: Record<string, string>): EthosConfig['toolLoop'] | un
   return Object.keys(result).length > 0 ? result : undefined;
 }
 
+/** Proxy schemes Playwright accepts. */
+const BROWSER_PROXY_SCHEMES = new Set(['http:', 'https:', 'socks4:', 'socks5:']);
+
 /**
- * Playwright timeouts from the flat `browser.<field>` keys. Bounded to
- * 1s–10min: below a second no page load completes, and past ten minutes the
- * tool's own result budget has long since become the real limit. Out-of-range
- * values are dropped, leaving the call sites on their built-in defaults.
+ * Why `browser.proxy.server` is an ENDPOINT and not a URL with room in it.
+ *
+ * `http://user:pass@proxy.example:3128` is the form most proxy documentation
+ * uses, and it is the one form that must not be accepted: the password would
+ * sit in `config.yaml` in plaintext, come back unredacted on every read of
+ * `proxy.server`, and route around the `${secrets:...}` vaulting that
+ * `browser.proxy.password` exists for. So userinfo, path, query and fragment
+ * are all refused, and the two credential fields are the only way in. The
+ * message says WHERE the credentials belong, because an operator who wrote the
+ * URL form needs the next step, not a refusal. The offending value is never
+ * echoed — it is the credential.
  */
-function buildBrowser(kv: Record<string, string>): EthosConfig['browser'] | undefined {
+const BROWSER_PROXY_ENDPOINT_ONLY =
+  'must be an endpoint only — scheme, host and port, e.g. http://proxy.example.com:3128. ' +
+  'A username, password, path, query or fragment in the URL is refused: put credentials in ' +
+  'browser.proxy.username and browser.proxy.password, which are vaulted in the secret store ' +
+  'instead of written into config.yaml in plaintext.';
+
+/**
+ * What is wrong with a proxy endpoint, or `null` when nothing is.
+ *
+ * - `'scheme'` — no usable `http`/`https`/`socks4`/`socks5` scheme or no host.
+ *   A bare `host:port` lands here rather than being guessed at: `new
+ *   URL('myproxy:3128')` happily parses `myproxy:` as the scheme, so guessing
+ *   would accept a string that points nowhere and every request would go
+ *   direct.
+ * - `'endpoint'` — parses and points somewhere, but carries credentials or
+ *   trailing parts. See {@link BROWSER_PROXY_ENDPOINT_ONLY}.
+ *
+ * MIRRORED by `browserProxyServerProblem` in
+ * `apps/web-api/src/services/config.service.ts`, which cannot import this
+ * module across the layer boundary. The two must change together.
+ */
+function browserProxyServerProblem(value: string): 'scheme' | 'endpoint' | null {
+  let u: URL;
+  try {
+    u = new URL(value);
+  } catch {
+    return 'scheme';
+  }
+  if (!BROWSER_PROXY_SCHEMES.has(u.protocol) || u.hostname.length === 0) return 'scheme';
+  if (u.username !== '' || u.password !== '') return 'endpoint';
+  if (u.search !== '' || u.hash !== '') return 'endpoint';
+  // `''` for a non-special scheme (socks4/socks5), `'/'` for http(s).
+  if (u.pathname !== '' && u.pathname !== '/') return 'endpoint';
+  return null;
+}
+
+/**
+ * A `browser.*` boolean. Strictly `true`/`false` and FATAL otherwise — see
+ * {@link buildBrowser}'s header for why these are not dropped.
+ */
+function parseBrowserFlag(
+  label: string,
+  raw: string | undefined,
+  errors: string[],
+): boolean | undefined {
+  if (raw === undefined) return undefined;
+  if (raw === 'true') return true;
+  if (raw === 'false') return false;
+  errors.push(`${label}: invalid value '${raw}' (expected true or false).`);
+  return undefined;
+}
+
+/**
+ * The `browser.*` block, from flat keys (nested ones under their dotted
+ * sub-path). Two validation strictnesses, deliberately:
+ *
+ * - The three `*Ms` budgets are BOUNDED NUMBERS, and an out-of-range value is
+ *   dropped, leaving the call sites on their built-in defaults. That is the
+ *   idiom the two timeouts shipped with, and the fallback is the value the
+ *   operator was already running — nothing changes behind their back.
+ * - `headed`, the two `enabled` flags and the whole `proxy` block are FATAL
+ *   when malformed. For these there is no "out of range": `headed: flase` or
+ *   `proxy.server: myproxy:3128` is an operator STATING an intent, and
+ *   quietly substituting the framework default for it is exactly how a proxy
+ *   the operator believed was carrying their traffic ends up not carrying it.
+ *   A fail-open proxy is a de-anonymization leak, so boot refuses instead.
+ *
+ * Timeout bounds are 1s–10min: below a second no page load completes, and past
+ * ten minutes the tool's own result budget has long since become the real
+ * limit. `idleTimeoutMs` is 1min–24h: under a minute the sweeper would reap a
+ * session between two tool calls of the same turn, and past a day an open
+ * session is a leak rather than a cache.
+ *
+ * Returns no `browser` at all when a fatal error was found, exactly like
+ * {@link buildGrounding} — `loadConfigStrict` exits non-zero on the error, and
+ * the lenient `readRawConfig` callers fall back to the built-in defaults.
+ */
+function buildBrowser(kv: Record<string, string>): {
+  browser?: EthosConfig['browser'];
+  errors: string[];
+} {
+  if (Object.keys(kv).length === 0) return { errors: [] };
+  const errors: string[] = [];
   const result: NonNullable<EthosConfig['browser']> = {};
+
   for (const key of ['navigationTimeoutMs', 'commandTimeoutMs'] as const) {
     const raw = kv[key];
     if (raw === undefined) continue;
     const n = parseBoundedInt(raw, 1_000, 600_000);
     if (n !== undefined) result[key] = n;
   }
-  return Object.keys(result).length > 0 ? result : undefined;
+  const idle = kv.idleTimeoutMs;
+  if (idle !== undefined) {
+    const n = parseBoundedInt(idle, 60_000, 86_400_000);
+    if (n !== undefined) result.idleTimeoutMs = n;
+  }
+
+  // Three-state, and carried through verbatim: `'auto'` is resolved by the
+  // session factory, which is the only layer that may probe this machine.
+  const headed = kv.headed;
+  if (headed === 'auto') result.headed = 'auto';
+  else if (headed === 'true') result.headed = true;
+  else if (headed === 'false') result.headed = false;
+  else if (headed !== undefined) {
+    errors.push(`browser.headed: invalid value '${headed}' (expected one of: true, false, auto).`);
+  }
+
+  const stealth = parseBrowserFlag('browser.stealth.enabled', kv['stealth.enabled'], errors);
+  if (stealth !== undefined) result.stealth = { enabled: stealth };
+  const profiles = parseBrowserFlag('browser.profiles.enabled', kv['profiles.enabled'], errors);
+  if (profiles !== undefined) result.profiles = { enabled: profiles };
+
+  const server = kv['proxy.server'];
+  const username = kv['proxy.username'];
+  const password = kv['proxy.password'];
+  if (server !== undefined) {
+    const problem = browserProxyServerProblem(server);
+    if (problem === null) {
+      result.proxy = {
+        server,
+        ...(username ? { username } : {}),
+        ...(password ? { password } : {}),
+      };
+    } else if (problem === 'scheme') {
+      errors.push(
+        `browser.proxy.server: invalid value '${server}' (expected a URL with an http, ` +
+          `https, socks4 or socks5 scheme, e.g. http://proxy.example.com:3128).`,
+      );
+    } else {
+      // Deliberately does NOT echo `server`: this is the branch a URL carrying
+      // an embedded password lands in.
+      errors.push(`browser.proxy.server: ${BROWSER_PROXY_ENDPOINT_ONLY}`);
+    }
+  } else if (username !== undefined || password !== undefined) {
+    // Credentials with nowhere to go. The operator believes a proxy is
+    // configured and there is none — the fail-open case this block refuses.
+    // Neither value is echoed: one of them is a credential.
+    errors.push(
+      'browser.proxy.username/password: set without browser.proxy.server. ' +
+        'Add browser.proxy.server, or remove the credentials.',
+    );
+  }
+
+  if (errors.length > 0) return { errors };
+  return { ...(Object.keys(result).length > 0 ? { browser: result } : {}), errors: [] };
 }
 
 /**

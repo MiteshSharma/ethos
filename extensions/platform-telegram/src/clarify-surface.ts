@@ -17,7 +17,7 @@
 //
 // See plan/phases/tool_clarity_plan.md Surface 4.
 
-import type { ClarifyBridge } from '@ethosagent/core';
+import { type ClarifyBridge, clarifyPromptText } from '@ethosagent/core';
 import type {
   ClarifyResponse,
   ClarifyStore,
@@ -326,7 +326,10 @@ function formatPrompt(row: PendingClarify): string {
         60_000,
     ),
   );
-  const lines: string[] = [row.question, ''];
+  // D3 — a `browser_takeover` row renders as the text form (where the agent
+  // is stuck, and the web link that can hand it back); Telegram cannot hand a
+  // browser back itself. An ordinary question passes through unchanged.
+  const lines: string[] = [clarifyPromptText(row), ''];
   if (row.default !== undefined) {
     lines.push(`default in ${minutes}m: ${row.default}`);
   } else {
@@ -336,15 +339,18 @@ function formatPrompt(row: PendingClarify): string {
 }
 
 function formatResolved(row: PendingClarify, response: ClarifyResponse | null): string {
-  if (!response) return `${row.question}\n\n(timed out — no default)`;
+  // Same head as the pending prompt — this edits that message in place, so a
+  // takeover must not change identity halfway through (D3).
+  const head = clarifyPromptText(row);
+  if (!response) return `${head}\n\n(timed out — no default)`;
   switch (response.source) {
     case 'user':
-      return `${row.question}\n\n→ ${response.answer}`;
+      return `${head}\n\n→ ${response.answer}`;
     case 'cancel':
-      return `${row.question}\n\n(cancelled)`;
+      return `${head}\n\n(cancelled)`;
     case 'timeout-default':
-      return `${row.question}\n\n(timed out — used ${response.answer})`;
+      return `${head}\n\n(timed out — used ${response.answer})`;
     case 'timeout-no-default':
-      return `${row.question}\n\n(timed out — no default)`;
+      return `${head}\n\n(timed out — no default)`;
   }
 }

@@ -6,8 +6,16 @@ import { lookup } from 'node:dns/promises';
 import { validateUrl } from '@ethosagent/safety-network';
 import { checkSsrf } from '@ethosagent/tools-web';
 import type { Tool, ToolResult } from '@ethosagent/types';
-import { getOrCreateSessionWithRoute } from './session-route';
-import { closeSession, findActiveSession, isPlaywrightInstalled } from './sessions';
+import { describeBlock, detectBlock } from './block-detector';
+import { type BrowserLaunchConfig, buildLaunchOptions } from './launch-options';
+import {
+  acquireAgentLease,
+  closeSession,
+  findActiveSession,
+  getOrCreateSessionWithRoute,
+  isPlaywrightInstalled,
+  takeoverRefusalResult,
+} from './sessions';
 import { snapshotPage } from './snapshot';
 import type { BrowserTimeouts } from './timeouts';
 
@@ -55,6 +63,8 @@ export const browserPressTool: Tool = {
         code: 'execution_failed',
       };
     }
+    const release = acquireAgentLease(ctx.sessionId, session);
+    if (!release) return takeoverRefusalResult();
 
     try {
       await session.page.keyboard.press(key);
@@ -72,6 +82,8 @@ export const browserPressTool: Tool = {
         error: err instanceof Error ? err.message : String(err),
         code: 'execution_failed',
       };
+    } finally {
+      release();
     }
   },
 };
@@ -122,6 +134,8 @@ export const browserScrollTool: Tool = {
         code: 'execution_failed',
       };
     }
+    const release = acquireAgentLease(ctx.sessionId, session);
+    if (!release) return takeoverRefusalResult();
 
     try {
       let x = 0;
@@ -159,6 +173,8 @@ export const browserScrollTool: Tool = {
         error: err instanceof Error ? err.message : String(err),
         code: 'execution_failed',
       };
+    } finally {
+      release();
     }
   },
 };
@@ -193,6 +209,8 @@ export function createBrowserBackTool(timeouts: BrowserTimeouts): Tool {
           code: 'execution_failed',
         };
       }
+      const release = acquireAgentLease(ctx.sessionId, session);
+      if (!release) return takeoverRefusalResult();
 
       try {
         await session.page.goBack({ timeout: timeouts.navigationMs });
@@ -210,6 +228,8 @@ export function createBrowserBackTool(timeouts: BrowserTimeouts): Tool {
           error: err instanceof Error ? err.message : String(err),
           code: 'execution_failed',
         };
+      } finally {
+        release();
       }
     },
   };
@@ -251,18 +271,24 @@ export const browserConsoleTool: Tool = {
         code: 'execution_failed',
       };
     }
+    const release = acquireAgentLease(ctx.sessionId, session);
+    if (!release) return takeoverRefusalResult();
 
-    const logs = session.consoleLogs.join('\n');
+    try {
+      const logs = session.consoleLogs.join('\n');
 
-    if (clear) {
-      session.consoleLogs.length = 0;
+      if (clear) {
+        session.consoleLogs.length = 0;
+      }
+
+      if (!logs) {
+        return { ok: true, value: 'No console messages captured.' };
+      }
+
+      return { ok: true, value: logs };
+    } finally {
+      release();
     }
-
-    if (!logs) {
-      return { ok: true, value: 'No console messages captured.' };
-    }
-
-    return { ok: true, value: logs };
   },
 };
 
@@ -295,6 +321,8 @@ export const browserGetImagesTool: Tool = {
         code: 'execution_failed',
       };
     }
+    const release = acquireAgentLease(ctx.sessionId, session);
+    if (!release) return takeoverRefusalResult();
 
     try {
       const images = await session.page.evaluate(() => {
@@ -323,6 +351,8 @@ export const browserGetImagesTool: Tool = {
         error: err instanceof Error ? err.message : String(err),
         code: 'execution_failed',
       };
+    } finally {
+      release();
     }
   },
 };
@@ -355,13 +385,19 @@ export const browserDialogTool: Tool = {
         code: 'execution_failed',
       };
     }
-    // Dialogs are auto-handled to prevent page deadlock.
-    // Report recent dialog events from the console buffer.
-    const dialogEntries = session.consoleLogs.filter((l) => l.startsWith('[dialog:'));
-    if (dialogEntries.length === 0) {
-      return { ok: true, value: 'No dialogs have appeared in this session.' };
+    const release = acquireAgentLease(ctx.sessionId, session);
+    if (!release) return takeoverRefusalResult();
+    try {
+      // Dialogs are auto-handled to prevent page deadlock.
+      // Report recent dialog events from the console buffer.
+      const dialogEntries = session.consoleLogs.filter((l) => l.startsWith('[dialog:'));
+      if (dialogEntries.length === 0) {
+        return { ok: true, value: 'No dialogs have appeared in this session.' };
+      }
+      return { ok: true, value: `Recent dialogs:\n${dialogEntries.join('\n')}` };
+    } finally {
+      release();
     }
-    return { ok: true, value: `Recent dialogs:\n${dialogEntries.join('\n')}` };
   },
 };
 
@@ -369,7 +405,11 @@ export const browserDialogTool: Tool = {
 // browser_navigate — Navigate to URL (alias for browse_url, Hermes compat)
 // ---------------------------------------------------------------------------
 
-export function createBrowserNavigateTool(timeouts: BrowserTimeouts): Tool {
+export function createBrowserNavigateTool(
+  timeouts: BrowserTimeouts,
+  launchCfg: BrowserLaunchConfig = {},
+  escalationTool?: string,
+): Tool {
   return {
     name: 'browser_navigate',
     description:
@@ -435,15 +475,31 @@ export function createBrowserNavigateTool(timeouts: BrowserTimeouts): Tool {
         };
       }
 
+      // Declared out here so the `finally` below covers the failure path too:
+      // that `catch` calls `closeSession`, which is cleanup, and cleanup is
+      // part of the operation the lease has to span. Releasing before it ran
+      // would let a takeover's exclusive lease land while this call is still
+      // tearing a browser down.
+      let release: (() => void) | null = null;
       try {
-        const session = await getOrCreateSessionWithRoute(ctx.sessionId, policy);
+        // The session is resolved BEFORE the lease is taken, and the lease is
+        // never held across a creation or profile lock — see the ordering note
+        // in sessions.ts.
+        const session = await getOrCreateSessionWithRoute(
+          ctx.sessionId,
+          policy,
+          buildLaunchOptions(launchCfg, ctx.personalityId),
+        );
+
+        release = acquireAgentLease(ctx.sessionId, session);
+        if (!release) return takeoverRefusalResult();
 
         if (ctx.abortSignal.aborted) {
           await closeSession(ctx.sessionId);
           return { ok: false, error: 'Aborted', code: 'execution_failed' };
         }
 
-        await session.page.goto(url, {
+        const response = await session.page.goto(url, {
           waitUntil: wait_for,
           timeout: timeouts.navigationMs,
         });
@@ -452,13 +508,32 @@ export function createBrowserNavigateTool(timeouts: BrowserTimeouts): Tool {
         const { text, refs, title } = await snapshotPage(session.page);
         session.refs = refs;
 
+        // One-shot launch notices (no-display fallback, profile in use).
+        const notices = session.pendingWarnings.splice(0).map((w) => `⚠ ${w}`);
+
+        // T4 — same detector as browse_url: a bot wall is a successful
+        // navigation to an interstitial. Report it, never retry.
+        const blocked = detectBlock({
+          ...(response ? { status: response.status(), headers: response.headers() } : {}),
+          title,
+          text,
+        });
+        if (blocked) {
+          return {
+            ok: false,
+            error: [...notices, describeBlock(url, blocked, escalationTool)].join('\n'),
+            code: 'execution_failed',
+          };
+        }
+
         const refSummary =
           refs.size > 0
             ? `\n\nInteractive elements (${refs.size}): ${[...refs.keys()].join(', ')}`
             : '';
 
         const header = `[${title}] ${url}\n\n`;
-        return { ok: true, value: header + text + refSummary };
+        const noticeBlock = notices.length > 0 ? `${notices.join('\n')}\n\n` : '';
+        return { ok: true, value: noticeBlock + header + text + refSummary };
       } catch (err) {
         await closeSession(ctx.sessionId);
         return {
@@ -466,6 +541,8 @@ export function createBrowserNavigateTool(timeouts: BrowserTimeouts): Tool {
           error: err instanceof Error ? err.message : String(err),
           code: 'execution_failed',
         };
+      } finally {
+        release?.();
       }
     },
   };

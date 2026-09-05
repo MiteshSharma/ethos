@@ -567,6 +567,8 @@ export async function createAgentLoop(
       ? { displayMemoryNotices: config.displayMemoryNotices }
       : {}),
     ...(config.web?.search_backend ? { webSearchBackend: config.web.search_backend } : {}),
+    ...(config.web?.searxng?.url ? { searxngUrl: config.web.searxng.url } : {}),
+    ...(config.browser ? { browser: config.browser } : {}),
     ...(config.postmortems !== undefined ? { postmortems: config.postmortems } : {}),
     ...(config.trustPolicy !== undefined ? { trustPolicy: config.trustPolicy } : {}),
     ...(config.background ? { background: config.background } : {}),

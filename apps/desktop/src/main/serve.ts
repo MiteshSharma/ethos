@@ -12,6 +12,7 @@ import {
   APPROVAL_SURFACE_ALWAYS_ASK,
   createAgentLoop,
   createApprovalDangerPredicate,
+  createBrowserTakeoverRegistry,
   createLazyProvider,
   createLLM,
   createMemoryProvider,
@@ -34,6 +35,7 @@ let boundPort: number | null = null;
 /** Kept so `stopServer` can drop live WS lanes before the port closes. */
 let voiceSocketHandle: { close(): Promise<void> } | null = null;
 let satelliteSocketHandle: { close(): Promise<void> } | null = null;
+let takeoverSocketHandle: { close(): Promise<void> } | null = null;
 /** Kept so `stopServer` can deny + audit any suspended approval on the way out. */
 let forceSettleApprovalsHandle: (() => void) | null = null;
 let callCaptureHandle: CallCaptureDesktopHandle | null = null;
@@ -261,6 +263,7 @@ export async function startServer(port: number): Promise<number> {
     app: webApp,
     voiceSocket,
     satelliteSocket,
+    takeoverSocket,
     forceSettleApprovals,
   } = createWebApi({
     dataDir,
@@ -275,6 +278,11 @@ export async function startServer(port: number): Promise<number> {
     memoryBackend: wiringConfig,
     identityMap,
     agentLoop: loop,
+    // The screencast takeover lane's session registry (B3). The desktop is the
+    // third in-process web-API host: `createAgentLoop` above built the browser
+    // tools HERE, so the session `browser_request_takeover` locked is the one
+    // this lookup reaches. Same seam `ethos serve`/`ethos boot` pass.
+    browserTakeoverSessions: createBrowserTakeoverRegistry(),
     personalities,
     refreshPersonalities,
     // Renderer-capability seam for `personalities.renderers` (the loop's own
@@ -356,6 +364,11 @@ export async function startServer(port: number): Promise<number> {
           // apps/ethos/src/commands/serve.ts.
           satelliteSocket.attach(s);
           satelliteSocketHandle = satelliteSocket;
+          // The browser-takeover screencast lane (`GET /browser/takeover/ws`),
+          // on the same shared upgrade router. Unattached the route never
+          // upgrades, so the takeover panel has nothing to connect to.
+          takeoverSocket.attach(s);
+          takeoverSocketHandle = takeoverSocket;
           resolve(info.port);
         },
       );
@@ -390,11 +403,13 @@ export async function stopServer(): Promise<void> {
   const s = serverHandle;
   const voice = voiceSocketHandle;
   const satellites = satelliteSocketHandle;
+  const takeover = takeoverSocketHandle;
   const callCapture = callCaptureHandle;
   const settleApprovals = forceSettleApprovalsHandle;
   serverHandle = null;
   voiceSocketHandle = null;
   satelliteSocketHandle = null;
+  takeoverSocketHandle = null;
   forceSettleApprovalsHandle = null;
   callCaptureHandle = null;
   boundPort = null;
@@ -407,6 +422,7 @@ export async function stopServer(): Promise<void> {
   // talk-mode tab and a satellite hold their lane open indefinitely by design.
   if (voice) await voice.close();
   if (satellites) await satellites.close();
+  if (takeover) await takeover.close();
   await new Promise<void>((resolve) => s.close(() => resolve()));
 }
 

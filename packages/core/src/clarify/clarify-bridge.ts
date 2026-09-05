@@ -14,11 +14,14 @@
 import { randomUUID } from 'node:crypto';
 import type {
   ClarifyAnswerableBy,
+  ClarifyKind,
+  ClarifyMeta,
   ClarifyResponse,
   ClarifyStore,
   ClarifySurfaceType,
   PendingClarify,
 } from '@ethosagent/types';
+import { handbackUrlFor } from './takeover-prompt';
 
 /**
  * Raised by `request()` when the timeout fires and no `default` was provided
@@ -58,8 +61,31 @@ export interface ClarifyRequestInput {
   jobId?: string;
   surfaceType: ClarifySurfaceType;
   surfaceContext?: Record<string, unknown>;
+  /**
+   * D3 — what this clarify asks for. Omitted for an ordinary question; the
+   * persisted row then carries no `kind` either, which is what keeps rows
+   * written before this field existed readable.
+   */
+  kind?: ClarifyKind;
+  /** D3 — kind-specific detail (`browser_takeover`: the page and session). */
+  meta?: ClarifyMeta;
   /** When the turn aborts, the pending clarify resolves as cancelled. */
   abortSignal?: AbortSignal;
+  /**
+   * Handed the request id at the moment it is minted — before this call is
+   * observable to any surface, and long before it resolves.
+   *
+   * `request()` otherwise only reveals the id once it has RESOLVED, which is
+   * too late for a caller that has to BIND something to this specific request
+   * while it waits: `browser_request_takeover` stamps the id onto its browser
+   * session lock so the takeover socket can refuse a client presenting some
+   * other clarify's id (an authenticated viewer could otherwise drive one
+   * takeover while resolving an unrelated request).
+   *
+   * Optional and one-shot. An ordinary clarify passes nothing and behaves
+   * exactly as it did before this existed.
+   */
+  onRequestId?: (requestId: string) => void;
 }
 
 /** A surface registers this to present a pending clarify to the user. */
@@ -115,6 +141,21 @@ export interface ClarifyBridgeOptions {
    * thousands). Set to 0 to disable (tests only).
    */
   reconcilePollMs?: number;
+  /**
+   * D3 (plan/phases/stealth-browsing-and-takeover.md) — the deployment's
+   * public web UI address (`EthosConfig.webBaseUrl`). Used for exactly one
+   * thing: filling `meta.handbackUrl` on a `browser_takeover` row, so the
+   * text form a channel surface renders names an address the user can open
+   * instead of telling them to find "the web chat" unaided.
+   *
+   * It is composed HERE, at row construction, rather than in a presenter,
+   * because the row is persisted before it is presented and every surface —
+   * including the four channel surfaces that live in the gateway process,
+   * which no web-api presenter ever runs for — reads the same persisted
+   * `meta`. Absent (a machine with no reachable web URL) leaves the field
+   * off, and the text degrades exactly as it did before this existed.
+   */
+  webBaseUrl?: string;
 }
 
 interface PendingEntry {
@@ -157,6 +198,8 @@ export class ClarifyBridge {
   // only while `pending` is non-empty; see `ensureReconcilePoll`.
   private reconcilePoll: ReturnType<typeof setInterval> | null = null;
   private readonly reconcilePollMs: number;
+  /** D3 — `opts.webBaseUrl` resolved to a hand-back address once, at construction. */
+  private readonly handbackUrl: string | undefined;
   /**
    * `store` is exposed read-only so a surface (e.g. TelegramClarifySurface)
    * can patch `surfaceContext` after presenting the prompt and look up rows
@@ -168,6 +211,22 @@ export class ClarifyBridge {
   ) {
     this.presenceTtlMs = opts.presenceTtlMs ?? DEFAULT_PRESENCE_TTL_MS;
     this.reconcilePollMs = opts.reconcilePollMs ?? 1_000;
+    this.handbackUrl = handbackUrlFor(opts.webBaseUrl);
+  }
+
+  /**
+   * D3 — the `meta` a row is persisted with. Identical to the caller's for
+   * every ordinary question and for a takeover that already carries its own
+   * hand-back address; a `browser_takeover` raised without one picks up the
+   * deployment's, when there is one. When there isn't, the caller's `meta`
+   * passes through untouched — `undefined` stays `undefined`, so an ordinary
+   * question still persists with no `meta` key at all.
+   */
+  private metaFor(input: ClarifyRequestInput): ClarifyMeta | undefined {
+    if (input.kind !== 'browser_takeover') return input.meta;
+    const handbackUrl = input.meta?.handbackUrl ?? this.handbackUrl;
+    if (handbackUrl === undefined) return input.meta;
+    return { ...input.meta, handbackUrl };
   }
 
   /**
@@ -331,7 +390,11 @@ export class ClarifyBridge {
 
     const lane = input.jobId ?? input.sessionId;
     const requestId = randomUUID();
+    // Before the row is persisted, presented, or awaited by anyone: a caller
+    // that has to bind state to THIS request gets the id here, not on resolve.
+    input.onRequestId?.(requestId);
     const createdAt = new Date();
+    const meta = this.metaFor(input);
     const row: PendingClarify = {
       requestId,
       sessionId: input.sessionId,
@@ -350,6 +413,10 @@ export class ClarifyBridge {
       // isn't derivable from anything else once persisted; a restart-
       // rehydrated queue drain needs the ORIGINAL window, not a guess.
       timeoutMs: input.timeoutMs,
+      // D3 — spread, not assigned: an ordinary question must persist WITHOUT
+      // these keys so a row round-trips byte-identically to the pre-D3 shape.
+      ...(input.kind !== undefined ? { kind: input.kind } : {}),
+      ...(meta !== undefined ? { meta } : {}),
     };
 
     // Persistence rule: the pending row goes to disk *before* it is presented

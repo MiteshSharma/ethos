@@ -73,6 +73,7 @@ import {
   APPROVAL_SURFACE_ALWAYS_ASK,
   buildA2aPeeringService,
   createApprovalDangerPredicate,
+  createBrowserTakeoverRegistry,
   createLazyProvider,
   createMemoryProvider,
   createSessionStore,
@@ -1131,6 +1132,10 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
   // with the voice lane above, so attach order does not matter and neither
   // path can swallow the other's upgrade.
   created.satelliteSocket.attach(server);
+  // The browser-takeover screencast lane (`GET /browser/takeover/ws`). Third
+  // path on the same upgrade router; unattached it never upgrades at all, so
+  // the takeover panel would sit on a socket that only ever errors.
+  created.takeoverSocket.attach(server);
   console.log('');
   const displayHost = webHost === '0.0.0.0' ? 'localhost' : webHost;
   console.log(`ethos web UI listening on http://${displayHost}:${port}`);
@@ -1154,6 +1159,7 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
     Promise.all([
       created.voiceSocket.close(),
       created.satelliteSocket.close(),
+      created.takeoverSocket.close(),
       created.disposeTeamLoops(),
     ]).then(
       () =>
@@ -2052,6 +2058,13 @@ export function buildServeWebApi(opts: BuildServeWebApiOptions): ReturnType<type
     ...(notificationRouter ? { notificationRouter } : {}),
     apiKeys,
     idempotencyStore,
+    // The screencast takeover lane's session registry (B3). `ethos serve` and
+    // `ethos boot` run the browser tools in THIS process, so the session
+    // `browser_request_takeover` locked is the one this lookup reaches — which
+    // is the whole condition the socket refuses without. `ethos gateway` opens
+    // its Chromium elsewhere and hosts no web API, so it stays refused, which
+    // is the honest answer rather than a bug.
+    browserTakeoverSessions: createBrowserTakeoverRegistry(),
     ...(corsOrigins ? { corsOrigins } : {}),
     ...(allowedOrigins ? { allowedOrigins } : {}),
     listTeams: async () => listRegisteredTeams(dir),

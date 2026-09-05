@@ -516,3 +516,51 @@ describe('SlackClarifySurface — listPendingForBot', () => {
     void adapter; // wired in constructor
   });
 });
+
+// D3 — a `browser_takeover` cannot be answered on Slack: the browser is open on
+// the machine running Ethos and the hand-back button lives in the web chat.
+describe('SlackClarifySurface — browser takeover (D3)', () => {
+  const TAKEOVER = {
+    kind: 'browser_takeover' as const,
+    question: 'stuck on a login',
+    meta: {
+      url: 'https://accounts.example.com/signin?flow=2',
+      handbackUrl: 'https://ethos.local/chat/sess-1',
+    },
+  };
+
+  it('posts the text form with the host and the hand-back link', async () => {
+    const { adapter, store, surface } = makeHarness();
+    const row = makeRow(TAKEOVER);
+    await store.add(row);
+    await surface.present(row);
+
+    const text = JSON.stringify(adapter.posted[0]?.blocks ?? []);
+    expect(text).toContain('accounts.example.com');
+    expect(text).toContain('https://ethos.local/chat/sess-1');
+    expect(text).toContain('the browser window is open on the machine running Ethos');
+  });
+
+  it('keeps the same head when the card updates to its resolved state', async () => {
+    const { adapter, bridge, store, surface } = makeHarness();
+    void surface;
+    const row = makeRow({
+      ...TAKEOVER,
+      surfaceContext: { chatId: 'C1', botKey: BOT_KEY, messageTs: 'ts-1' },
+    });
+    await store.add(row);
+
+    await bridge.respond({ requestId: row.requestId, answer: 'handed back', source: 'user' });
+
+    expect(adapter.updated).toHaveLength(1);
+    expect(JSON.stringify(adapter.updated[0]?.blocks ?? [])).toContain('accounts.example.com');
+  });
+
+  it('leaves an ordinary question exactly as it was', async () => {
+    const { adapter, store, surface } = makeHarness();
+    const row = makeRow();
+    await store.add(row);
+    await surface.present(row);
+    expect(JSON.stringify(adapter.posted[0]?.blocks ?? [])).toContain('Which database?');
+  });
+});

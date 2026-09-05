@@ -23,7 +23,7 @@
 //
 // See plan/phases/tool_clarity_plan.md and the Telegram surface it mirrors.
 
-import type { ClarifyBridge } from '@ethosagent/core';
+import { type ClarifyBridge, clarifyPromptText } from '@ethosagent/core';
 import type {
   ClarifyResponse,
   ClarifyStore,
@@ -208,7 +208,9 @@ function formatPrompt(row: PendingClarify): string {
         60_000,
     ),
   );
-  const lines: string[] = [row.question, ''];
+  // D3 — a `browser_takeover` row renders as the text form; WhatsApp cannot
+  // hand a browser back itself. An ordinary question passes through unchanged.
+  const lines: string[] = [clarifyPromptText(row), ''];
   if (row.default !== undefined) {
     lines.push(`default in ${minutes}m: ${row.default}`);
   } else {

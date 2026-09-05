@@ -3,7 +3,12 @@
 // ---------------------------------------------------------------------------
 
 import type { Tool, ToolResult } from '@ethosagent/types';
-import { findActiveSession, isPlaywrightInstalled } from './sessions';
+import {
+  acquireAgentLease,
+  findActiveSession,
+  isPlaywrightInstalled,
+  takeoverRefusalResult,
+} from './sessions';
 import type { BrowserTimeouts } from './timeouts';
 import type { VisionResolverOptions } from './vision-resolver';
 import { resolveByA11y, resolveByVision } from './vision-resolver';
@@ -53,6 +58,11 @@ export function createBrowserVisionClickTool(
           code: 'execution_failed',
         };
       }
+      // The vision path runs an LLM call between reading the page and acting
+      // on it — the widest check-then-act window of any browser tool, and the
+      // reason the lease spans the whole operation rather than the first await.
+      const release = acquireAgentLease(ctx.sessionId, session);
+      if (!release) return takeoverRefusalResult();
 
       try {
         // 1. Try a11y snapshot first
@@ -119,6 +129,8 @@ export function createBrowserVisionClickTool(
           error: err instanceof Error ? err.message : String(err),
           code: 'execution_failed',
         };
+      } finally {
+        release();
       }
     },
   };

@@ -71,6 +71,16 @@ import {
 // Messaging gateway — send function type re-exported for callers
 // ---------------------------------------------------------------------------
 
+// Re-exported so the in-process web-API hosts (`ethos serve`/`boot`, the
+// desktop app) can hand the screencast takeover socket its session registry
+// WITHOUT taking a direct `@ethosagent/tools-browser` dependency — which would
+// pull Playwright into the desktop bundle's declared graph for one lookup.
+// `packages/wiring` already depends on it to compose the browser toolset.
+export {
+  type BrowserTakeoverRegistry,
+  type BrowserTakeoverTarget,
+  createBrowserTakeoverRegistry,
+} from '@ethosagent/tools-browser';
 export type { MessagingSendFn } from '@ethosagent/tools-messaging';
 
 // ---------------------------------------------------------------------------
@@ -161,11 +171,30 @@ export interface WiringConfig {
    */
   toolLoop?: { maxToolCallsWarnAt?: number; maxIdenticalToolCallsWarnAt?: number };
   /**
+   * The deployment's public web UI address — `EthosConfig.webBaseUrl`
+   * verbatim (which already resolves `ETHOS_PUBLIC_URL` ahead of the
+   * config-file value). Forwarded to `ClarifyBridge` so a `browser_takeover`
+   * clarify carries a hand-back address a channel user can open; absent = the
+   * takeover text names the web chat without a link, as before.
+   */
+  webBaseUrl?: string;
+  /**
    * Playwright timeout budgets for the browser toolset (mapped from
    * `EthosConfig.browser`). Forwarded to `createBrowserTools`; absent = the
    * 30s navigation / 10s command literals those call sites shipped with.
    */
-  browser?: { navigationTimeoutMs?: number; commandTimeoutMs?: number };
+  browser?: {
+    navigationTimeoutMs?: number;
+    commandTimeoutMs?: number;
+    /** `browser.headed`, verbatim — `'auto'` is resolved by the session factory. */
+    headed?: boolean | 'auto';
+    /** `browser.idleTimeoutMs` — sweep budget for an untouched session. */
+    idleTimeoutMs?: number;
+    /** `browser.profiles.enabled` — persistent per-personality profiles (D4). */
+    profiles?: { enabled?: boolean };
+    /** `browser.proxy.*` — applied at launch to every browser session. */
+    proxy?: { server: string; username?: string; password?: string };
+  };
   baseUrl?: string;
   /** Azure-only: REST API version (e.g. `2024-10-21`). Required when
    *  `provider === 'azure'`; ignored otherwise. */
@@ -349,6 +378,8 @@ export interface WiringConfig {
   };
   /** tools-web — web_search backend preference. Auto-detect from env when unset. */
   webSearchBackend?: 'exa' | 'tavily' | 'brave';
+  /** tools-web — `web.searxng.url`, the keyless metasearch rung for web_search. */
+  searxngUrl?: string;
   /** Global FALLBACK layer for per-personality tool config (`web_search` in
    *  v1). The personality's own `tools.yaml` is the source of truth; this fills
    *  the gap for personalities that don't declare the tool. Keyed by

@@ -146,3 +146,23 @@ describe('the desktop backend threads the loop execution-backend registry', () =
     expect(src.match(/^\s*executionBackends,$/gm)).toHaveLength(2);
   });
 });
+
+// The browser-takeover screencast lane (plan B3, T8). The desktop is the third
+// in-process web-API host: `createAgentLoop` builds the browser tools HERE, so
+// the session `browser_request_takeover` locked is one this process can reach —
+// unlike `ethos gateway`, which opens its Chromium elsewhere and is honestly
+// refused. Two halves, both host-side: the registry the socket looks sessions
+// up in, and the attach without which the path never upgrades at all. Asserted
+// against source for the same reason as the block above — `startServer` needs a
+// live Electron main process.
+describe('the desktop backend wires the browser-takeover lane', () => {
+  it('passes the session registry and attaches the socket to the bound server', async () => {
+    const src = await readFile(join(import.meta.dirname, '..', 'serve.ts'), 'utf8');
+    expect(src).toContain('browserTakeoverSessions: createBrowserTakeoverRegistry(),');
+    expect(src).toContain('takeoverSocket.attach(s);');
+    // Taken off the `createWebApi` result, like the other two lanes.
+    expect(src).toMatch(/^\s*takeoverSocket,$/m);
+    // Closed before `server.close()`, which waits on the open lane otherwise.
+    expect(src).toContain('if (takeover) await takeover.close();');
+  });
+});

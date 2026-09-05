@@ -269,3 +269,36 @@ describe('WhatsAppClarifySurface — correlateMessage (numbered replies)', () =>
     expect(await surface.correlateMessage(inbound({ text: '1' }))).toBeNull();
   });
 });
+
+// D3 — a `browser_takeover` cannot be answered on WhatsApp: the browser is open
+// on the machine running Ethos and the hand-back button lives in the web chat.
+describe('browser takeover (D3)', () => {
+  it('presents the text form with the host and the hand-back link', async () => {
+    const { adapter, store, surface } = makeHarness();
+    const row = makeRow({
+      kind: 'browser_takeover',
+      question: 'stuck on a login',
+      meta: {
+        url: 'https://accounts.example.com/signin?flow=2',
+        handbackUrl: 'https://ethos.local/chat/sess-1',
+      },
+    });
+    await store.add(row);
+
+    await surface.present(row);
+
+    const text = adapter.sent[0]?.text ?? '';
+    expect(text).toContain('accounts.example.com');
+    expect(text).toContain('https://ethos.local/chat/sess-1');
+    expect(text).toContain('the browser window is open on the machine running Ethos');
+    expect(text.startsWith('stuck on a login')).toBe(false);
+  });
+
+  it('leaves an ordinary question exactly as it was', async () => {
+    const { adapter, store, surface } = makeHarness();
+    const row = makeRow();
+    await store.add(row);
+    await surface.present(row);
+    expect((adapter.sent[0]?.text ?? '').startsWith('Which database?')).toBe(true);
+  });
+});

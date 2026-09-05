@@ -1,5 +1,10 @@
 import type { LLMProvider, SecretRef, Tool, ToolContext, ToolResult } from '@ethosagent/types';
-import { ALL_BACKENDS, type SearchBackend } from './search-backends';
+import {
+  ALL_BACKENDS,
+  createSearxngBackend,
+  type KeylessSearchBackend,
+  type SearchBackend,
+} from './search-backends';
 import { checkSsrf } from './ssrf';
 import { summarizeBySize } from './summarize';
 
@@ -40,20 +45,32 @@ export interface WebSearchSetting {
 
 interface WebSearchSelectionOptions {
   searchBackend?: 'exa' | 'tavily' | 'brave';
+  /**
+   * `web.searxng.url`. An extra, keyless RUNG rather than a bindable provider:
+   * `web.search_backend` and the personality `tools.yaml` binding are both
+   * typed to the three keyed providers, so SearXNG is reached by having no
+   * keyed backend available — which is exactly what "an optional extra rung"
+   * means in the config contract.
+   */
+  searxngUrl?: string;
   /** Personality-owned binding (source of truth), resolved by personalityId. */
   resolvePersonalitySetting?: (personalityId: string) => WebSearchSetting | undefined;
   /** Global FALLBACK map keyed by personalityId or `_default`. */
   toolSettings?: Record<string, { web_search?: WebSearchSetting } | undefined>;
 }
 
+type Selected =
+  | { backend: SearchBackend; secretRef: SecretRef }
+  | { searxng: KeylessSearchBackend };
+
 function makeWebSearchTool(opts: WebSearchSelectionOptions = {}): Tool {
   const { searchBackend, resolvePersonalitySetting, toolSettings } = opts;
+  const searxng = opts.searxngUrl ? createSearxngBackend(opts.searxngUrl) : null;
 
-  // 4-step resolution: personality tools.yaml → global toolSettings[pid] →
-  // global toolSettings._default → first backend with a key present.
-  function selectBackend(
-    ctx: ToolContext,
-  ): { backend: SearchBackend; secretRef: SecretRef } | null {
+  // 5-step resolution: personality tools.yaml → global toolSettings[pid] →
+  // global toolSettings._default → first backend with a key present → the
+  // keyless SearXNG rung, when one is configured.
+  function selectBackend(ctx: ToolContext): Selected | null {
     const pid = ctx.personalityId;
     const setting =
       (pid ? resolvePersonalitySetting?.(pid) : undefined) ??
@@ -75,17 +92,27 @@ function makeWebSearchTool(opts: WebSearchSelectionOptions = {}): Tool {
       if (pref?.isAvailable()) return { backend: pref, secretRef: pref.secretRef };
     }
     const first = ALL_BACKENDS.find((b) => b.isAvailable());
-    return first ? { backend: first, secretRef: first.secretRef } : null;
+    if (first) return { backend: first, secretRef: first.secretRef };
+    return searxng ? { searxng } : null;
   }
 
   return {
     name: 'web_search',
     description:
-      'Search the web for current information. Returns titles, URLs, and text snippets. Requires one of EXA_API_KEY, TAVILY_API_KEY, or BRAVE_API_KEY.',
+      'Search the web for current information. Returns titles, URLs, and text snippets. Requires one of EXA_API_KEY, TAVILY_API_KEY, or BRAVE_API_KEY, or a configured SearXNG instance.',
     toolset: 'web',
     maxResultChars: 15_000,
     capabilities: {
-      network: { allowedHosts: ['api.exa.ai', 'api.tavily.com', 'api.search.brave.com'] },
+      // The SearXNG host is operator-configured, so it joins the allowlist at
+      // construction — the tool still cannot reach anything else.
+      network: {
+        allowedHosts: [
+          'api.exa.ai',
+          'api.tavily.com',
+          'api.search.brave.com',
+          ...(searxng ? [searxng.host] : []),
+        ],
+      },
       // Prefix grant over web_search's own provider namespaces. Any
       // personality binding is `providers/<provider>/<name>`, so it always
       // falls inside this static allowlist — no per-binding runtime grant.
@@ -162,12 +189,14 @@ function makeWebSearchTool(opts: WebSearchSelectionOptions = {}): Tool {
           code: 'not_available' as const,
         };
       }
-      const { backend, secretRef } = selected;
-
       const numResults = Math.min(num_results ?? 5, 10);
 
       try {
-        const hits = await backend.search(query, numResults, ctx, secretRef);
+        const providerId = 'searxng' in selected ? selected.searxng.id : selected.backend.id;
+        const hits =
+          'searxng' in selected
+            ? await selected.searxng.search(query, numResults, ctx)
+            : await selected.backend.search(query, numResults, ctx, selected.secretRef);
 
         if (!hits.length) {
           return { ok: true, value: `No results found for: ${query}` };
@@ -183,7 +212,7 @@ function makeWebSearchTool(opts: WebSearchSelectionOptions = {}): Tool {
 
         return {
           ok: true,
-          value: `Search results for "${query}" (via ${backend.id}):\n\n${formatted}`,
+          value: `Search results for "${query}" (via ${providerId}):\n\n${formatted}`,
         };
       } catch (err) {
         return {
@@ -294,6 +323,8 @@ function makeWebExtractTool(
 
 export interface CreateWebToolsOptions {
   searchBackend?: 'exa' | 'tavily' | 'brave';
+  /** `web.searxng.url` — the keyless metasearch rung. Absent = not offered. */
+  searxngUrl?: string;
   /**
    * Resolve the active personality's own `tools.yaml` web_search binding
    * (source of truth), keyed by personalityId. Wiring passes a lookup over
@@ -342,6 +373,7 @@ export function createWebTools(opts: CreateWebToolsOptions = {}): Tool[] {
   return [
     makeWebSearchTool({
       ...(opts.searchBackend ? { searchBackend: opts.searchBackend } : {}),
+      ...(opts.searxngUrl ? { searxngUrl: opts.searxngUrl } : {}),
       ...(opts.resolvePersonalitySetting
         ? { resolvePersonalitySetting: opts.resolvePersonalitySetting }
         : {}),

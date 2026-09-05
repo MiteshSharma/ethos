@@ -17,7 +17,7 @@
 // Mirrors `TelegramClarifySurface`. See plan/phases/tool_clarity_plan.md
 // Surface 5.
 
-import type { ClarifyBridge } from '@ethosagent/core';
+import { type ClarifyBridge, clarifyPromptText } from '@ethosagent/core';
 import type { ClarifyResponse, ClarifyStore, PendingClarify } from '@ethosagent/types';
 import { clarifyModalView, clarifyPendingBlocks, clarifyResolvedBlocks } from './blocks/clarify';
 import type { ClarifyActionEvent, ClarifyModalSubmissionEvent } from './interactions/clarify';
@@ -120,7 +120,10 @@ export class SlackClarifySurface {
 
     const blocks = clarifyPendingBlocks({
       requestId: row.requestId,
-      question: row.question,
+      // D3 — a `browser_takeover` row renders as the text form (where the
+      // agent is stuck, and the web link that can hand it back); an ordinary
+      // question passes through unchanged.
+      question: clarifyPromptText(row),
       ...(row.options !== undefined ? { options: row.options } : {}),
       ...(row.default !== undefined ? { default: row.default } : {}),
       // `present()` only fires once a row is actually presented (D2), at
@@ -344,10 +347,11 @@ function buildResolvedInput(
   answeredBy?: string;
 } {
   if (!response) {
-    return { question: row.question, answer: '', source: 'timeout-no-default' };
+    return { question: clarifyPromptText(row), answer: '', source: 'timeout-no-default' };
   }
   return {
-    question: row.question,
+    // Same head as the pending card — this edits that message in place.
+    question: clarifyPromptText(row),
     answer: response.answer,
     source: response.source,
     ...(answeredBy !== undefined && response.source === 'user' ? { answeredBy } : {}),

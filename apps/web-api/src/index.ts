@@ -36,6 +36,11 @@ import {
   type MemoryBackendSelection,
 } from '@ethosagent/wiring';
 import type { Hono } from 'hono';
+import {
+  createTakeoverSocket,
+  type TakeoverSessionRegistry,
+  type TakeoverSocket,
+} from './browser/takeover-socket';
 import { formatRunHandBack } from './features/chat/handback';
 import { resolveJobSessionId } from './features/chat/job-session';
 import { ChatRepository } from './features/chat/repository';
@@ -215,6 +220,18 @@ export interface CreateWebApiOptions {
   /** Origins to accept for cross-origin (CSRF) state-changing requests.
    *  Empty / unset = localhost only. */
   allowedOrigins?: string[];
+  /**
+   * Browser sessions under human takeover that live in THIS process (B3).
+   *
+   * Injected, not imported: `apps/web-api` does not depend on
+   * `@ethosagent/tools-browser`, and — the part that actually matters — a turn
+   * hosted by `ethos gateway` opened its Chromium in a different process, which
+   * no socket in this one can reach. Absent → `GET /browser/takeover/ws` still
+   * mounts and still refuses every lane with `session_unavailable` and a
+   * sentence saying why, which is the honest answer. Handing back from the
+   * chat card works either way.
+   */
+  browserTakeoverSessions?: TakeoverSessionRegistry;
   /** Set `secure` on the auth cookie. Off by default; flip on for non-loopback bind. */
   secureCookie?: boolean;
   /** Honor `X-Forwarded-For` for rate-limit bucketing. Only enable behind a
@@ -581,6 +598,14 @@ export interface CreateWebApiResult {
    * `GET /satellite/ws` unmounted and no satellite can connect.
    */
   satelliteSocket: SatelliteSocket;
+  /**
+   * The screencast takeover lane (B3). Boot code calls
+   * `takeoverSocket.attach(server)` on the same listening server as the voice
+   * lane — one upgrade router, so order does not matter. Skipping the call
+   * leaves `GET /browser/takeover/ws` unmounted and a takeover is handed back
+   * from the chat card only.
+   */
+  takeoverSocket: TakeoverSocket;
   /**
    * Force-settle every pending tool approval as a deny (audited). Boot code
    * calls this from its shutdown `cleanup()` closure before `process.exit`:
@@ -1363,6 +1388,11 @@ export function createWebApi(opts: CreateWebApiOptions): CreateWebApiResult {
           // question inside that run's card instead of floating it.
           ...(req.jobId !== undefined ? { jobId: req.jobId } : {}),
           defaultDeadlineAt: req.defaultDeadlineAt,
+          // D3 — without these the browser cannot tell a takeover from a
+          // question, and `ClarifyRequestEventSchema` (strict) would strip
+          // them anyway. Absent `kind` reads as `question` on the far side.
+          ...(req.kind !== undefined ? { kind: req.kind } : {}),
+          ...(req.meta !== undefined ? { meta: req.meta } : {}),
         });
       } catch (err) {
         console.warn(
@@ -1397,6 +1427,35 @@ export function createWebApi(opts: CreateWebApiOptions): CreateWebApiResult {
   };
   const clarifyBridge = agentLoop.clarifyBridge;
   if (clarifyBridge) presentClarify(clarifyBridge);
+
+  // The screencast takeover lane (B3). Same cookie, same Origin policy and the
+  // same upgrade router as the voice lane. Mounted unconditionally: a lane the
+  // registry cannot resolve refuses with a sentence naming the reason, and a
+  // path that simply 404s tells a viewer nothing about WHY it cannot drive the
+  // browser. Hand-back is `ClarifyBridge.respond` — the same call the chat
+  // card's button makes through `clarify.respond`, so the two ways out of a
+  // takeover converge on one resolution path rather than two teardowns.
+  const takeoverSocket = createTakeoverSocket({
+    ...(opts.browserTakeoverSessions ? { sessions: opts.browserTakeoverSessions } : {}),
+    // Not conditional on the bridge, because the lane's `handback` is not
+    // optional: `closed: handed_back` is only ever sent after this resolves,
+    // and a process that cannot resolve says so with `handback_failed` rather
+    // than reporting a hand-back nothing performed. A deployment with no
+    // `ClarifyBridge` has no clarify to park on either, so this rejection is
+    // unreachable in practice — it exists so the impossible case is loud.
+    handback: async (requestId: string) => {
+      if (!clarifyBridge) {
+        throw new Error('this Ethos process has no clarify bridge to resolve the takeover');
+      }
+      clarifyBridge.recordPresence('web');
+      await clarifyBridge.respond({ requestId, answer: 'handed back', source: 'user' });
+    },
+    authenticate: async (req) => {
+      const cookie = readCookie(req.headers.cookie, AUTH_COOKIE);
+      return cookie ? tokens.matches(cookie) : false;
+    },
+    ...(opts.allowedOrigins ? { allowedOrigins: opts.allowedOrigins } : {}),
+  });
 
   // Bridge delegated runs → SSE (pi-delegation G9/D11/D20 = I15, §4.9/D27 = I18).
   //
@@ -1644,6 +1703,7 @@ export function createWebApi(opts: CreateWebApiOptions): CreateWebApiResult {
     systemBus,
     voiceSocket,
     satelliteSocket,
+    takeoverSocket,
     forceSettleApprovals: () => approvalsService.forceSettleAll(),
     pendingApprovalCount: () => approvalsService.pendingCount(),
     disposeTeamLoops: () => teamLoops?.disposeAll() ?? Promise.resolve(),

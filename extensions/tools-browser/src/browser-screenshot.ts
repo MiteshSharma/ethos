@@ -3,7 +3,12 @@
 // ---------------------------------------------------------------------------
 
 import type { Tool, ToolResult } from '@ethosagent/types';
-import { findActiveSession, isPlaywrightInstalled } from './sessions';
+import {
+  acquireAgentLease,
+  findActiveSession,
+  isPlaywrightInstalled,
+  takeoverRefusalResult,
+} from './sessions';
 
 export const browserScreenshotTool: Tool = {
   name: 'browser_screenshot',
@@ -26,6 +31,10 @@ export const browserScreenshotTool: Tool = {
         code: 'execution_failed',
       };
     }
+    // Shared lease for the WHOLE screenshot, not just up to the first await —
+    // a takeover starting mid-capture waits for it rather than racing it.
+    const release = acquireAgentLease(ctx.sessionId, session);
+    if (!release) return takeoverRefusalResult();
 
     try {
       const screenshot = await session.page.screenshot({ type: 'jpeg', quality: 60 });
@@ -52,6 +61,8 @@ export const browserScreenshotTool: Tool = {
         error: err instanceof Error ? err.message : String(err),
         code: 'execution_failed',
       };
+    } finally {
+      release();
     }
   },
 };

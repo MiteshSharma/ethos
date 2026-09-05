@@ -65,6 +65,10 @@ function seedSession(sessionId: string, rec: Recorded): BrowserSession {
     lastUrl: '',
     policyFingerprint: policyFingerprint(policy),
     consoleLogs: [],
+    tier: 'stock',
+    pendingWarnings: [],
+    lastActiveAt: Date.now(),
+    close: async () => {},
   };
   sessions.set(makeMapKey(sessionId, policy), session);
   return session;

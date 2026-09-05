@@ -1931,6 +1931,9 @@ importers:
       '@anthropic-ai/sdk':
         specifier: ^0.120.0
         version: 0.120.0(zod@4.4.3)
+      '@ethosagent/core':
+        specifier: workspace:*
+        version: link:../../packages/core
       '@ethosagent/safety-network':
         specifier: workspace:*
         version: link:../../packages/safety/network

@@ -499,8 +499,13 @@ export async function buildInfrastructure(
   // Clarify bridge
   // -------------------------------------------------------------------------
 
+  // `webBaseUrl` is the only thing the bridge needs from config: it fills
+  // `meta.handbackUrl` on a browser-takeover row (see `ClarifyBridgeOptions`).
+  // Unset — no public web address configured, or a caller that builds its own
+  // `WiringConfig` without one (the desktop app) — leaves the field off.
   const clarifyBridge = new ClarifyBridge(
     new FileClarifyStore(new FsStorage(), join(dataDir, 'clarify')),
+    config.webBaseUrl !== undefined ? { webBaseUrl: config.webBaseUrl } : {},
   );
 
   return {

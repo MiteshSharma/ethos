@@ -1096,6 +1096,17 @@ export async function composeAllTools(
       ...(config.browser?.commandTimeoutMs !== undefined
         ? { commandTimeoutMs: config.browser.commandTimeoutMs }
         : {}),
+      ...(config.browser?.headed !== undefined ? { headed: config.browser.headed } : {}),
+      ...(config.browser?.idleTimeoutMs !== undefined
+        ? { idleTimeoutMs: config.browser.idleTimeoutMs }
+        : {}),
+      ...(config.browser?.profiles?.enabled !== undefined
+        ? { profilesEnabled: config.browser.profiles.enabled }
+        : {}),
+      ...(config.browser?.proxy ? { proxy: config.browser.proxy } : {}),
+      // B1 — the bridge is what makes `browser_request_takeover` registrable,
+      // and registering it is what lets the bot-wall hint name it.
+      clarifyBridge,
     }).tools)
       tools.register(tool);
   }

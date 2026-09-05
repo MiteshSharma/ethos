@@ -71,6 +71,22 @@ describe('readLegacyBrowserBargeInTuning', () => {
 
 const DATA = '/data';
 
+/** Every `browser.*` leaf at its default — the shape `get` reports when no
+ *  `browser.*` key is on disk. Spread and override for the non-default cases;
+ *  asserted with `toEqual` (not `toMatchObject`) so a field that silently
+ *  stops being reported fails here. */
+const BROWSER_DEFAULTS = {
+  navigationTimeoutMs: 30_000,
+  commandTimeoutMs: 10_000,
+  headed: 'auto',
+  idleTimeoutMs: 600_000,
+  stealthEnabled: false,
+  profilesEnabled: false,
+  proxyServer: null,
+  proxyUsername: null,
+  proxyPasswordPreview: null,
+} as const;
+
 function secretRef(path: string): string {
   return ['${', 'secrets:', path, '}'].join('');
 }
@@ -451,6 +467,21 @@ describe('ConfigService — settings passthrough groups', () => {
     );
   };
 
+  /** `loadConfigStrict` resolves `~/.ethos` through ETHOS_STATE_DIR — point it
+   *  at the in-memory dir the repository writes to. `withSecrets: false` skips
+   *  the plaintext-secret gate, for the hand-edited files `writeBase` leaves a
+   *  literal apiKey in. */
+  const loadFromDataDir = async (withSecrets = true) => {
+    const prev = process.env.ETHOS_STATE_DIR;
+    process.env.ETHOS_STATE_DIR = DATA;
+    try {
+      return await loadConfigStrict(storage, withSecrets ? secrets : undefined);
+    } finally {
+      if (prev === undefined) delete process.env.ETHOS_STATE_DIR;
+      else process.env.ETHOS_STATE_DIR = prev;
+    }
+  };
+
   beforeEach(async () => {
     storage = new InMemoryStorage();
     secrets = new InMemorySecretsResolver();
@@ -699,7 +730,7 @@ describe('ConfigService — settings passthrough groups', () => {
     expect(r.kanban).toEqual({ maxInProgress: null, maxInProgressPerProfile: null });
     expect(r.cronMaxParallelJobs).toBeNull();
     expect(r.toolLoop).toEqual({ maxToolCallsWarnAt: null, maxIdenticalToolCallsWarnAt: null });
-    expect(r.browser).toEqual({ navigationTimeoutMs: 30_000, commandTimeoutMs: 10_000 });
+    expect(r.browser).toEqual(BROWSER_DEFAULTS);
     expect(r.gatewayMaxInboundMediaBytes).toBeNull();
     expect(r.teamSupervisorRestartLoopGuard).toEqual({ maxRestarts: 5, windowSeconds: 60 });
     expect(r.discordMissedMessageBackfill).toEqual({
@@ -760,7 +791,11 @@ describe('ConfigService — settings passthrough groups', () => {
     expect(r.kanban).toEqual({ maxInProgress: 3, maxInProgressPerProfile: 1 });
     expect(r.cronMaxParallelJobs).toBe(2);
     expect(r.toolLoop).toEqual({ maxToolCallsWarnAt: 20, maxIdenticalToolCallsWarnAt: 4 });
-    expect(r.browser).toEqual({ navigationTimeoutMs: 45_000, commandTimeoutMs: 15_000 });
+    expect(r.browser).toEqual({
+      ...BROWSER_DEFAULTS,
+      navigationTimeoutMs: 45_000,
+      commandTimeoutMs: 15_000,
+    });
     expect(r.gatewayMaxInboundMediaBytes).toBe(8_388_608);
     expect(r.teamSupervisorRestartLoopGuard).toEqual({ maxRestarts: 3, windowSeconds: 120 });
     expect(r.discordMissedMessageBackfill).toEqual({
@@ -841,7 +876,7 @@ describe('ConfigService — settings passthrough groups', () => {
     expect(r.kanban).toEqual({ maxInProgress: null, maxInProgressPerProfile: null });
     expect(r.cronMaxParallelJobs).toBeNull();
     expect(r.toolLoop).toEqual({ maxToolCallsWarnAt: null, maxIdenticalToolCallsWarnAt: null });
-    expect(r.browser).toEqual({ navigationTimeoutMs: 30_000, commandTimeoutMs: 10_000 });
+    expect(r.browser).toEqual(BROWSER_DEFAULTS);
     expect(r.gatewayMaxInboundMediaBytes).toBeNull();
     expect(r.teamSupervisorRestartLoopGuard).toEqual({ maxRestarts: 5, windowSeconds: 60 });
     expect(r.discordMissedMessageBackfill).toEqual({
@@ -925,7 +960,7 @@ describe('ConfigService — settings passthrough groups', () => {
     expect(r.kanban).toEqual({ maxInProgress: null, maxInProgressPerProfile: null });
     expect(r.cronMaxParallelJobs).toBeNull();
     expect(r.toolLoop).toEqual({ maxToolCallsWarnAt: null, maxIdenticalToolCallsWarnAt: null });
-    expect(r.browser).toEqual({ navigationTimeoutMs: 30_000, commandTimeoutMs: 10_000 });
+    expect(r.browser).toEqual(BROWSER_DEFAULTS);
     expect(r.gatewayMaxInboundMediaBytes).toBeNull();
     expect(r.teamSupervisorRestartLoopGuard).toEqual({ maxRestarts: 5, windowSeconds: 60 });
     expect(r.discordMissedMessageBackfill).toEqual({
@@ -946,7 +981,11 @@ describe('ConfigService — settings passthrough groups', () => {
 
     const r = await service.get();
     expect(r.retentionMinVacuumIntervalDays).toBe(0);
-    expect(r.browser).toEqual({ navigationTimeoutMs: 1_000, commandTimeoutMs: 600_000 });
+    expect(r.browser).toEqual({
+      ...BROWSER_DEFAULTS,
+      navigationTimeoutMs: 1_000,
+      commandTimeoutMs: 600_000,
+    });
     expect(r.gatewayMaxInboundMediaBytes).toBe(1024);
     expect(r.discordMissedMessageBackfill.limit).toBe(100);
   });
@@ -1599,5 +1638,391 @@ describe('ConfigService — settings passthrough groups', () => {
     expect(written).not.toContain('voice.transcode.');
     expect(written).not.toContain('voice.artifacts.');
     expect(written).not.toContain('voice.channels.');
+  });
+
+  // -- browser launch posture + web.searxng.url ------------------------------
+  // `@ethosagent/config`'s `buildBrowser` splits these two ways: the `*Ms`
+  // budgets are DROPPED when out of range, while `headed`, the two flags and
+  // the whole proxy block are FATAL at boot. A proxy the operator believed was
+  // carrying their traffic silently going direct is the fail-open case that
+  // asymmetry exists to catch — so every value refused there is refused here
+  // too, rather than written and discovered on the next restart.
+
+  it('round-trips every browser leaf and web.searxng.url under its dotted key', async () => {
+    await writeBase();
+    await service.update({
+      browser: {
+        navigationTimeoutMs: 45_000,
+        commandTimeoutMs: 15_000,
+        headed: false,
+        idleTimeoutMs: 900_000,
+        stealthEnabled: true,
+        profilesEnabled: false,
+        proxyServer: 'socks5://127.0.0.1:1080',
+        proxyUsername: 'ethos',
+        proxyPassword: 'proxy-secret-value',
+      },
+      webSearxngUrl: 'https://searx.example.com',
+    });
+
+    const written = await storage.read(join(DATA, 'config.yaml'));
+    expect(written).toContain('browser.navigationTimeoutMs: 45000');
+    expect(written).toContain('browser.commandTimeoutMs: 15000');
+    expect(written).toContain('browser.headed: false');
+    expect(written).toContain('browser.idleTimeoutMs: 900000');
+    expect(written).toContain('browser.stealth.enabled: true');
+    expect(written).toContain('browser.profiles.enabled: false');
+    expect(written).toContain('browser.proxy.server: "socks5://127.0.0.1:1080"');
+    expect(written).toContain('browser.proxy.username: ethos');
+    expect(written).toContain('web.searxng.url: "https://searx.example.com"');
+
+    // Every leaf asserted by value, not by a whole-object compare: a compare
+    // passes when the same field is missing from both sides.
+    const r = await service.get();
+    expect(r.browser.navigationTimeoutMs).toBe(45_000);
+    expect(r.browser.commandTimeoutMs).toBe(15_000);
+    expect(r.browser.headed).toBe(false);
+    expect(r.browser.idleTimeoutMs).toBe(900_000);
+    expect(r.browser.stealthEnabled).toBe(true);
+    expect(r.browser.profilesEnabled).toBe(false);
+    expect(r.browser.proxyServer).toBe('socks5://127.0.0.1:1080');
+    expect(r.browser.proxyUsername).toBe('ethos');
+    expect(r.browser.proxyPasswordPreview).toBe(redactKey('proxy-secret-value'));
+    expect(r.webSearxngUrl).toBe('https://searx.example.com');
+
+    // The block the CLI actually boots on. `buildBrowser` returns NO `browser`
+    // at all when it found a fatal error, so this is the real acceptance test.
+    const loaded = await loadFromDataDir();
+    expect(loaded?.parseErrors).toEqual([]);
+    expect(loaded?.config.browser).toEqual({
+      navigationTimeoutMs: 45_000,
+      commandTimeoutMs: 15_000,
+      headed: false,
+      idleTimeoutMs: 900_000,
+      stealth: { enabled: true },
+      profiles: { enabled: false },
+      proxy: {
+        server: 'socks5://127.0.0.1:1080',
+        username: 'ethos',
+        password: 'proxy-secret-value',
+      },
+    });
+    expect(loaded?.config.web?.searxng?.url).toBe('https://searx.example.com');
+  });
+
+  it('null clears each browser leaf and web.searxng.url back to its default', async () => {
+    await writeBase([
+      'browser.headed: true',
+      'browser.idleTimeoutMs: 900000',
+      'browser.stealth.enabled: true',
+      'browser.profiles.enabled: false',
+      'web.searxng.url: https://searx.example.com',
+    ]);
+    await service.update({
+      browser: {
+        headed: null,
+        idleTimeoutMs: null,
+        stealthEnabled: null,
+        profilesEnabled: null,
+      },
+      webSearxngUrl: null,
+    });
+
+    const written = await storage.read(join(DATA, 'config.yaml'));
+    for (const key of [
+      'browser.headed',
+      'browser.idleTimeoutMs',
+      'browser.stealth.enabled',
+      'browser.profiles.enabled',
+      'web.searxng.url',
+    ]) {
+      expect(written).not.toContain(key);
+    }
+    const r = await service.get();
+    expect(r.browser).toEqual(BROWSER_DEFAULTS);
+    expect(r.webSearxngUrl).toBeNull();
+  });
+
+  it('strips browser and webSearxngUrl from the repository patch (PATCH_KEYS gate)', async () => {
+    // SETTINGS_PATCH_KEYS is what keeps a passthrough-written field out of the
+    // repository's typed RawConfig patch. A field missing from it is spread
+    // onto RawConfig, where the serializer silently drops it — so this asserts
+    // the allowlist directly rather than through an on-disk side effect it has
+    // none of.
+    await writeBase();
+    const update = vi.spyOn(repo, 'update');
+    await service.update({
+      webSearxngUrl: 'http://searx.local',
+      browser: { headed: true, stealthEnabled: true },
+    });
+    const patch = update.mock.calls[0]?.[0];
+    expect(patch).toBeDefined();
+    expect(patch && 'webSearxngUrl' in patch).toBe(false);
+    expect(patch && 'browser' in patch).toBe(false);
+    // …and they reached the repository as flat passthrough keys instead.
+    expect(patch?.passthrough).toMatchObject({
+      'web.searxng.url': 'http://searx.local',
+      'browser.headed': 'true',
+      'browser.stealth.enabled': 'true',
+    });
+  });
+
+  it.each([
+    ['true', true],
+    ['false', false],
+    ['auto', 'auto'],
+  ] satisfies Array<[string, boolean | 'auto']>)(
+    'browser.headed accepts %s and carries it verbatim',
+    async (onDisk, value) => {
+      await writeBase();
+      await service.update({ browser: { headed: value } });
+      expect(await storage.read(join(DATA, 'config.yaml'))).toContain(`browser.headed: ${onDisk}`);
+      expect((await service.get()).browser.headed).toBe(value);
+      // `auto` is NOT resolved on the way through — the session factory owns
+      // that, and a resolved value would rewrite the operator's file.
+      const loaded = await loadFromDataDir();
+      expect(loaded?.parseErrors).toEqual([]);
+      expect(loaded?.config.browser?.headed).toBe(value);
+    },
+  );
+
+  it.each(['yes', 'flase', 'AUTO', '', 1])('browser.headed refuses %p', async (bad) => {
+    await writeBase();
+    await expect(service.update({ browser: { headed: bad as never } })).rejects.toMatchObject({
+      code: 'CONFIG_INVALID',
+    });
+    expect(await storage.read(join(DATA, 'config.yaml'))).not.toContain('browser.headed');
+  });
+
+  it.each([
+    ['browser.stealth.enabled', 'stealthEnabled'],
+    ['browser.profiles.enabled', 'profilesEnabled'],
+  ] satisfies Array<[string, 'stealthEnabled' | 'profilesEnabled']>)(
+    '%s refuses a non-boolean',
+    async (configKey, field) => {
+      await writeBase();
+      await expect(service.update({ browser: { [field]: 'yes' as never } })).rejects.toMatchObject({
+        code: 'CONFIG_INVALID',
+      });
+      expect(await storage.read(join(DATA, 'config.yaml'))).not.toContain(configKey);
+    },
+  );
+
+  it('reads stealth as OFF when the key is absent', async () => {
+    await writeBase(['browser.profiles.enabled: true']);
+    expect((await service.get()).browser.stealthEnabled).toBe(false);
+  });
+
+  it('reads profiles as OFF when the key is absent', async () => {
+    await writeBase(['browser.stealth.enabled: true']);
+    expect((await service.get()).browser.profilesEnabled).toBe(false);
+  });
+
+  it.each([true, false])('reads profiles back verbatim when the key says %p', async (value) => {
+    await writeBase([`browser.profiles.enabled: ${value}`]);
+    expect((await service.get()).browser.profilesEnabled).toBe(value);
+  });
+
+  // DIVERGENCE GUARD. Three sites have to agree that an absent
+  // `browser.profiles.enabled` means OFF, and only two of them can be reached
+  // from here:
+  //
+  //   1. `buildBrowser` in `@ethosagent/config` — emits NO `browser.profiles`
+  //      block at all when the key is absent. Asserted below against the real
+  //      loader, not against a copy of its behaviour.
+  //   2. This service's read path — asserted below on the same on-disk state.
+  //   3. `buildLaunchOptions` in `extensions/tools-browser/src/launch-options.ts`
+  //      — gates a persistent profile on `cfg.profilesEnabled === true`, so the
+  //      `undefined` that (1) hands it through `composeBrowser` is OFF.
+  //
+  // (3) is pinned by comment rather than by import: `@ethosagent/tools-browser`
+  // is not a dependency of web-api, and adding one so a settings test can read
+  // a boolean would couple this layer to the browser extension. The same
+  // approach the `browser.idleTimeoutMs` bounds guard above takes. If that
+  // `=== true` ever becomes a `!== false`, change this test with it.
+  it.each([
+    // No `browser.*` key at all — `buildBrowser` never runs.
+    ['no browser block', []],
+    // A `browser.*` block that simply omits this one key — `buildBrowser` DOES
+    // run, and must still leave `profiles` unset. The case above cannot catch a
+    // default introduced inside `buildBrowser`; this one can.
+    ['a browser block without the key', ['browser.headed: auto']],
+  ] satisfies Array<[string, string[]]>)(
+    'absent browser.profiles.enabled is OFF in the loader and in the read path alike (%s)',
+    async (_label, extra) => {
+      await writeBase(extra);
+
+      // `withSecrets: false` — `writeBase` leaves a literal apiKey on disk,
+      // which the plaintext-secret gate rejects. Nothing here reads a secret.
+      const loaded = await loadFromDataDir(false);
+      expect(loaded?.parseErrors).toEqual([]);
+      // No block at all — not `{ enabled: true }`, and not `{ enabled: false }`.
+      expect(loaded?.config.browser?.profiles).toBeUndefined();
+
+      expect((await service.get()).browser.profilesEnabled).toBe(false);
+    },
+  );
+
+  // The two halves of each case are what make this a DIVERGENCE guard: the
+  // bound is asserted against `@ethosagent/config`'s own behaviour rather than
+  // against a second copy of the numbers. `buildBrowser`'s literals are
+  // module-private, so if they ever move, the `loadConfigStrict` half of one of
+  // these fails while `checkInt` keeps its old answer.
+  it.each([
+    ['the lower bound', 60_000],
+    ['the upper bound', 86_400_000],
+  ])('browser.idleTimeoutMs on %s is accepted here and kept by the loader', async (_l, value) => {
+    await writeBase();
+    await service.update({ browser: { idleTimeoutMs: value } });
+    const loaded = await loadFromDataDir();
+    expect(loaded?.config.browser?.idleTimeoutMs).toBe(value);
+  });
+
+  it.each([
+    ['below the lower bound', 59_999],
+    ['above the upper bound', 86_400_001],
+  ])('browser.idleTimeoutMs %s is refused here and dropped by the loader', async (_l, value) => {
+    await writeBase();
+    await expect(service.update({ browser: { idleTimeoutMs: value } })).rejects.toMatchObject({
+      code: 'CONFIG_INVALID',
+    });
+    expect(await storage.read(join(DATA, 'config.yaml'))).not.toContain('browser.idleTimeoutMs');
+
+    // Same value hand-edited into config.yaml: the loader drops it and the
+    // runtime falls back to 600000, which is why this layer must refuse it.
+    await writeBase([`browser.idleTimeoutMs: ${value}`]);
+    const loaded = await loadFromDataDir(false);
+    expect(loaded?.config.browser?.idleTimeoutMs).toBeUndefined();
+  });
+
+  it('never returns the resolved proxy password on the read path', async () => {
+    await writeBase();
+    await service.update({
+      browser: {
+        proxyServer: 'http://proxy.example.com:3128',
+        proxyUsername: 'ethos',
+        proxyPassword: 'p-r-o-x-y-s3cret',
+      },
+    });
+
+    const written = await storage.read(join(DATA, 'config.yaml'));
+    expect(written).toContain(secretRef('browser/proxy/password'));
+    expect(written).not.toContain('p-r-o-x-y-s3cret');
+    expect(await secrets.get('browser/proxy/password')).toBe('p-r-o-x-y-s3cret');
+
+    const r = await service.get();
+    expect(r.browser.proxyServer).toBe('http://proxy.example.com:3128');
+    expect(r.browser.proxyUsername).toBe('ethos');
+    // Resolved THEN redacted — redacting the `${secrets:…}` reference would
+    // render nonsense and tell the operator nothing about which key is set.
+    expect(r.browser.proxyPasswordPreview).toBe(redactKey('p-r-o-x-y-s3cret'));
+    // Belt and braces: the raw credential is nowhere in the read response,
+    // under this field name or any other.
+    expect(JSON.stringify(r)).not.toContain('p-r-o-x-y-s3cret');
+  });
+
+  it('a blank proxy password keeps the stored one; null clears the whole block', async () => {
+    await writeBase();
+    await service.update({
+      browser: { proxyServer: 'http://proxy.example.com:3128', proxyPassword: 'keep-me-please' },
+    });
+    // Blank = "the form only ever saw a preview", not "erase it".
+    await service.update({ browser: { proxyUsername: 'ethos', proxyPassword: '' } });
+    expect(await secrets.get('browser/proxy/password')).toBe('keep-me-please');
+    expect((await service.get()).browser.proxyPasswordPreview).toBe(redactKey('keep-me-please'));
+
+    // Clearing the anchor takes the username and the vault-backed password with
+    // it — credentials with no server refuse boot.
+    await service.update({ browser: { proxyServer: null } });
+    const r = await service.get();
+    expect(r.browser.proxyServer).toBeNull();
+    expect(r.browser.proxyUsername).toBeNull();
+    expect(r.browser.proxyPasswordPreview).toBeNull();
+    expect(await secrets.get('browser/proxy/password')).toBeNull();
+    const written = await storage.read(join(DATA, 'config.yaml'));
+    expect(written).not.toContain('browser.proxy.');
+  });
+
+  it.each(['myproxy:3128', 'proxy.example.com:3128', 'ftp://proxy.example.com', 'not a url'])(
+    'browser.proxy.server refuses %p (no usable scheme)',
+    async (bad) => {
+      await writeBase();
+      await expect(service.update({ browser: { proxyServer: bad } })).rejects.toMatchObject({
+        code: 'CONFIG_INVALID',
+      });
+      expect(await storage.read(join(DATA, 'config.yaml'))).not.toContain('browser.proxy.');
+    },
+  );
+
+  // The URL form — `http://user:pass@proxy.example:3128` — is how most proxy
+  // documentation writes an authenticated proxy, and accepting it put the
+  // password in config.yaml in plaintext, handed it back unredacted through
+  // `proxyServer` on the read path, and routed around the `browser/proxy/
+  // password` secret store entirely.
+  //
+  // Both halves of each case are what make this a DIVERGENCE guard, the same
+  // shape the `idleTimeoutMs` bounds use above: the refusal is asserted here
+  // AND against `@ethosagent/config`'s own loader, whose copy of the rule is
+  // module-private. If either copy loosens, one half of this fails.
+  it.each([
+    ['an embedded username', 'http://ethos@proxy.example.com:3128'],
+    ['an embedded password', 'http://:hunter2@proxy.example.com:3128'],
+    ['both', 'http://ethos:hunter2@proxy.example.com:3128'],
+    ['both, over socks5', 'socks5://ethos:hunter2@127.0.0.1:1080'],
+    ['a query', 'http://proxy.example.com:3128?auth=hunter2'],
+    ['a fragment', 'http://proxy.example.com:3128#hunter2'],
+    ['a non-root path', 'http://proxy.example.com:3128/gateway'],
+  ])(
+    'browser.proxy.server with %s is refused here and fatal in the loader',
+    async (_label, bad) => {
+      await writeBase();
+      await expect(service.update({ browser: { proxyServer: bad } })).rejects.toMatchObject({
+        code: 'CONFIG_INVALID',
+      });
+      const written = await storage.read(join(DATA, 'config.yaml'));
+      expect(written).not.toContain('browser.proxy.');
+      expect(written).not.toContain('hunter2');
+
+      // Same value hand-edited into config.yaml: the loader refuses it too,
+      // fatally, rather than dropping the block and sending traffic direct.
+      await writeBase([`browser.proxy.server: ${bad}`]);
+      const loaded = await loadFromDataDir(false);
+      expect(loaded?.parseErrors ?? []).toHaveLength(1);
+      expect(loaded?.config.browser?.proxy).toBeUndefined();
+    },
+  );
+
+  it('names browser.proxy.username/password when the URL carries credentials', async () => {
+    await writeBase();
+    const creds = 'http://ethos:hunter2@proxy.example.com:3128';
+    // Names the operator-facing key AND both fields the credentials belong in.
+    await expect(service.update({ browser: { proxyServer: creds } })).rejects.toMatchObject({
+      code: 'CONFIG_INVALID',
+      cause: expect.stringMatching(
+        /^browser\.proxy\.server .*browser\.proxy\.username and browser\.proxy\.password/s,
+      ),
+    });
+    // The rejected value IS the credential; it must not come back in the error.
+    await expect(service.update({ browser: { proxyServer: creds } })).rejects.toMatchObject({
+      cause: expect.not.stringContaining('hunter2'),
+    });
+  });
+
+  it('still accepts a bare endpoint with an explicit scheme and a port', async () => {
+    await writeBase();
+    await service.update({ browser: { proxyServer: 'http://proxy.example.com:3128' } });
+    const loaded = await loadFromDataDir(false);
+    expect(loaded?.parseErrors ?? []).toEqual([]);
+    expect(loaded?.config.browser?.proxy?.server).toBe('http://proxy.example.com:3128');
+  });
+
+  it('refuses a proxy credential with no server to carry it', async () => {
+    await writeBase();
+    await expect(
+      service.update({ browser: { proxyUsername: 'ethos', proxyPassword: 'orphan' } }),
+    ).rejects.toMatchObject({ code: 'CONFIG_INVALID' });
+    const written = await storage.read(join(DATA, 'config.yaml'));
+    expect(written).not.toContain('browser.proxy.');
+    expect(written).not.toContain('orphan');
   });
 });

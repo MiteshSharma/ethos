@@ -1,8 +1,12 @@
 import { resolveCallTreatment } from '@ethosagent/types';
+import type { ClarifyRequestEvent } from '@ethosagent/web-contracts';
 import { useQueryClient } from '@tanstack/react-query';
 import { App as AntApp, ConfigProvider } from 'antd';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
+import { TakeoverMode } from '../components/browser/TakeoverMode';
+import { TakeoverUnavailableNote } from '../components/browser/TakeoverStage';
+import { takeoverStageFits } from '../components/browser/useTakeoverSocket';
 import { ApprovalModal } from '../components/chat/ApprovalModal';
 import { ClarifyCard } from '../components/chat/ClarifyCard';
 import { Composer } from '../components/chat/Composer';
@@ -416,7 +420,42 @@ export function Chat({ personalityId: personalityIdProp, teamContext }: ChatProp
   // the queue model means we don't have to special-case "second approval
   // arrived while the first modal was open."
   const pendingApproval = state.pendingApprovals[0];
-  const pendingClarify = state.pendingClarifies[0];
+  // D3 — a `browser_takeover` is not a question and must not be drawn as one:
+  // it has its own panel below, the composer is locked while it is open, and
+  // it must never be routed to the voice ask path.
+  const pendingClarify = state.pendingClarifies.find(
+    (c) => (c.kind ?? 'question') !== 'browser_takeover',
+  );
+  const pendingTakeover = state.pendingClarifies.find(
+    (c) => (c.kind ?? 'question') === 'browser_takeover',
+  );
+  // The takeover panel outlives its pending row: once the request resolves it
+  // leaves `pendingClarifies`, and the panel has to stay put and flip to its
+  // resolved line rather than vanish (the Call Stage lesson). So the request is
+  // remembered here and the settled row is read out of the resolved queue.
+  const [takeoverRequest, setTakeoverRequest] = useState<ClarifyRequestEvent | null>(null);
+  useEffect(() => {
+    if (pendingTakeover) setTakeoverRequest(pendingTakeover);
+  }, [pendingTakeover]);
+  const takeoverResolution = takeoverRequest
+    ? (state.clarifyQueue.resolved.find((r) => r.requestId === takeoverRequest.requestId) ?? null)
+    : null;
+  const takeoverActive = takeoverRequest !== null && takeoverResolution === null;
+  // B3 — the screencast stage is a MODE, entered by an explicit click, never
+  // automatically. A takeover on a headed desktop already has a real window and
+  // the card is the whole interaction there; opening a full-surface canvas over
+  // it uninvited would be the wrong surface for the common case.
+  const [takeoverStageOpen, setTakeoverStageOpen] = useState(false);
+  const [takeoverStartedAt, setTakeoverStartedAt] = useState(() => Date.now());
+  useEffect(() => {
+    if (pendingTakeover) setTakeoverStartedAt(Date.now());
+  }, [pendingTakeover]);
+  // Resolved, cancelled or timed out — the mode has nothing left to drive, and
+  // the settled row in the transcript is what the user needs to see next.
+  useEffect(() => {
+    if (!takeoverActive) setTakeoverStageOpen(false);
+  }, [takeoverActive]);
+  const takeoverVisible = takeoverActive && takeoverStageOpen;
 
   // Live state for the delegated-run cards anchored in the transcript (§4.1).
   // Fed by the `run.update` digest already riding this session's SSE stream —
@@ -746,6 +785,27 @@ export function Chat({ personalityId: personalityIdProp, teamContext }: ChatProp
   // wrong things to offer mid-call. The way back to text is the stage's own
   // "Back to chat" control, which collapses the mode WITHOUT ending the call and
   // hands over to the strip.
+  // B3 — the screencast takeover is a mode on the Call Stage template: while
+  // it is up it IS the chat surface, so no rail and no PersonalityBar. The way
+  // out that does NOT hand back is the stage's own "Back to chat".
+  if (takeoverVisible && takeoverRequest) {
+    return (
+      <ConfigProvider theme={personalityTheme(personalityId)}>
+        <div className="chat-tab chat-tab-call">
+          <TakeoverMode
+            key={takeoverRequest.requestId}
+            request={takeoverRequest}
+            startedAt={takeoverStartedAt}
+            onBackToChat={() => setTakeoverStageOpen(false)}
+          />
+          {pendingApproval ? (
+            <ApprovalModal key={pendingApproval.approvalId} request={pendingApproval} />
+          ) : null}
+        </div>
+      </ConfigProvider>
+    );
+  }
+
   if (stageVisible) {
     return (
       <ConfigProvider theme={personalityTheme(personalityId)}>
@@ -858,6 +918,33 @@ export function Chat({ personalityId: personalityIdProp, teamContext }: ChatProp
       {pendingClarify ? (
         <ClarifyCard key={pendingClarify.requestId} request={pendingClarify} />
       ) : null}
+      {takeoverRequest ? (
+        <ClarifyCard
+          key={takeoverRequest.requestId}
+          request={takeoverRequest}
+          resolution={takeoverResolution}
+        />
+      ) : null}
+      {/* B3 — the way INTO the screencast mode, offered only while a takeover
+          is actually live and only where a pointer and a viewport exist.
+          Below 760px the note says where the driving happens instead; the
+          card above still holds the hand-back, which is the whole of what a
+          phone can usefully do here. */}
+      {takeoverActive ? (
+        takeoverStageFits() ? (
+          <div className="takeover-enter">
+            <button
+              type="button"
+              className="takeover-enter-btn"
+              onClick={() => setTakeoverStageOpen(true)}
+            >
+              Take over on screen
+            </button>
+          </div>
+        ) : (
+          <TakeoverUnavailableNote reason="narrow" />
+        )
+      ) : null}
       <MessageList
         messages={messages}
         currentTurn={state.currentTurn}
@@ -893,14 +980,16 @@ export function Chat({ personalityId: personalityIdProp, teamContext }: ChatProp
         ) : null}
         <Composer
           personalityId={personalityId}
-          disabled={false}
+          disabled={takeoverActive}
           onSend={handleSend}
           placeholder={
-            state.isStreaming
-              ? 'Steer the agent…'
-              : teamContext
-                ? `Message ${teamContext.teamName}… (${coordinatorName} answers)`
-                : 'Send a message…'
+            takeoverActive
+              ? 'Agent paused — hand back to continue'
+              : state.isStreaming
+                ? 'Steer the agent…'
+                : teamContext
+                  ? `Message ${teamContext.teamName}… (${coordinatorName} answers)`
+                  : 'Send a message…'
           }
           isStreaming={state.isStreaming}
           onAbort={() => void abortTurn()}

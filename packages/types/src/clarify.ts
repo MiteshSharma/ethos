@@ -24,6 +24,41 @@ export type ClarifySurfaceType =
 /** How a pending clarify was resolved. */
 export type ClarifyResponseSource = 'user' | 'timeout-default' | 'timeout-no-default' | 'cancel';
 
+/**
+ * D3 (plan/phases/stealth-browsing-and-takeover.md) — what a clarify is asking
+ * FOR, as opposed to what it is asking about. `question` is the original and
+ * only shape: a free-form or multiple-choice question answered in the prompt
+ * itself. `browser_takeover` asks the user to drive the agent's own browser
+ * for a moment and hand it back, which surfaces draw as a panel rather than a
+ * question box.
+ *
+ * The field is optional everywhere it appears, and absent means `question` —
+ * rows persisted before this existed carry no `kind` and must keep working.
+ * Read it as `row.kind ?? 'question'`, never as `row.kind === 'question'`.
+ */
+export type ClarifyKind = 'question' | 'browser_takeover';
+
+/**
+ * Kind-specific detail carried alongside a clarify. Every field is optional and
+ * scoped to one `kind`; a plain `question` uses none of them. Deliberately a
+ * named shape rather than `Record<string, unknown>` — a surface has to be able
+ * to read `meta.url` without a cast.
+ */
+export interface ClarifyMeta {
+  /** `browser_takeover` — the page the user is being handed control of. */
+  url?: string;
+  /** `browser_takeover` — the browser session holding the takeover lock. */
+  sessionId?: string;
+  /**
+   * `browser_takeover` — deep link to the web chat where the hand-back button
+   * lives. Channel surfaces (Telegram/Slack/Discord/WhatsApp) cannot hand a
+   * browser back themselves, so their text form points here. Absent when the
+   * deployment has no reachable web address configured; the text then names
+   * the web chat without a link.
+   */
+  handbackUrl?: string;
+}
+
 /** A structured question issued by an agent mid-turn. */
 export interface ClarifyRequest {
   requestId: string;
@@ -103,6 +138,14 @@ export interface PendingClarify {
    * created) and from an open row with no answer yet.
    */
   answer?: ClarifyResponse;
+  /**
+   * D3 — what this clarify is asking for. Absent on every row written before
+   * the field existed and on every ordinary question, so consumers must read
+   * `row.kind ?? 'question'`.
+   */
+  kind?: ClarifyKind;
+  /** D3 — kind-specific detail. Absent for `question`. */
+  meta?: ClarifyMeta;
 }
 
 /**

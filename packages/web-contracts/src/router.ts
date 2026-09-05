@@ -1712,6 +1712,8 @@ const ConfigGetOutput = z.object({
   webSearchBackend: z.enum(['exa', 'tavily', 'brave']).nullable(),
   /** `web.extract_backend` — web_extract backend; null = auto. */
   webExtractBackend: z.enum(['htmltext']).nullable(),
+  /** `web.searxng.url` — self-hosted metasearch endpoint; null = not configured. */
+  webSearxngUrl: z.string().nullable(),
   /** Context-compression summarizer model (`auxiliary.compression.*`). */
   auxCompression: AuxModelGetSchema,
   /** Vision fallback model (`auxiliary.vision.*`). */
@@ -1789,12 +1791,30 @@ const ConfigGetOutput = z.object({
     /** `toolLoop.maxIdenticalToolCallsWarnAt` */
     maxIdenticalToolCallsWarnAt: z.number().nullable(),
   }),
-  /** `browser.*` — Playwright budgets, milliseconds. */
+  /** `browser.*` — Playwright budgets plus launch posture. */
   browser: z.object({
     /** `browser.navigationTimeoutMs`; default 30000. */
     navigationTimeoutMs: z.number(),
     /** `browser.commandTimeoutMs`; default 10000. */
     commandTimeoutMs: z.number(),
+    /** `browser.headed` — three-state; `'auto'` (the default) is carried
+     *  verbatim and resolved by the session factory, never here. */
+    headed: z.union([z.boolean(), z.literal('auto')]),
+    /** `browser.idleTimeoutMs`; default 600000. */
+    idleTimeoutMs: z.number(),
+    /** `browser.stealth.enabled`; default false — absence is never on. */
+    stealthEnabled: z.boolean(),
+    /** `browser.profiles.enabled`; default false — absence is never on, the
+     *  same as `stealthEnabled`. The runtime agrees: `buildLaunchOptions` in
+     *  `@ethosagent/tools-browser` requires an explicit `=== true`. */
+    profilesEnabled: z.boolean(),
+    /** `browser.proxy.server`; null = no upstream proxy. */
+    proxyServer: z.string().nullable(),
+    /** `browser.proxy.username`; null = unauthenticated proxy. */
+    proxyUsername: z.string().nullable(),
+    /** REDACTED preview of `browser.proxy.password`. The raw credential never
+     *  leaves web-api. */
+    proxyPasswordPreview: z.string().nullable(),
   }),
   /** `gateway.maxInboundMediaBytes` — one cap the four channel adapters read as
    *  an override; null = each adapter's own platform default, which is 25 MB on
@@ -2172,6 +2192,8 @@ const ConfigUpdateInput = z.object({
   webSearchBackend: z.enum(['exa', 'tavily', 'brave']).nullable().optional(),
   /** `web.extract_backend` */
   webExtractBackend: z.enum(['htmltext']).nullable().optional(),
+  /** `web.searxng.url` */
+  webSearxngUrl: z.string().nullable().optional(),
   /** `auxiliary.compression.*` */
   auxCompression: AuxModelUpdateSchema.optional(),
   /** `auxiliary.vision.*` */
@@ -2238,11 +2260,27 @@ const ConfigUpdateInput = z.object({
       maxIdenticalToolCallsWarnAt: z.number().int().min(1).nullable().optional(),
     })
     .optional(),
-  /** `browser.*` timeouts, 1000–600000 ms. Per-field merge; null clears one key. */
+  /** `browser.*`. Per-field merge; null clears one key — except `proxyServer`,
+   *  whose null clears the whole `browser.proxy.*` block (credentials
+   *  included), since credentials with no server refuse boot. */
   browser: z
     .object({
       navigationTimeoutMs: z.number().int().min(1_000).max(600_000).nullable().optional(),
       commandTimeoutMs: z.number().int().min(1_000).max(600_000).nullable().optional(),
+      /** Three-state. Bounds and shape mirror `buildBrowser`. */
+      headed: z
+        .union([z.boolean(), z.literal('auto')])
+        .nullable()
+        .optional(),
+      /** 60000–86400000 ms — must match `buildBrowser`'s bounds. */
+      idleTimeoutMs: z.number().int().min(60_000).max(86_400_000).nullable().optional(),
+      stealthEnabled: z.boolean().nullable().optional(),
+      profilesEnabled: z.boolean().nullable().optional(),
+      /** Requires an explicit http/https/socks4/socks5 scheme. */
+      proxyServer: z.string().nullable().optional(),
+      proxyUsername: z.string().nullable().optional(),
+      /** Write-only; blank keeps the stored secret, null clears the block. */
+      proxyPassword: z.string().nullable().optional(),
     })
     .optional(),
   /** `gateway.maxInboundMediaBytes`, 1 KiB–128 MiB; null clears the override. */

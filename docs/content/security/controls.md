@@ -4,7 +4,7 @@ description: Catalogue of shipped, partial, and planned security controls — ch
 kind: reference
 audience: shared
 slug: security-controls
-updated: 2026-08-12
+updated: 2026-09-05
 ---
 
 Most controls on this page are shipped — code in `packages/` and `extensions/`, tests next to it, audit trail in `observability.db`. A small number are **partial** or **planned** with a designed interface but the enforcement not yet wired; those are tagged inline so customers can plan around them.
@@ -193,6 +193,32 @@ URLs must use `http` or `https`. `file://`, `gopher://`, `ftp://`, and `data:` a
 The transport-level pinning that prevents a re-resolution between the SSRF check and the connect (undici `connect.lookup` override, native `http.request` agent override) is the next step. Designed for, not yet wired in. Documented in the source comments at the linked path.
 
 - Source: `packages/safety/network/src/safe-fetch.ts`
+
+### The browser SSRF guard does not survive an upstream proxy {#ssrf-browser-proxy}
+
+*Status: Not covered. Read this before setting [`browser.proxy.server`](../using/reference/config-yaml.md#browser).*
+
+Browser sessions carry their own SSRF guard: `installRouteGuard` puts a `context.route('**/*')` handler on every Playwright context, and each request is checked by the same `validateUrl` the fetch path uses, with hostnames resolved through `node:dns/promises#lookup`.
+
+That resolution happens in the **Ethos process**. A proxied navigation is never resolved there. Chromium sends `CONNECT <host>:<port>` to the proxy and the **proxy** resolves the name, on its own resolver, inside its own network. So the guard checks an address the connection does not use, and a hostname that answers with a public IP here can answer with `10.0.0.5` inside the proxy's LAN. Ethos cannot see that and does not block it.
+
+Literal IPs are unaffected — a URL with a private address in it is rejected before any resolution happens, proxy or not. The gap is names only, and it is not a bug we can close from this side: the resolver that matters belongs to the proxy.
+
+Deploy a proxy you trust not to act as an SSRF pivot — one that cannot reach your internal network, or that enforces its own egress policy. The browser route guard is not that control and must not be relied on as one.
+
+- Source: [`extensions/tools-browser/src/session-route.ts`](https://github.com/ethosagent/ethos/blob/main/extensions/tools-browser/src/session-route.ts)
+
+### A takeover hands a human the agent's live browser {#browser-takeover-exposure}
+
+*Status: Shipped, opt-in per personality.*
+
+`browser_request_takeover` pauses the agent and hands the **live browser session** to whoever answers the request. That session is not a blank window: it holds every cookie and every logged-in tab the agent accumulated, and when [`browser.profiles.enabled`](../using/reference/config-yaml.md#browser) is on it is signed into whatever that personality's persistent profile is signed into — across turns, and across `/new`.
+
+Two things follow. The window itself is open on the machine running Ethos, so anyone at that machine can drive it. And the request is raised with `answerableBy: 'anyone'`, so in a group chat any member — not only the person the agent was talking to — may cancel it or follow the link into the web chat to hand it back.
+
+Grant the tool in `toolset.yaml` only to personalities whose browser you are willing to hand over, and keep a persistent profile signed into accounts you would put in front of that audience.
+
+- Source: [`extensions/tools-browser/src/browser-takeover.ts`](https://github.com/ethosagent/ethos/blob/main/extensions/tools-browser/src/browser-takeover.ts)
 
 ## Prompt-injection defenses {#prompt-injection-defenses}
 

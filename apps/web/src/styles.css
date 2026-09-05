@@ -8798,3 +8798,280 @@ a.stage-header-scope:hover {
   font-family: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 11px;
 }
+
+/* ---------------------------------------------------------------------------
+   Browser takeover panel (clarify `kind: 'browser_takeover'`, D3).
+
+   A panel, not a card that appeared: the agent is stopped and the user holds
+   its browser, so this reads as one statement with one action. It stays after
+   it settles — the resolved row replaces the body in place.
+
+   Every state is a glyph AND a word; colour never carries the meaning alone.
+   --------------------------------------------------------------------------- */
+.clarify-card-takeover {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 16px;
+  border: 1px solid var(--ethos-border-strong);
+  background: var(--ethos-bg-elevated);
+}
+
+.clarify-takeover-headline {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--ethos-text);
+}
+
+.clarify-takeover-url {
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: var(--ethos-text-secondary);
+}
+
+.clarify-takeover-sub {
+  margin: 0;
+  font-size: 13px;
+  color: var(--ethos-text-secondary);
+}
+
+.clarify-takeover-countdown {
+  margin: 0;
+}
+
+/* The one primary action, and the only ≥44px target on the panel. */
+.clarify-takeover-handback.clarify-takeover-handback {
+  align-self: flex-start;
+  min-height: 44px;
+  padding-inline: 20px;
+}
+
+.clarify-takeover-resolved {
+  margin: 0;
+  color: var(--ethos-text-secondary);
+}
+
+.clarify-takeover-glyph {
+  color: var(--ethos-text);
+}
+
+/* ---------------------------------------------------------------------------
+   Screencast takeover stage (B3)
+
+   A MODE on the Call Stage template: the same two-column grid, the same 320px
+   right column, the same "no rail, no PersonalityBar" posture. What differs is
+   what fills column one — a live JPEG of the agent's browser instead of the
+   shape — and that the column's primary action HANDS THE BROWSER BACK rather
+   than hanging up.
+
+   Desktop-only in v1: the page never enters the mode below 760px (Chat.tsx
+   renders the note beside the card instead), so there is no narrow variant of
+   this grid to write.
+   --------------------------------------------------------------------------- */
+.takeover-stage {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 320px);
+  min-height: 0;
+  background: var(--ethos-bg);
+}
+
+/* Column 1 — the page under takeover. Focusable, because it is where the keys
+   go: `tabIndex={0}` on the container rather than on the image, so one focus
+   ring covers the whole surface and the keyboard path is not duplicated. */
+.takeover-stage-main {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  min-width: 0;
+}
+
+.takeover-stage-main:focus-visible {
+  outline: 2px solid var(--accent, var(--ethos-accent));
+  outline-offset: -2px;
+}
+
+.takeover-stage-view {
+  display: block;
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  border: 1px solid var(--ethos-border);
+  cursor: crosshair;
+  user-select: none;
+}
+
+/* No frame yet, or no lane at all. The sentence carries the reason — a blank
+   rectangle would let a person believe they are driving something. */
+.takeover-stage-blank {
+  margin: 0;
+  max-width: 46ch;
+  text-align: center;
+  font-size: 13px;
+  color: var(--ethos-text-secondary);
+}
+
+.takeover-stage-glyph {
+  color: var(--ethos-text);
+}
+
+/* Column 2 — this takeover. */
+.takeover-stage-side {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border-left: 1px solid var(--ethos-border);
+  background: var(--ethos-bg-elevated);
+}
+
+/* Same shape as the Call Stage's transcript head: the label, and the one exit
+   that is not the primary action. The button supplies the row's height. */
+.takeover-stage-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 4px 10px 4px 16px;
+  border-bottom: 1px solid var(--ethos-border);
+}
+
+.takeover-stage-back {
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+  padding-inline: 12px;
+  border: 0;
+  background: none;
+  font-size: 13px;
+  color: var(--ethos-text-secondary);
+  cursor: pointer;
+}
+
+.takeover-stage-back:hover {
+  color: var(--ethos-text);
+}
+
+.takeover-stage-back:focus-visible {
+  outline: 2px solid var(--accent, var(--ethos-accent));
+  outline-offset: 2px;
+}
+
+.takeover-stage-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 16px;
+  min-height: 0;
+}
+
+.takeover-stage-url {
+  overflow-wrap: anywhere;
+  color: var(--ethos-text-secondary);
+}
+
+.takeover-stage-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--ethos-text-secondary);
+}
+
+/* Elapsed is a NUMBER, so it is the one thing allowed the tertiary tone. */
+.takeover-stage-elapsed {
+  color: var(--ethos-text-tertiary);
+  font-variant-numeric: tabular-nums;
+}
+
+.takeover-stage-notice {
+  font-size: 13px;
+  color: var(--ethos-text-secondary);
+}
+
+.takeover-stage-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--ethos-text-tertiary);
+}
+
+.takeover-stage-dot-live {
+  background: var(--accent, var(--ethos-accent));
+  animation: takeover-pulse 1600ms ease-in-out infinite;
+}
+
+@keyframes takeover-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+
+/* The one primary. ≥44px, at the base of the column where the eye ends up. */
+.takeover-stage-handback {
+  margin: auto 16px 16px;
+  min-height: 44px;
+  padding-inline: 20px;
+  border: 1px solid var(--ethos-border-strong);
+  border-radius: var(--ethos-radius-sm, 4px);
+  background: var(--accent, var(--ethos-accent));
+  color: var(--ethos-bg);
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.takeover-stage-handback:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.takeover-stage-handback:focus-visible {
+  outline: 2px solid var(--accent, var(--ethos-accent));
+  outline-offset: 2px;
+}
+
+/* The way in, and the note that replaces it on a phone. Both sit beside the
+   takeover card, not inside it — the card holds the hand-back either way. */
+.takeover-enter {
+  display: flex;
+  padding: 0 16px 8px;
+}
+
+.takeover-enter-btn {
+  min-height: 44px;
+  padding-inline: 16px;
+  border: 1px solid var(--ethos-border-strong);
+  border-radius: var(--ethos-radius-sm, 4px);
+  background: none;
+  font-size: 13px;
+  color: var(--ethos-text);
+  cursor: pointer;
+}
+
+.takeover-enter-btn:focus-visible {
+  outline: 2px solid var(--accent, var(--ethos-accent));
+  outline-offset: 2px;
+}
+
+.takeover-note {
+  margin: 0;
+  padding: 0 16px 8px;
+  font-size: 13px;
+  color: var(--ethos-text-secondary);
+}
+
+.takeover-note-glyph {
+  color: var(--ethos-text);
+}
+
+/* The pulse stops; the glyph and the word carry the state on their own. */
+@media (prefers-reduced-motion: reduce) {
+  .takeover-stage-dot-live {
+    animation: none;
+  }
+}
