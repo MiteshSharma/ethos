@@ -38,24 +38,23 @@ describe('resolveExecutionBackendName', () => {
     expect(resolveExecutionBackendName(p({}), false)).toBe('none');
   });
 
-  it('honors an explicit execution override even when an exec tool is present', () => {
-    expect(
-      resolveExecutionBackendName(p({ toolset: ['terminal'], execution: 'local' }), false),
-    ).toBe('local');
+  it('honors an explicit execution requirement even when an exec tool is present', () => {
     expect(
       resolveExecutionBackendName(p({ toolset: ['terminal'], execution: 'none' }), false),
     ).toBe('none');
   });
 
-  it('resolves an ssh override to ssh only when a target is configured', () => {
-    // `sshConfigured: false` — nothing to connect to, so the honest answer is
-    // `local` (host), never a posture claiming a remote machine.
-    expect(resolveExecutionBackendName(p({ toolset: ['terminal'], execution: 'ssh' }), false)).toBe(
-      'local',
-    );
-    expect(resolveExecutionBackendName(p({ toolset: ['terminal'], execution: 'ssh' }), true)).toBe(
-      'ssh',
-    );
+  it('maps a remote requirement to ssh, and NEVER to the host when no target exists', () => {
+    // A requirement is not a preference. With no `execution.ssh.host` there is
+    // nothing to connect to — and the answer is still `ssh`, refused by the
+    // posture, never `local`. Resolving to the host here would run the work on
+    // precisely the machine the personality said it did not belong on.
+    expect(
+      resolveExecutionBackendName(p({ toolset: ['terminal'], execution: 'remote' }), false),
+    ).toBe('ssh');
+    expect(
+      resolveExecutionBackendName(p({ toolset: ['terminal'], execution: 'remote' }), true),
+    ).toBe('ssh');
   });
 
   it('ignores an unrecognized execution override and falls back to tool inference', () => {

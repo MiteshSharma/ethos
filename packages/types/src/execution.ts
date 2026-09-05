@@ -115,6 +115,21 @@ export interface ExecutionPosture {
    * `none` — chat-only personality; no execution backend at all.
    */
   backend: 'docker' | 'local' | 'ssh' | 'none';
+  /**
+   * What the PERSONALITY required (`execution:` in its `config.yaml`), when it
+   * required anything. A requirement is not a transport: `remote` says the work
+   * belongs on another machine, `none` says this personality does not execute,
+   * and neither names how. Absent means the personality stated no requirement
+   * and the deployment chose freely.
+   *
+   * Carried alongside `backend` rather than folded into it because a surface
+   * must be able to show BOTH — what was asked for and what this machine
+   * actually provides. They diverge exactly where honesty matters: a `remote`
+   * requirement on a host with no configured target resolves to a refusal, and
+   * an operator reading only `backend` could not tell that refusal apart from a
+   * personality that never wanted to execute.
+   */
+  requirement?: 'remote' | 'none';
   /** OS-layer container network gate. `none` = air-gapped; `bridge` = open egress. */
   networkMode: 'none' | 'bridge';
   /** Container memory ceiling in MB (docker). */
@@ -146,11 +161,14 @@ export interface ExecutionPosture {
    * forbids `local`, this field is absent and `backend` stays `docker` with a
    * `dockerAbsent` hard-fail decision (tools become `not_available`).
    *
-   * `ssh-unavailable` mirrors this for an `ssh`-posture personality when no ssh
-   * execution backend is wired (Phase 2a wires none): rather than silently
-   * running on the host while the sheet claims "ssh (remote host)", a permitting
-   * constitution resolves to honest `local` (host) with this reason, and a
-   * forbidding one keeps `backend: 'ssh'` so exec tools refuse (`not_available`).
+   * `ssh-unavailable` is NO LONGER PRODUCED. It described the honest-local
+   * fallback an `ssh`-posture personality took when no target was configured,
+   * and that fallback is gone: an `execution: remote` requirement the
+   * deployment cannot satisfy is now refused outright (`sshRefused.reason ===
+   * 'unconfigured'`), regardless of what the constitution permits, because
+   * "your work belongs on another machine" is not honoured by running it on
+   * this one with a label. The literal is retained so already-deployed clients
+   * that parse this union keep parsing; nothing emits it.
    */
   hostFallback?: {
     /** Why the requested sandbox/remote backend could not run. */
@@ -165,15 +183,15 @@ export interface ExecutionPosture {
   sshTarget?: string;
   /**
    * Why an `ssh` posture will NOT reach its remote target. Present only when
-   * `backend` is `ssh` AND execution is refused outright — i.e. the constitution
-   * forbids the honest `local` host fallback, so exec tools become
-   * `not_available` rather than silently running on this machine. A permitting
-   * constitution never lands here: an unconfigured target becomes honest `local`
-   * with `hostFallback.reason === 'ssh-unavailable'`, and a configured one keeps
-   * `backend: 'ssh'` and actually routes remotely.
+   * `backend` is `ssh` AND execution is refused outright, so exec tools become
+   * `not_available` rather than silently running on this machine. A `remote`
+   * requirement with a configured target under a permitting constitution never
+   * lands here — it keeps `backend: 'ssh'` and actually routes remotely.
    *
    *   - `unconfigured` — no `execution.ssh.host` is set, so there is nothing to
-   *     connect to, and the host fallback is forbidden.
+   *     connect to. Unconditional: the constitution is not consulted, because a
+   *     personality that declared its work belongs elsewhere is not served by
+   *     running it here.
    *   - `constitution-requires-sandbox` — a target IS configured, but ssh is
    *     remote-host trust, not mount-confinement, so a constitution setting
    *     `execution.requireSandbox` / `forbidLocal` refuses it.

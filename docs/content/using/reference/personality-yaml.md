@@ -120,22 +120,24 @@ streamingTimeoutMs: 300000
 
 ## execution {#execution}
 
-Type: string · Default: unset (the resolver decides)
+Type: string · Default: unset (the deployment decides)
 
-Execution posture — where this personality's execution tools (`terminal`, `run_code`, `run_tests`, `lint`) run. Identity, not setting: an agent whose hands only ever reach a remote build box is a different agent from one holding a shell on the host. Absent means the resolver picks from the environment, `~/.ethos/config.yaml`, and the constitution. A posture the deployment cannot satisfy is refused or honestly relabelled, never silently downgraded — `ethos personality show <id>` prints which happened.
+Execution requirement — what this personality demands of wherever its execution tools (`terminal`, `run_code`, `run_tests`, `lint`) run. Two values:
 
-- `local` — the Ethos host, un-sandboxed.
-- `docker` — a mount-confined container.
-- `ssh` — a remote target reached over ssh. Refused under a constitution that sets `execution.requireSandbox` or `execution.forbidLocal`: ssh is remote-host trust, not confinement.
-- `none` — execution refused.
+- `remote` — this personality's work belongs on a machine that is **not** the one Ethos runs on. Refused under a constitution that sets `execution.requireSandbox` or `execution.forbidLocal`: a remote host is trust, not confinement.
+- `none` — this personality does not execute.
 
 ```yaml
-execution: ssh
+execution: remote
 ```
 
-- This is **not** the ssh host. The target — host, user, port, identity file, known-hosts file, remote workdir — is operator config under `execution.ssh.*` in [`~/.ethos/config.yaml`](./config-yaml.md), one per deployment. Two deployments of the same personality agree on the posture and disagree about the machine. Never put a hostname, user, or key path in this file.
-- An unrecognised value (`execution: remote`) is a load error, not a silent drop.
-- The posture is resolved when a loop is composed, so a change takes effect on restart.
+A personality states a requirement; it never names a transport. `docker`, `local` and `ssh` are machine facts two deployments of the same personality reasonably disagree about — one runs inside a container, one has no Docker daemon, one has an ssh target — so the transport is the operator's, resolved from the environment, [`~/.ethos/config.yaml`](./config-yaml.md), and the constitution. Absent means no requirement at all: an exec-bearing personality is sandboxed by default, and runs in-process when Ethos is itself containerized.
+
+- This is **not** the remote host. The target — host, user, port, identity file, known-hosts file, remote workdir — is operator config under `execution.ssh.*` in [`~/.ethos/config.yaml`](./config-yaml.md), one per deployment. Never put a hostname, user, or key path in this file.
+- **A requirement this deployment cannot meet is refused, not downgraded.** `execution: remote` with no `execution.ssh.host` configured leaves the execution tools unavailable. It does not fall back to running the work here, whatever the constitution permits — a permitting constitution grants the host, which is the one machine this personality ruled out.
+- `ethos personality show <id>` prints the requirement and the resolved transport on separate lines, so you can see both what was asked for and what you got.
+- An unrecognised value is a load error, not a silent drop. So are the retired transport literals `ssh`, `docker` and `local`; the error names the replacement.
+- The requirement is resolved when a loop is composed, so a change takes effect on restart.
 
 ## fs_reach.read / fs_reach.write {#fs-reach}
 
@@ -405,6 +407,6 @@ Optional sibling directory at `~/.ethos/personalities/<id>/skills/`. Per-persona
 - [CLI reference](./cli.md#ethos-personality) — the `ethos personality` subcommands that scaffold and edit these files.
 - [Glossary: personality](../../getting-started/glossary.md#personality) — one-line definition shared across every page that names the construct.
 - [Glossary: fs_reach](../../getting-started/glossary.md#fs-reach) — the path-allowlist field this file declares; backed by `ScopedStorage`.
-- [Run agent tools on a remote host](../how-to/run-tools-over-ssh.md) — the `execution: ssh` posture end to end, and what the remote host is exposed to.
+- [Run agent tools on a remote host](../how-to/run-tools-over-ssh.md) — the `execution: remote` requirement end to end, and what the remote host is exposed to.
 - [Retrieve files the agent wrote](../how-to/retrieve-agent-files.md) — `fs_reach.workdir` in practice, on a headless deployment.
 - [Local voice: Kokoro TTS + Whisper large v3 STT](../how-to/local-voice.md) — configure the providers this file's `voice.*` block picks between.

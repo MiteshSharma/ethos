@@ -387,3 +387,33 @@ describe('SQLiteA2aTaskStore — retention pruning', () => {
     store.close();
   });
 });
+
+// ---------------------------------------------------------------------------
+// Durability posture — see AGENTS.md's SQLite store roster.
+// ---------------------------------------------------------------------------
+
+/** Reads `PRAGMA synchronous` off the store's OWN handle — it is a
+ *  per-connection setting, so a second connection to the same file would
+ *  report its own default and prove nothing. 2 = FULL (SQLite's default),
+ *  1 = NORMAL. */
+function syncPragma(store: unknown): number {
+  const rows = (store as { db: { pragma(s: string): unknown } }).db.pragma('synchronous');
+  return (rows as Array<{ synchronous: number }>)[0]?.synchronous ?? -1;
+}
+
+describe('SQLiteA2aTaskStore — durability posture', () => {
+  it('stays at synchronous = FULL', () => {
+    // NOT a candidate for `synchronous = NORMAL` — pinned so a later blanket
+    // sweep cannot take it silently.
+    //
+    // The idempotency key surviving a restart is, in this store's own words,
+    // the whole point of it: it is what makes retrying a `message/send` safe.
+    // Under NORMAL a power cut can roll back the row a retry would have
+    // matched, and the agent loop is re-run for a task that already ran. Task
+    // writes happen at task boundaries, not in a loop.
+    const store = new SQLiteA2aTaskStore(':memory:');
+    // Asserted against the opened database, not the source text.
+    expect(syncPragma(store)).toBe(2);
+    store.close();
+  });
+});

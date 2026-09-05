@@ -288,13 +288,50 @@ describe('renderCharacterSheet — ## Execution section', () => {
     expect(sheet).not.toMatch(/ssh \(remote host\)/);
   });
 
-  it('marks a forbidden-ssh posture as refusing exec (P2), never silent host', () => {
+  it('says a target is configured but unnamed rather than letting the line go missing', () => {
+    // `backend: 'ssh'` with no `sshTarget` and no refusal means the deployment
+    // HAS a target (an unconfigured one always carries `sshRefused`) and this
+    // surface simply was not handed the address. Saying nothing would read as
+    // "no target".
     const sheet = renderCharacterSheet(fullConfig, soulMd, {
       posture: { ...dockerPosture(), backend: 'ssh', mounts: [], scratchPaths: [] },
       platform: 'linux',
     });
-    expect(sheet).toMatch(/Note \(P2\)/);
-    expect(sheet).toMatch(/execution tools refuse \(not_available\)/);
+    expect(sheet).toMatch(/ssh target: \(configured, but this surface was not given the address\)/);
+  });
+
+  // The two halves of the honesty contract on one line each: what the
+  // personality ASKED for, and what this deployment actually resolved. An
+  // operator reading only the posture cannot tell a refused `remote`
+  // requirement apart from a personality that never wanted to execute.
+  it('renders the requirement and the resolved transport as separate lines', () => {
+    const refused = renderCharacterSheet(fullConfig, soulMd, {
+      posture: {
+        ...dockerPosture(),
+        backend: 'ssh',
+        requirement: 'remote',
+        mounts: [],
+        scratchPaths: [],
+        sshRefused: { reason: 'unconfigured', message: 'execution refused: …' },
+      },
+      platform: 'linux',
+    });
+    expect(refused).toMatch(/Required:\s+remote \(another machine/);
+    expect(refused).toMatch(/Posture:\s+ssh \(remote host\)/);
+
+    const declaredNone = renderCharacterSheet(fullConfig, soulMd, {
+      posture: { ...dockerPosture(), backend: 'none', requirement: 'none' },
+      platform: 'linux',
+    });
+    expect(declaredNone).toMatch(/Required:\s+none \(this personality does not execute\)/);
+
+    // Unstated is rendered explicitly, never as a blank a reader has to guess at.
+    const unstated = renderCharacterSheet(fullConfig, soulMd, {
+      posture: dockerPosture(),
+      platform: 'linux',
+    });
+    expect(unstated).toMatch(/Required:\s+\(none declared — the deployment chooses\)/);
+    expect(unstated).toMatch(/Posture:\s+docker \(sandboxed\)/);
   });
 
   // A configured target makes the "no ssh backend is wired" note a lie — an ssh
@@ -375,10 +412,9 @@ describe('renderCharacterSheet — ## Execution section', () => {
     expect(sheet).toContain('- ssh target: deploy@build-01:2222');
   });
 
-  // Unconfigured + FORBIDDING constitution: the resolver's message is strictly
-  // more specific than the P2 note, so the note is suppressed — one canonical
-  // explanation, never two lines saying nearly the same thing.
-  it('replaces the P2 note with the resolver message when ssh is refused as unconfigured', () => {
+  // Unconfigured: the resolver's message is the one canonical explanation, and
+  // the sheet renders it verbatim rather than composing a second wording.
+  it('renders the resolver message when a remote requirement is refused as unconfigured', () => {
     const sheet = renderCharacterSheet(fullConfig, soulMd, {
       posture: {
         ...dockerPosture(),
@@ -388,16 +424,15 @@ describe('renderCharacterSheet — ## Execution section', () => {
         sshRefused: {
           reason: 'unconfigured',
           message:
-            'ssh refused: no execution.ssh.host is configured, and the constitution forbids the local host fallback (execution.requireSandbox / forbidLocal).',
+            'execution refused: this personality requires remote execution (execution: remote) and no execution.ssh.host is configured on this deployment.',
         },
       },
       platform: 'linux',
     });
     expect(sheet).toContain(
-      'ssh refused: no execution.ssh.host is configured, and the constitution forbids the local host fallback (execution.requireSandbox / forbidLocal).',
+      'execution refused: this personality requires remote execution (execution: remote) and no execution.ssh.host is configured on this deployment.',
     );
-    expect(sheet).not.toMatch(/Note \(P2\)/);
-    expect(sheet).not.toMatch(/no ssh execution backend is wired in this build/);
+    expect(sheet).not.toMatch(/ssh target: \(configured/);
     expect(sheet).not.toContain('- ssh target:');
   });
 

@@ -110,6 +110,28 @@ export class SQLiteObservabilityStore implements ObservabilityStore {
   constructor(dbPath: string) {
     this.db = new Database(dbPath);
     this.db.pragma('journal_mode = WAL');
+    // A DURABILITY TRADE. SQLite's default `synchronous = FULL` fsyncs the WAL
+    // on every commit, and that fsync is essentially the entire write: measured
+    // here, 5.09 ms per `insertSpan` against 0.06 ms with NORMAL (79x). The cost
+    // is per-COMMIT, and this store commits many times per turn — a span per
+    // tool call and per LLM call, plus events, plus metric counters — all of it
+    // synchronous, inline, on the path the agent loop is trying to run.
+    //
+    // What NORMAL gives up, per sqlite.org/pragma.html#pragma_synchronous: in
+    // WAL mode it stays "safe from corruption" and "always consistent", but "a
+    // transaction committed in WAL mode with synchronous=NORMAL might roll back
+    // following a power loss or system crash". Application crashes lose nothing.
+    //
+    // Acceptable because this is telemetry with an explicit retention window
+    // (see retention.ts). The tail a power cut could drop is the trace of the
+    // turn that was in flight when the machine died — a turn that did not
+    // finish either. The one place worth naming: `markTraceExported` under
+    // NORMAL could roll back and let the Langfuse poller export a trace twice.
+    // A duplicate telemetry row is the correct thing to risk here; a lost
+    // OBLIGATION is not, which is why delivery-ledger, job-store, notify-queue,
+    // inbound-dedup and the A2A task store all stay at FULL. See AGENTS.md's
+    // SQLite roster before copying this line into another store.
+    this.db.pragma('synchronous = NORMAL');
     this.db.pragma('busy_timeout = 5000');
     this.migrate();
   }

@@ -1,3 +1,6 @@
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import type { CardEnvelope } from '@ethosagent/web-contracts';
 import { afterEach, describe, expect, it } from 'vitest';
 import { SQLiteCardStore } from '../index';
@@ -134,5 +137,73 @@ describe('SQLiteCardStore', () => {
     // The source is untouched, and the fork keeps appending after the copy.
     expect(s.list('sess-a')).toHaveLength(2);
     expect(s.append('sess-fork', 'call-3', textCard('three'))).toBe(2);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Durability posture (see the `synchronous = NORMAL` note in the constructor)
+// ---------------------------------------------------------------------------
+
+/** Reads `PRAGMA synchronous` off the store's OWN handle — it is a
+ *  per-connection setting, so a second connection to the same file would
+ *  report its own default and prove nothing. 2 = FULL (SQLite's default),
+ *  1 = NORMAL. */
+function syncPragma(store: unknown): number {
+  const rows = (store as { db: { pragma(s: string): unknown } }).db.pragma('synchronous');
+  return (rows as Array<{ synchronous: number }>)[0]?.synchronous ?? -1;
+}
+
+describe('SQLiteCardStore — durability posture', () => {
+  let dir: string | undefined;
+  let fileStore: SQLiteCardStore | undefined;
+  let memStore: SQLiteCardStore | undefined;
+
+  function openMem(): SQLiteCardStore {
+    memStore = new SQLiteCardStore(':memory:');
+    return memStore;
+  }
+
+  afterEach(() => {
+    fileStore?.close();
+    fileStore = undefined;
+    memStore?.close();
+    memStore = undefined;
+    if (dir) rmSync(dir, { recursive: true, force: true });
+    dir = undefined;
+  });
+
+  it('opens at synchronous = NORMAL', () => {
+    // A card is a rendering of a tool result and this store already degrades
+    // one card at a time by design. Asserted against the opened database, not
+    // the source text.
+    expect(syncPragma(openMem())).toBe(1);
+  });
+
+  it('still opens in WAL mode', () => {
+    // Checked on a FILE, not ':memory:' — an in-memory database reports
+    // journal_mode 'memory' and could never show a WAL regression. NORMAL is
+    // only corruption-safe in WAL, so this is the other half of the trade.
+    dir = mkdtempSync(join(tmpdir(), 'session-cards-sync-'));
+    fileStore = new SQLiteCardStore(join(dir, 'cards.db'));
+    const rows = (fileStore as unknown as { db: { pragma(s: string): unknown } }).db.pragma(
+      'journal_mode',
+    );
+    expect((rows as Array<{ journal_mode: string }>)[0]?.journal_mode).toBe('wal');
+  });
+
+  it('still enforces STRICT column types', () => {
+    const db = (
+      openMem() as unknown as { db: { prepare(s: string): { run(...a: unknown[]): unknown } } }
+    ).db;
+    // `seq` is INTEGER in a STRICT table and 'first' has no lossless
+    // conversion, so the row must be rejected rather than coerced.
+    expect(() =>
+      db
+        .prepare(
+          `INSERT INTO session_cards (session_id, tool_call_id, seq, envelope, created_at)
+           VALUES (?, ?, ?, ?, ?)`,
+        )
+        .run('sess-strict', 'call-strict', 'first', '{}', 1),
+    ).toThrow();
   });
 });

@@ -250,3 +250,57 @@ describe('SQLiteObservabilityStore schema versioning', () => {
     expect(() => new SQLiteObservabilityStore(path)).toThrow(/refusing to open to avoid downgrade/);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Durability posture (see the `synchronous = NORMAL` note in the constructor)
+// ---------------------------------------------------------------------------
+
+/** Reads `PRAGMA synchronous` off the store's OWN handle — it is a
+ *  per-connection setting, so a second connection to the same file would
+ *  report its own default and prove nothing. 2 = FULL (SQLite's default),
+ *  1 = NORMAL. */
+function syncPragma(store: unknown): number {
+  const rows = (store as { db: { pragma(s: string): unknown } }).db.pragma('synchronous');
+  return (rows as Array<{ synchronous: number }>)[0]?.synchronous ?? -1;
+}
+
+describe('SQLiteObservabilityStore — durability posture', () => {
+  let store: SQLiteObservabilityStore;
+
+  beforeEach(() => {
+    store = new SQLiteObservabilityStore(tmpDb());
+  });
+
+  afterEach(() => {
+    store.close();
+  });
+
+  it('opens at synchronous = NORMAL', () => {
+    // Telemetry with a retention window: the tail a power cut can drop belongs
+    // to a turn that did not finish either. Asserted against the opened
+    // database, not the source text.
+    expect(syncPragma(store)).toBe(1);
+  });
+
+  it('still opens in WAL mode', () => {
+    // NORMAL is only corruption-safe in WAL. If journal_mode regressed, the
+    // setting above would stop being the trade it is documented as.
+    const rows = (store as unknown as { db: { pragma(s: string): unknown } }).db.pragma(
+      'journal_mode',
+    );
+    expect((rows as Array<{ journal_mode: string }>)[0]?.journal_mode).toBe('wal');
+  });
+
+  it('still enforces STRICT column types', () => {
+    const db = (
+      store as unknown as { db: { prepare(s: string): { run(...a: unknown[]): unknown } } }
+    ).db;
+    // `start_ts` is INTEGER in a STRICT table and 'soon' has no lossless
+    // conversion, so the row must be rejected rather than coerced.
+    expect(() =>
+      db
+        .prepare('INSERT INTO traces (trace_id, kind, start_ts) VALUES (?, ?, ?)')
+        .run(randomUUID(), 'turn', 'soon'),
+    ).toThrow();
+  });
+});

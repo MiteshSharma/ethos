@@ -407,3 +407,33 @@ describe('VectorMemoryProvider', () => {
     });
   });
 });
+
+// ---------------------------------------------------------------------------
+// Durability posture — see AGENTS.md's SQLite store roster.
+// ---------------------------------------------------------------------------
+
+/** Reads `PRAGMA synchronous` off the provider's OWN handle — it is a
+ *  per-connection setting, so a second connection to the same file would
+ *  report its own default and prove nothing. 2 = FULL (SQLite's default),
+ *  1 = NORMAL. */
+function syncPragma(store: unknown): number {
+  const rows = (store as { db: { pragma(s: string): unknown } }).db.pragma('synchronous');
+  return (rows as Array<{ synchronous: number }>)[0]?.synchronous ?? -1;
+}
+
+describe('VectorMemoryProvider — durability posture', () => {
+  it('stays at synchronous = FULL', () => {
+    // NOT a candidate for `synchronous = NORMAL` — pinned so a later blanket
+    // sweep cannot take it silently.
+    //
+    // memory.db is the SOURCE OF TRUTH for memory content here, not an index
+    // over it: `exportTo` writes markdown, but that is an export, and nothing
+    // rebuilds this table from it. A rolled-back tail is a thing the agent was
+    // told to remember and then didn't. Separately, every write is gated
+    // behind an embedding forward pass, so a 4.5ms fsync is not the cost on
+    // this path even if the risk were acceptable.
+    //
+    // Asserted against the opened database, not the source text.
+    expect(syncPragma(provider)).toBe(2);
+  });
+});

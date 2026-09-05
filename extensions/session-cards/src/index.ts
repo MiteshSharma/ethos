@@ -90,6 +90,26 @@ export class SQLiteCardStore implements CardStore {
     }
     this.db = new Database(dbPath);
     this.db.pragma('journal_mode = WAL');
+    // A DURABILITY TRADE. The default `synchronous = FULL` fsyncs the WAL on
+    // every commit; measured here that is 4.04 ms per `append()` against
+    // 0.02 ms with NORMAL (181x), and `append()` runs synchronously on the
+    // agent loop's `tool_end` path, once per card-emitting tool call.
+    //
+    // Per sqlite.org/pragma.html#pragma_synchronous, WAL + NORMAL is still
+    // "safe from corruption" and "always consistent"; what it drops is
+    // durability — "a transaction committed in WAL mode with
+    // synchronous=NORMAL might roll back following a power loss or system
+    // crash". An application crash loses nothing.
+    //
+    // Acceptable because a card is a rendering of a tool result, and this
+    // store is already built to degrade one card at a time rather than fail:
+    // a row that no longer parses is skipped on read (see the note above).
+    // A power cut costs the last few cards of a transcript whose own tail
+    // went with them. Nothing consults this table to decide whether work
+    // still needs doing — the stores that do (delivery-ledger, job-store,
+    // notify-queue, inbound-dedup, the A2A task store) stay at FULL. See
+    // AGENTS.md's SQLite roster before copying this line into another store.
+    this.db.pragma('synchronous = NORMAL');
     this.db.pragma('busy_timeout = 5000');
     this.db.exec(SCHEMA);
     this.logger = options.logger ?? noopLogger;

@@ -20,7 +20,7 @@ Route a personality's execution tools to a remote host over ssh.
 
 ## Read this before you enable it
 
-**`terminal` gives the model unrestricted file access on the remote host, by design.** Only the four execution tools are routed. File tools stay on the Ethos machine, confined by that personality's `fs_reach` allowlist and the non-overridable deny floor in [`scoped-fs.ts`](https://github.com/ethosagent/ethos/blob/main/packages/core/src/scoped/scoped-fs.ts) — and **there is no remote equivalent of either**. Nothing re-implements the path allowlist or the deny floor on the other side of the connection. Enabling `execution: ssh` hands the agent a shell on another machine with exactly the reach of the login user, and the framework will not narrow it for you.
+**`terminal` gives the model unrestricted file access on the remote host, by design.** Only the four execution tools are routed. File tools stay on the Ethos machine, confined by that personality's `fs_reach` allowlist and the non-overridable deny floor in [`scoped-fs.ts`](https://github.com/ethosagent/ethos/blob/main/packages/core/src/scoped/scoped-fs.ts) — and **there is no remote equivalent of either**. Nothing re-implements the path allowlist or the deny floor on the other side of the connection. Enabling `execution: remote` hands the agent a shell on another machine with exactly the reach of the login user, and the framework will not narrow it for you.
 
 Narrow it yourself, on the remote host: a dedicated unprivileged user, a key restricted to that user, and no sudo. Treat the target as a machine the agent owns, not as a machine you also use. An exec-backed remote filesystem with its own deny floor is planned, not shipped.
 
@@ -30,7 +30,7 @@ Narrow it yourself, on the remote host: a dedicated unprivileged user, a key res
 
 **`process_*` tools are not routed over ssh.** A personality on the ssh posture cannot start, list, watch, or stop long-running processes on the remote host. The remote lifecycle design (signalling, environment, reconnection) is deferred.
 
-**A constitution that requires a sandbox still refuses ssh.** ssh is remote-host trust, not confinement. The backend's attestation reports one true property — `noDockerSocket` — and eight false, and [`isStrictAttestation`](https://github.com/ethosagent/ethos/blob/main/packages/types/src/sandbox.ts) demands all nine. So a personality under `execution.requireSandbox` or `execution.forbidLocal` gets its execution tools refused rather than routed. See [Recover from constitution safe mode](safe-mode.md) for where the constitution lives.
+**A constitution that requires a sandbox still refuses remote execution.** ssh is remote-host trust, not confinement. The backend's attestation reports one true property — `noDockerSocket` — and eight false, and [`isStrictAttestation`](https://github.com/ethosagent/ethos/blob/main/packages/types/src/sandbox.ts) demands all nine. So a personality under `execution.requireSandbox` or `execution.forbidLocal` gets its execution tools refused rather than routed. See [Recover from constitution safe mode](safe-mode.md) for where the constitution lives.
 
 ## Prerequisites
 
@@ -65,7 +65,7 @@ execution.ssh.strictHostKeys: accept-new
 
 | Key | Type | Default | Description |
 | --- | --- | --- | --- |
-| `execution.ssh.host` | string | — | Hostname or IP of the target. **Its presence is the switch**: without it the whole block is absent and an `ssh` personality falls back honestly. Must not be empty. |
+| `execution.ssh.host` | string | — | Hostname or IP of the target. **Its presence is the switch**: without it the whole block is absent and an `execution: remote` personality has its execution tools refused. Must not be empty. |
 | `execution.ssh.user` | string | ssh's own resolution | Remote login user. Absent means the local username, or whatever `~/.ssh/config` matches for this host. |
 | `execution.ssh.port` | integer | `22` | Remote sshd port. Must be 1–65535. |
 | `execution.ssh.identityFile` | string | ssh-agent or ssh's default key search | Private key **path**, passed as `ssh -i`. Never key material, and passphrase-protected keys are not supported. |
@@ -78,15 +78,19 @@ Two failure shapes are worth knowing before you save:
 - **A malformed value is fatal.** Once `host` is present, a bad `port` or a `strictHostKeys` value outside the two accepted ones is a config parse error. `ethos boot` and `ethos gateway` print it and exit non-zero rather than start with a weaker guarantee than you wrote down.
 - **A misspelled key is silent.** `execution.ssh.workdir` is not `remoteWorkdir`; it is an unrecognised key, and stray keys are dropped with no diagnostic at all. Copy the names from the table.
 
-### 3. Set the posture on the personality
+### 3. Set the requirement on the personality
 
 Add one line to `~/.ethos/personalities/<id>/config.yaml`:
 
 ```yaml
-execution: ssh
+execution: remote
 ```
 
-Never put the hostname, user, or key path here. The posture is identity — this agent's hands reach a remote build box — and the machine is the operator's. See [`execution`](../reference/personality-yaml.md#execution) for the four values.
+The personality states a *requirement* — this agent's work belongs on another machine — and never names the transport or the machine. Never put the hostname, user, or key path here. See [`execution`](../reference/personality-yaml.md#execution) for both values.
+
+:::note Upgrading from `execution: ssh`
+`execution: ssh` is no longer accepted and fails the load with an error naming `remote`. Change the line; the `execution.ssh.*` block in `~/.ethos/config.yaml` is unchanged.
+:::
 
 ### 4. Restart Ethos
 
@@ -133,9 +137,9 @@ The message names the path and the fix (`mkdir -p` or `chmod u+w`). Run it, or p
 
 They cannot: `AcceptEnv` is sshd-side operator config the backend cannot see, and inlining assignments into the command string would change its quoting. Set them inside the command instead (`FOO=bar ./script.sh`).
 
-### The character sheet says `local (un-sandboxed — runs on host; ssh backend unavailable)`
+### The character sheet says `execution refused: … no execution.ssh.host is configured`
 
-The personality asked for `ssh` and no `execution.ssh.host` is configured, so the posture was downgraded honestly rather than silently. Complete step 2. If the constitution also forbids the host fallback, the execution tools are refused instead.
+The personality requires `remote` and this deployment has no target, so its execution tools are unavailable. They are **not** run here instead: `remote` is a requirement, and the host is the one machine it excludes. Complete step 2.
 
 ## See also
 

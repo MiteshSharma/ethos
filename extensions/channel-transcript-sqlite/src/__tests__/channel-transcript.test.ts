@@ -750,3 +750,67 @@ describe('listLanes at scale', () => {
     expect(big.ms).toBeLessThan(small.ms * 2 + 5);
   }, 60_000);
 });
+
+// ---------------------------------------------------------------------------
+// Durability posture (see the `synchronous = NORMAL` note in the constructor)
+// ---------------------------------------------------------------------------
+
+/** Reads `PRAGMA synchronous` off the store's OWN handle. It is a per-connection
+ *  setting, so a second connection to the same file would report its own
+ *  default and prove nothing. 2 = FULL (SQLite's default), 1 = NORMAL. */
+function syncPragma(store: unknown): number {
+  const rows = (store as { db: { pragma(s: string): unknown } }).db.pragma('synchronous');
+  return (rows as Array<{ synchronous: number }>)[0]?.synchronous ?? -1;
+}
+
+function journalMode(store: unknown): string {
+  const rows = (store as { db: { pragma(s: string): unknown } }).db.pragma('journal_mode');
+  return (rows as Array<{ journal_mode: string }>)[0]?.journal_mode ?? '';
+}
+
+describe('SQLiteChannelTranscriptStore — durability posture', () => {
+  let dir: string;
+  let store: SQLiteChannelTranscriptStore;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'transcript-sync-'));
+    store = new SQLiteChannelTranscriptStore(join(dir, 'transcript.db'));
+  });
+
+  afterEach(() => {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('opens at synchronous = NORMAL', () => {
+    // Asserted against the opened database, not the source text: this is the
+    // trade the constructor's note argues for, and the observational nature of
+    // this table is what pays for it.
+    expect(syncPragma(store)).toBe(1);
+  });
+
+  it('still opens in WAL mode', () => {
+    // NORMAL is only corruption-safe in WAL. If journal_mode ever regressed,
+    // the setting above would stop being the trade it is documented as.
+    expect(journalMode(store)).toBe('wal');
+  });
+
+  it('still enforces STRICT column types', () => {
+    const db = (
+      store as unknown as { db: { prepare(s: string): { run(...a: unknown[]): unknown } } }
+    ).db;
+    expect(() =>
+      db
+        .prepare(
+          `INSERT INTO transcript
+             (lane_key, platform, bot_key, chat_id, thread_id, sender_id, sender_name,
+              text, message_id, sent_at, recorded_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        // `sent_at` is INTEGER in a STRICT table, and 'soon' cannot be
+        // losslessly converted to one, so STRICT must reject the row. (A
+        // non-STRICT table would coerce it to 0 and store it.)
+        .run('l', 'telegram', 'b', 'c', null, 'u', 'Ada', 'hi', null, 'soon', T0),
+    ).toThrow();
+  });
+});

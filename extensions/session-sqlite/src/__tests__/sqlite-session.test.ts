@@ -760,3 +760,34 @@ describe('SQLiteSessionStore schema versioning', () => {
     expect(() => new SQLiteSessionStore(dbPath)).toThrow(/refusing to open to avoid downgrade/);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Durability posture — see AGENTS.md's SQLite store roster.
+// ---------------------------------------------------------------------------
+
+/** Reads `PRAGMA synchronous` off the store's OWN handle — it is a
+ *  per-connection setting, so a second connection to the same file would
+ *  report its own default and prove nothing. 2 = FULL (SQLite's default),
+ *  1 = NORMAL. */
+function syncPragma(store: unknown): number {
+  const rows = (store as { db: { pragma(s: string): unknown } }).db.pragma('synchronous');
+  return (rows as Array<{ synchronous: number }>)[0]?.synchronous ?? -1;
+}
+
+describe('SQLiteSessionStore — durability posture', () => {
+  it('stays at synchronous = FULL', () => {
+    // NOT a candidate for `synchronous = NORMAL` — pinned so a later blanket
+    // sweep cannot take it silently.
+    //
+    // sessions.db is the agent's memory. Nothing reconstructs a lost turn:
+    // the reply has already gone out over the platform, so a rolled-back tail
+    // leaves the transcript and the user's own chat window disagreeing about
+    // what was said. And the path is not hot in the way the trade needs — a
+    // turn commits a handful of rows around an LLM call that takes seconds, so
+    // FULL is well under 1% of it. There is no win here worth the risk.
+    const store = new SQLiteSessionStore(':memory:');
+    // Asserted against the opened database, not the source text.
+    expect(syncPragma(store)).toBe(2);
+    store.close();
+  });
+});

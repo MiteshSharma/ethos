@@ -132,8 +132,10 @@ export interface ExecutionServiceOptions {
    */
   executionBackends?: ExecutionBackendRegistry;
   /**
-   * Personalities whose `execution` posture names a backend — the posture line
-   * under the header (`ssh — used by: remote-hands`).
+   * Personalities that REQUIRE remote execution (`execution: remote`) — the
+   * posture line under the header (`ssh — used by: remote-hands`). They are the
+   * ones this deployment's ssh target has to serve, and the ones whose exec
+   * tools refuse outright when it is missing.
    */
   personalities: { list(): ReadonlyArray<{ id: string; execution?: string }> };
 }
@@ -144,7 +146,7 @@ export class ExecutionService {
   async probeSsh(): Promise<ExecutionProbeResult> {
     const usedBy = this.opts.personalities
       .list()
-      .filter((p) => p.execution === 'ssh')
+      .filter((p) => p.execution === 'remote')
       .map((p) => p.id);
     return { usedBy, result: await this.probeTarget() };
   }

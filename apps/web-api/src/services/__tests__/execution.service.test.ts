@@ -295,8 +295,8 @@ describe('probeSsh', () => {
 
   it('names the personalities that route to the target, in every state', async () => {
     const personalities = [
-      { id: 'remote-hands', execution: 'ssh' },
-      { id: 'engineer', execution: 'docker' },
+      { id: 'remote-hands', execution: 'remote' },
+      { id: 'engineer' },
       { id: 'chatty' },
     ];
     const unconfigured = await service({ personalities, backend: null }).probeSsh();

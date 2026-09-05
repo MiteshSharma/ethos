@@ -14,13 +14,16 @@ function p(extra: Partial<PersonalityConfig> & Record<string, unknown>): Persona
 
 // `execution` is a typed union on PersonalityConfig, so an unrecognised value
 // cannot be written in TypeScript — but it CAN arrive off disk from a
-// hand-edited `config.yaml`, which is exactly what `readExecutionOverride`
-// validates against. Built untyped on purpose.
+// hand-edited `config.yaml`, which is exactly what `readExecutionRequirement`
+// validates against. Built untyped on purpose. `ssh` is here rather than a
+// nonsense string because it is the retired literal most likely to still be on
+// someone's disk: the loader rejects it, and if one reaches the resolver anyway
+// it must be IGNORED, never honoured as a remote requirement.
 const BOGUS_OVERRIDE = {
   id: 'p',
   name: 'p',
   toolset: ['terminal'],
-  execution: 'bogus',
+  execution: 'ssh',
 } as unknown as PersonalityConfig;
 
 // Containerized detection input that finds NOTHING — the resolver's default
@@ -59,24 +62,13 @@ describe('resolveExecutionPosture — backend selection', () => {
     expect(posture.backend).toBe('none');
   });
 
-  it('honors an explicit execution override over tool inference', () => {
-    expect(
-      resolveExecutionPosture({
-        personality: p({ toolset: ['terminal'], execution: 'local' }),
-        containerized: NOT_CONTAINERIZED,
-        sshConfigured: false,
-      }).backend,
-    ).toBe('local');
-    // An `ssh` override is honored as intent, but with no target configured
-    // (`sshConfigured: false`) and local permitted it resolves to honest
-    // `local` (host) — see the P2 suite below for the full contract.
-    expect(
-      resolveExecutionPosture({
-        personality: p({ toolset: ['terminal'], execution: 'ssh' }),
-        containerized: NOT_CONTAINERIZED,
-        sshConfigured: false,
-      }).backend,
-    ).toBe('local');
+  it('honors an explicit execution requirement over tool inference', () => {
+    const remote = resolveExecutionPosture({
+      personality: p({ toolset: ['terminal'], execution: 'remote' }),
+      containerized: NOT_CONTAINERIZED,
+      sshConfigured: true,
+    });
+    expect(remote.backend).toBe('ssh');
     expect(
       resolveExecutionPosture({
         personality: p({ toolset: ['terminal'], execution: 'none' }),
@@ -86,7 +78,33 @@ describe('resolveExecutionPosture — backend selection', () => {
     ).toBe('none');
   });
 
-  it('ignores an unrecognized override and falls back to inference', () => {
+  it('carries the requirement alongside the backend, and omits it when unstated', () => {
+    // The sheet has to print BOTH — what was asked for and what this machine
+    // provides. Folding one into the other loses the difference.
+    expect(
+      resolveExecutionPosture({
+        personality: p({ toolset: ['terminal'], execution: 'remote' }),
+        containerized: NOT_CONTAINERIZED,
+        sshConfigured: true,
+      }).requirement,
+    ).toBe('remote');
+    expect(
+      resolveExecutionPosture({
+        personality: p({ toolset: ['terminal'], execution: 'none' }),
+        containerized: NOT_CONTAINERIZED,
+        sshConfigured: false,
+      }).requirement,
+    ).toBe('none');
+    expect(
+      resolveExecutionPosture({
+        personality: p({ toolset: ['terminal'] }),
+        containerized: NOT_CONTAINERIZED,
+        sshConfigured: false,
+      }).requirement,
+    ).toBeUndefined();
+  });
+
+  it('ignores a retired transport literal and falls back to inference', () => {
     expect(
       resolveExecutionPosture({
         personality: BOGUS_OVERRIDE,
@@ -106,11 +124,12 @@ describe('resolveExecutionPosture — backend selection', () => {
     expect(posture.containerized).toBe(true);
   });
 
-  it('does NOT mark local-via-override as containerized', () => {
+  it('does NOT mark the docker-unbuildable local fallback as containerized', () => {
     const posture = resolveExecutionPosture({
-      personality: p({ toolset: ['terminal'], execution: 'local' }),
+      personality: p({ toolset: ['terminal'] }),
       containerized: NOT_CONTAINERIZED,
       sshConfigured: false,
+      dockerBuildable: false,
     });
     expect(posture.backend).toBe('local');
     expect(posture.containerized).toBe(false);
@@ -149,7 +168,7 @@ describe('resolveExecutionPosture — network + memory + scratch', () => {
 
   it('omits scratch + mounts for a non-docker posture', () => {
     const posture = resolveExecutionPosture({
-      personality: p({ toolset: ['terminal'], execution: 'local' }),
+      personality: p({ toolset: ['terminal'], execution: 'none' }),
       containerized: NOT_CONTAINERIZED,
       sshConfigured: false,
       mounts: [{ hostPath: '/work', containerPath: '/work', mode: 'rw' }],
@@ -279,7 +298,7 @@ describe('resolveExecutionPosture — A1 docker-absent decision', () => {
 
   it('produces no A1 state for a non-docker posture even when daemon is down', () => {
     const posture = resolveExecutionPosture({
-      personality: p({ toolset: ['terminal'], execution: 'local' }),
+      personality: p({ toolset: ['terminal'], execution: 'none' }),
       containerized: NOT_CONTAINERIZED,
       sshConfigured: false,
       dockerAvailable: false,
@@ -378,44 +397,75 @@ describe('resolveExecutionPosture — P1 run_tests / lint are exec-bearing', () 
   });
 });
 
-describe('resolveExecutionPosture — P2 ssh posture with NO target configured', () => {
-  // No `execution.ssh.host`: there is nothing to connect to, so a
-  // `backend: 'ssh'` posture left untouched would silently fall to host while
-  // the sheet claimed "ssh (remote host)".
-  it('resolves an honest local posture when local is permitted (runs host, not silent ssh)', () => {
-    const posture = resolveExecutionPosture({
-      personality: p({ toolset: ['terminal'], execution: 'ssh' }),
-      containerized: NOT_CONTAINERIZED,
-      sshConfigured: false,
-    });
-    // Honest: backend reflects what actually runs (host), not ssh.
-    expect(posture.backend).toBe('local');
-    expect(posture.hostFallback).toEqual({ reason: 'ssh-unavailable' });
-    expect(posture.containerized).toBe(false);
+describe('resolveExecutionPosture — a remote requirement with NO target configured', () => {
+  // THE central regression. `execution: remote` says this personality's work
+  // belongs on another machine. No `execution.ssh.host` means this deployment
+  // cannot honour that — and the answer is a refusal, not the host. The rule
+  // this replaces resolved to an "honest local" posture whenever the
+  // constitution permitted one, which satisfied the letter of honesty (the
+  // sheet said so) while doing the single thing the author ruled out.
+  it('refuses rather than running on the host, on EVERY permitting constitution', () => {
+    for (const constitution of [
+      undefined,
+      {},
+      { execution: {} },
+      { execution: { requireSandbox: false, forbidLocal: false } },
+    ] as (Constitution | undefined)[]) {
+      const posture = resolveExecutionPosture({
+        personality: p({ toolset: ['terminal'], execution: 'remote' }),
+        containerized: NOT_CONTAINERIZED,
+        sshConfigured: false,
+        ...(constitution === undefined ? {} : { constitution }),
+      });
+      expect(posture.backend).not.toBe('local');
+      expect(posture.backend).toBe('ssh');
+      expect(posture.hostFallback).toBeUndefined();
+      expect(posture.sshRefused?.reason).toBe('unconfigured');
+      expect(posture.sshRefused?.message).toContain('execution: remote');
+      expect(posture.sshRefused?.message).toContain('no execution.ssh.host is configured');
+    }
   });
 
-  it('stays ssh (so exec tools refuse) when the constitution forbids local', () => {
+  it('refuses under a forbidding constitution too, with the same reason', () => {
     const posture = resolveExecutionPosture({
-      personality: p({ toolset: ['terminal'], execution: 'ssh' }),
+      personality: p({ toolset: ['terminal'], execution: 'remote' }),
       containerized: NOT_CONTAINERIZED,
       sshConfigured: false,
       constitution: { execution: { forbidLocal: true } },
     });
-    // Never silently host: posture stays ssh; the compose path forbids host exec
-    // for an ssh posture with no backend, so exec tools become not_available.
+    // The refusal does not depend on the constitution — it precedes it.
     expect(posture.backend).toBe('ssh');
     expect(posture.hostFallback).toBeUndefined();
-    // ...and it says WHY, distinguishably from a configured-but-refused target.
-    expect(posture.sshRefused).toEqual({
-      reason: 'unconfigured',
-      message: expect.stringContaining('no execution.ssh.host is configured'),
+    expect(posture.sshRefused?.reason).toBe('unconfigured');
+  });
+
+  it('refuses even when Ethos itself is containerized', () => {
+    // Being inside a container makes the HOST an acceptable place to run — it
+    // does not make it the remote machine the personality asked for.
+    const posture = resolveExecutionPosture({
+      personality: p({ toolset: ['terminal'], execution: 'remote' }),
+      containerized: { env: { ETHOS_EXECUTION_BACKEND: 'local' } },
+      sshConfigured: false,
     });
+    expect(posture.backend).toBe('ssh');
+    expect(posture.containerized).toBe(false);
+    expect(posture.sshRefused?.reason).toBe('unconfigured');
+  });
+
+  it('advertises no target on the refusal — it has none to advertise', () => {
+    const posture = resolveExecutionPosture({
+      personality: p({ toolset: ['terminal'], execution: 'remote' }),
+      containerized: NOT_CONTAINERIZED,
+      sshConfigured: false,
+      sshTarget: 'deploy@build-01:22',
+    });
+    expect(posture.sshTarget).toBeUndefined();
   });
 });
 
 describe('resolveExecutionPosture — ssh target CONFIGURED', () => {
   const ssh = (extra: Record<string, unknown> = {}) => ({
-    personality: p({ toolset: ['terminal'], execution: 'ssh' }),
+    personality: p({ toolset: ['terminal'], execution: 'remote' }),
     containerized: NOT_CONTAINERIZED,
     sshConfigured: true,
     ...extra,
@@ -452,15 +502,16 @@ describe('resolveExecutionPosture — ssh target CONFIGURED', () => {
     expect(resolveExecutionPosture(ssh({ sshTarget: 'deploy@build-01:22' })).sshTarget).toBe(
       'deploy@build-01:22',
     );
-    // A posture that resolved AWAY from ssh must not still advertise a target.
-    const fellBack = resolveExecutionPosture({
-      personality: p({ toolset: ['terminal'], execution: 'ssh' }),
+    // A personality that stated no requirement never reaches an ssh posture, so
+    // it must not advertise a target even where the deployment has one.
+    const inferred = resolveExecutionPosture({
+      personality: p({ toolset: ['terminal'] }),
       containerized: NOT_CONTAINERIZED,
-      sshConfigured: false,
+      sshConfigured: true,
       sshTarget: 'deploy@build-01:22',
     });
-    expect(fellBack.backend).toBe('local');
-    expect(fellBack.sshTarget).toBeUndefined();
+    expect(inferred.backend).toBe('docker');
+    expect(inferred.sshTarget).toBeUndefined();
   });
 
   // D7 — ssh is remote-host TRUST, not mount-confinement, so a constitution

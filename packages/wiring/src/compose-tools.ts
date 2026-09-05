@@ -544,9 +544,12 @@ export interface ComposeToolsResult {
  * `hostExecForbidden` with no backend.
  *
  * Three conditions, all load-bearing:
- *   - the posture is `ssh` — the personality declared it and the resolver kept
- *     it (an ssh posture with no target already became honest `local`);
- *   - a target is actually configured — `execution.ssh.host` IS the switch;
+ *   - the posture is `ssh` — i.e. the personality declared `execution: remote`;
+ *   - a target is actually configured — `execution.ssh.host` IS the switch.
+ *     With no target the resolver has already marked the posture refused
+ *     (`sshRefused.reason === 'unconfigured'`), and returning `undefined` here
+ *     is what makes that refusal real: no backend, so exec tools answer
+ *     `not_available` instead of running the work on this machine;
  *   - the constitution permits un-sandboxed execution (D7). ssh is remote-host
  *     TRUST, not mount-confinement, so `requireSandbox` / `forbidLocal` refuses
  *     it: no backend is built, and exec tools answer `not_available` rather
@@ -628,10 +631,12 @@ const POSTURE_NONE_REFUSAL =
  *   - `docker` with no backend (disableDocker / daemon down) AND a constitution
  *     that forbids the `local` host fallback — the resolver leaves the posture
  *     `docker` with a `dockerAbsent` hard-fail.
- *   - `ssh` with no backend AND a constitution that forbids `local`. A
- *     permitting constitution with no target already became honest `local`, and
- *     one WITH a target resolved the ssh backend — so an `ssh` posture arriving
- *     here unwired means refusal, never silent host.
+ *   - `ssh` with no backend — the personality required `execution: remote` and
+ *     this deployment could not honour it, either because nothing is configured
+ *     or because the constitution forbids the un-sandboxed remote-host trust
+ *     ssh provides. A `remote` requirement never resolves to the host, whatever
+ *     the constitution permits, so an `ssh` posture arriving here unwired means
+ *     refusal, never silent host.
  *
  * `message: undefined` means the posture has no wording of its own and the
  * tools’ built-in Docker sentence is the right one. The ssh refusals carry the
@@ -889,10 +894,10 @@ export async function composeAllTools(
   const remoteExec = posture.backend === 'ssh' && executionBackend !== undefined;
 
   // The refusal, in the posture's OWN words. The resolver already wrote the
-  // truthful explanation onto `sshRefused` — a constitution that requires a
-  // sandbox, or a target nobody configured — and the tools' built-in sentence
-  // names Docker, which under an ssh posture is simply false. One wording, from
-  // the component that made the decision.
+  // truthful explanation onto `sshRefused` — a target nobody configured, or a
+  // constitution that requires a sandbox — and the tools' built-in sentence
+  // names Docker, which under a `remote` requirement is simply false. One
+  // wording, from the component that made the decision.
   const execForbiddenMessage = refusal.message;
 
   // D4 — `process_*` is NOT routed over ssh in v1: a background process needs a

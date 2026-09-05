@@ -17,7 +17,7 @@ import type {
 // Phase 2a, lane E1 — the FULL execution-posture resolver. Computes the
 // legible `{ backend, networkMode, memoryMb, ... }` posture from the
 // personality toolset + `fs_reach` + `safety.network` + the `execution:`
-// override + containerized detection. Supersedes the minimal
+// requirement + containerized detection. Supersedes the minimal
 // `resolve-execution-backend.ts` selector (which now delegates here so routed
 // tools keep working).
 //
@@ -72,15 +72,16 @@ export function hasExecTool(personality: PersonalityConfig): boolean {
 }
 
 /**
- * Read the `execution:` posture override off the personality config. The field
- * is typed on PersonalityConfig as exactly these four literals, so no cast is
- * needed; the runtime check stays because a YAML-loaded config carries anything.
+ * Read the `execution:` REQUIREMENT off the personality config. A requirement is
+ * not a transport — the personality says its work belongs on another machine
+ * (`remote`) or that it does not execute at all (`none`), and this resolver maps
+ * that onto a backend using what the OPERATOR configured. The field is typed on
+ * PersonalityConfig as exactly these two literals, so no cast is needed; the
+ * runtime check stays because a YAML-loaded config carries anything.
  */
-function readExecutionOverride(
-  personality: PersonalityConfig,
-): 'docker' | 'local' | 'ssh' | 'none' | undefined {
+function readExecutionRequirement(personality: PersonalityConfig): 'remote' | 'none' | undefined {
   const raw = personality.execution;
-  if (raw === 'docker' || raw === 'local' || raw === 'ssh' || raw === 'none') return raw;
+  if (raw === 'remote' || raw === 'none') return raw;
   return undefined;
 }
 
@@ -218,13 +219,27 @@ export interface ResolveExecutionPostureInput {
 }
 
 /**
- * The full posture resolution rule:
+ * The full posture resolution rule — (requirement × operator config ×
+ * constitution) → backend:
  *
- *   - explicit `execution:` override wins (`docker`/`local`/`ssh`/`none`);
- *   - else chat-only (no exec tool) → `none` (`local` is NEVER silently
- *     assigned to a personality that never execs);
- *   - else exec-bearing → `docker` BY DEFAULT, UNLESS Ethos is containerized,
- *     in which case → `local` (the container is the boundary).
+ *   - requirement `none` → `none`. The personality says it does not execute.
+ *   - requirement `remote` → `ssh`, the one remote transport this deployment
+ *     knows how to speak. WHICH machine is `execution.ssh.*` in
+ *     `~/.ethos/config.yaml`; the personality never names it. With no target
+ *     configured the posture stays `ssh` and carries `sshRefused` — see below.
+ *   - no requirement, chat-only (no exec tool) → `none` (`local` is NEVER
+ *     silently assigned to a personality that never execs);
+ *   - no requirement, exec-bearing → `docker` BY DEFAULT, UNLESS Ethos is
+ *     containerized, in which case → `local` (the container is the boundary).
+ *
+ * A requirement the deployment cannot satisfy is REFUSED, never downgraded. An
+ * `execution: remote` personality on a host with no `execution.ssh.host` keeps
+ * `backend: 'ssh'` with `sshRefused.reason === 'unconfigured'`, and the compose
+ * path builds no backend, so its exec tools answer `not_available`. That
+ * refusal does NOT consult the constitution: this key previously fell back to an
+ * "honest local" posture whenever the constitution permitted it, which ran the
+ * work on precisely the machine the personality said it did not belong on. A
+ * label on the character sheet is not consent from the author.
  *
  * When the resolved posture is `local` AND the constitution forbids it, the
  * caller (constitution layer / wiring) hard-fails the load — the resolver just
@@ -243,13 +258,15 @@ export function resolveExecutionPosture(input: ResolveExecutionPostureInput): Ex
   } = input;
 
   const detection = detectContainerized(input.containerized);
-  const override = readExecutionOverride(personality);
+  const requirement = readExecutionRequirement(personality);
   const networkMode = resolveNetworkMode(personality);
 
-  // Posture selection.
+  // Posture selection — requirement first, then what this machine offers.
   let backend: ExecutionPosture['backend'];
-  if (override) {
-    backend = override;
+  if (requirement === 'none') {
+    backend = 'none';
+  } else if (requirement === 'remote') {
+    backend = 'ssh';
   } else if (!hasExecTool(personality)) {
     backend = 'none';
   } else if (detection.containerized) {
@@ -291,36 +308,35 @@ export function resolveExecutionPosture(input: ResolveExecutionPostureInput): Ex
     backend = 'local';
   }
 
-  // P2 (honesty) — an `ssh` posture with NO target configured has nothing to
-  // connect to. Left untouched it would silently fall to the host
-  // `ScopedProcess` while the sheet claimed "ssh (remote host)" — the same
-  // claim-vs-reality lie F1 fixed for docker. Resolve it the SAME way as
-  // docker-unbuildable:
-  //   - constitution permits `local` → resolve to an HONEST `local` posture
-  //     (un-sandboxed, runs on host) and record `hostFallback`;
-  //   - constitution forbids `local` → keep `backend: 'ssh'`; the compose path
-  //     forbids host exec for an ssh posture with no backend, so tools become
-  //     `not_available` rather than silently running on host.
-  // When a target IS configured this does not fire: the posture stays `ssh` and
-  // the compose path resolves the real ssh backend.
-  const sshUnavailable = backend === 'ssh' && !input.sshConfigured;
-  if (sshUnavailable && !forbidsLocal) {
-    backend = 'local';
-  }
+  // An `ssh` posture with NO target configured has nothing to connect to. It is
+  // refused — UNCONDITIONALLY, without asking the constitution. The previous
+  // rule resolved it to an "honest local" posture whenever the constitution
+  // permitted un-sandboxed host execution, which satisfied the letter of
+  // honesty (the sheet said so) while doing the one thing the personality's
+  // author ruled out: running the work on this machine. `execution: remote` is
+  // a requirement, not a preference, and a requirement this deployment cannot
+  // meet leaves the posture `ssh` with no backend, so the compose path makes
+  // exec tools `not_available`. When a target IS configured this does not fire.
+  const sshUnconfigured = backend === 'ssh' && !input.sshConfigured;
 
   const derivedMounts = backend === 'docker' ? (mounts ?? []) : [];
   const scratchPaths = backend === 'docker' ? scratchTmpfsFor(derivedMounts) : [];
 
   const posture: ExecutionPosture = {
     backend,
+    ...(requirement !== undefined ? { requirement } : {}),
     networkMode,
     memoryMb,
     containerized: backend === 'local' && detection.containerized,
     mounts: derivedMounts,
     scratchPaths,
     // Display only, and only where it is true: a posture that resolved away
-    // from `ssh` must not still advertise a remote target.
-    ...(backend === 'ssh' && input.sshTarget ? { sshTarget: input.sshTarget } : {}),
+    // from `ssh` must not still advertise a remote target, and neither must one
+    // that was refused BECAUSE nothing is configured — "no host is configured"
+    // and "here is the host" cannot both be printed on the same sheet.
+    ...(backend === 'ssh' && !sshUnconfigured && input.sshTarget
+      ? { sshTarget: input.sshTarget }
+      : {}),
   };
 
   if (dockerUnbuildable && !forbidsLocal) {
@@ -350,54 +366,43 @@ export function resolveExecutionPosture(input: ResolveExecutionPostureInput): Ex
     }
   }
 
-  // P2 — ssh posture with no target configured. Mirror the docker-unbuildable
-  // surfacing so the sheet is honest about where execution actually happens.
-  if (sshUnavailable && !forbidsLocal) {
-    // Resolved to honest local above — runs un-sandboxed on the host. The sheet
-    // labels this distinctly so it never claims "ssh (remote host)".
-    posture.hostFallback = { reason: 'ssh-unavailable' };
-    if (log) {
-      log.warn('execution posture: no ssh target configured → honest local (un-sandboxed)', {
-        personalityId: personality.id,
-      });
-    }
-  }
-
-  // The posture is still `ssh` here in exactly two cases, and they are NOT the
-  // same thing — the sheet and the compose path's refusal text must be able to
-  // tell them apart, so the reason is carried on the posture rather than left
+  // Two ways an `execution: remote` requirement goes unmet, and they are NOT
+  // the same thing — the sheet and the compose path's refusal text must be able
+  // to tell them apart, so the reason is carried on the posture rather than left
   // implicit in a log line:
   //
-  //   - `unconfigured` — no target, and the constitution forbids the honest
-  //     local fallback that would otherwise have resolved above.
+  //   - `unconfigured` — this deployment has no `execution.ssh.host`, so there
+  //     is nowhere to send the work. Checked FIRST and without consulting the
+  //     constitution: a permitting constitution is permission to run on this
+  //     host, which is exactly what the personality ruled out.
   //   - `constitution-requires-sandbox` (D7) — a target IS configured and
   //     reachable in principle, but `execution.requireSandbox` / `forbidLocal`
   //     refuses it: ssh is remote-host TRUST, not mount-confinement, so it does
   //     not satisfy a constitution that demands a sandbox.
   //
   // Enforcement itself lives in the compose path, which builds no ssh backend
-  // under a forbidding constitution and therefore falls through to
-  // `hostExecForbidden` (already covering `backend === 'ssh'`) — exec tools
-  // become `not_available`, never silently host. This block is the honest
-  // EXPLANATION of that refusal, not a second gate.
-  if (backend === 'ssh' && forbidsLocal) {
-    posture.sshRefused = sshUnavailable
-      ? {
-          reason: 'unconfigured',
-          message:
-            'ssh refused: no execution.ssh.host is configured, and the constitution forbids the local host fallback (execution.requireSandbox / forbidLocal).',
-        }
-      : {
-          reason: 'constitution-requires-sandbox',
-          message:
-            'ssh refused: the constitution requires a sandbox (execution.requireSandbox / forbidLocal). ssh is remote-host trust, not mount-confinement, so it does not satisfy that requirement.',
-        };
-    if (log) {
-      log.warn('execution posture: ssh posture refused, exec tools unavailable', {
-        personalityId: personality.id,
-        reason: posture.sshRefused.reason,
-      });
-    }
+  // in either case and therefore falls through to `hostExecForbidden` (already
+  // covering `backend === 'ssh'`) — exec tools become `not_available`, never
+  // silently host. This block is the honest EXPLANATION of that refusal, not a
+  // second gate.
+  if (sshUnconfigured) {
+    posture.sshRefused = {
+      reason: 'unconfigured',
+      message:
+        'execution refused: this personality requires remote execution (execution: remote) and no execution.ssh.host is configured on this deployment. Execution tools are unavailable — the requirement is not met by running the work on this machine.',
+    };
+  } else if (backend === 'ssh' && forbidsLocal) {
+    posture.sshRefused = {
+      reason: 'constitution-requires-sandbox',
+      message:
+        'ssh refused: the constitution requires a sandbox (execution.requireSandbox / forbidLocal). ssh is remote-host trust, not mount-confinement, so it does not satisfy that requirement.',
+    };
+  }
+  if (posture.sshRefused && log) {
+    log.warn('execution posture: remote requirement unmet, exec tools unavailable', {
+      personalityId: personality.id,
+      reason: posture.sshRefused.reason,
+    });
   }
 
   // A1 — docker posture + daemon unavailable. Produce the typed decision state;
@@ -472,10 +477,12 @@ export async function buildExecutionPosture(
   input: BuildExecutionPostureInput,
 ): Promise<ExecutionPosture> {
   const detection = detectContainerized(input.containerized);
-  const override = readExecutionOverride(input.personality);
+  const requirement = readExecutionRequirement(input.personality);
+  // Mounts are a docker concern only. A personality that stated a requirement
+  // stated one this resolver never answers with docker (`remote` → ssh, `none`
+  // → no backend), so only the unstated case can land there.
   const wouldBeDocker =
-    override === 'docker' ||
-    (!override && !detection.containerized && hasExecTool(input.personality));
+    requirement === undefined && !detection.containerized && hasExecTool(input.personality);
 
   let mounts: MountSpec[] = [];
   if (wouldBeDocker) {

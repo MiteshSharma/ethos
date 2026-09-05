@@ -568,28 +568,40 @@ export interface PersonalityConfig {
    */
   display?: { avatar_url?: string };
   /**
-   * Execution POSTURE — where this personality's execution tools run:
-   * `local` (the host), `docker` (a sandbox), `ssh` (a remote target), or
-   * `none` (execution refused). Identity, not setting: an agent whose hands
-   * only ever reach a remote build box is a different agent from one holding
-   * a shell on the host, and the posture decides what every execution tool
-   * it owns can touch.
+   * Execution REQUIREMENT — what this personality demands of wherever its
+   * execution tools run. Two values, and both are identity under the content
+   * test in `docs/content/building/explanation/personality-governance.md`:
    *
-   * This is NOT the ssh HOST. The target — host, user, port, identity file,
-   * known-hosts, remote workdir — is operator config (`execution.ssh.*` in
-   * `~/.ethos/config.yaml`), one target per deployment. Two deployments of
-   * the same personality agree on the posture and disagree about the
-   * machine. Never put a hostname, user, or key path here.
+   *   - `remote` — this personality's work belongs on a machine that is NOT
+   *     the one Ethos runs on. An agent whose hands only ever reach a build
+   *     box is a different agent from one holding a shell here; every
+   *     deployment of it agrees about that.
+   *   - `none` — this personality does not execute. The refusal IS the
+   *     identity: an agent with no hands.
    *
-   * Absent = the resolver decides from environment, config, and constitution
-   * (`resolveExecutionPosture`); a declared posture is honoured for the
-   * personality a loop was composed with. A posture the deployment cannot
-   * satisfy (e.g. `ssh` with no configured target, or any un-sandboxed
-   * posture under a `requireSandbox` constitution) is refused, not silently
-   * downgraded.
+   * A personality NEVER names a transport. `docker` vs `local` vs `ssh` is a
+   * machine fact two deployments of the same personality reasonably disagree
+   * about — one runs inside a container, one has no daemon, one has an ssh
+   * target — so it is the operator's, and the resolver already derives it from
+   * environment, `~/.ethos/config.yaml` and the constitution. The earlier
+   * four-literal form of this field (`local` / `docker` / `ssh` / `none`)
+   * failed that test on its `local` and `docker` halves and named the ssh
+   * transport on its third; those three literals are now load errors that
+   * name the replacement.
+   *
+   * This is emphatically NOT the remote HOST. The target — host, user, port,
+   * identity file, known-hosts, remote workdir — is operator config
+   * (`execution.ssh.*` in `~/.ethos/config.yaml`), one per deployment. Never
+   * put a hostname, user, or key path here.
+   *
+   * Absent = no requirement; the resolver picks the transport on its own
+   * (sandboxed by default, the host when Ethos is itself containerized).
+   * A requirement the deployment CANNOT satisfy is refused outright, never
+   * silently downgraded: `remote` with no configured target leaves execution
+   * tools unavailable rather than quietly running them on this machine.
    * Counts as ONE field for the schema-freeze gate.
    */
-  execution?: 'local' | 'docker' | 'ssh' | 'none';
+  execution?: 'remote' | 'none';
 }
 
 /**

@@ -958,3 +958,33 @@ describe('SQLiteJobStore.bumpRunningHeartbeats', () => {
     store.close();
   });
 });
+
+// ---------------------------------------------------------------------------
+// Durability posture — see AGENTS.md's SQLite store roster.
+// ---------------------------------------------------------------------------
+
+/** Reads `PRAGMA synchronous` off the store's OWN handle — it is a
+ *  per-connection setting, so a second connection to the same file would
+ *  report its own default and prove nothing. 2 = FULL (SQLite's default),
+ *  1 = NORMAL. */
+function syncPragma(store: unknown): number {
+  const rows = (store as { db: { pragma(s: string): unknown } }).db.pragma('synchronous');
+  return (rows as Array<{ synchronous: number }>)[0]?.synchronous ?? -1;
+}
+
+describe('SQLiteJobStore — durability posture', () => {
+  it('stays at synchronous = FULL', () => {
+    // NOT a candidate for `synchronous = NORMAL` — pinned so a later blanket
+    // sweep cannot take it silently.
+    //
+    // A `queued` row is often the ONLY record that work is owed: the user has
+    // been told the background job started. Losing that commit to a power cut
+    // means a job that never runs and that nothing will ever notice is
+    // missing. Not hot either — job creation and terminal transitions are a
+    // handful of commits per job, and the heartbeat fires once per 30s.
+    const store = new SQLiteJobStore(':memory:');
+    // Asserted against the opened database, not the source text.
+    expect(syncPragma(store)).toBe(2);
+    store.close();
+  });
+});

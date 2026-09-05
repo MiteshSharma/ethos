@@ -2093,24 +2093,55 @@ function buildDisplayConfig(
   return avatarUrl ? { avatar_url: avatarUrl } : undefined;
 }
 
-const EXECUTION_POSTURES = ['local', 'docker', 'ssh', 'none'] as const;
+const EXECUTION_REQUIREMENTS = ['remote', 'none'] as const;
 
 /**
- * Execution posture — where this personality's execution tools run. Validated
- * rather than silently dropped: a typo (`execution: remote`) would otherwise
- * fall through to the resolver's default and run the agent's hands somewhere
- * the author did not choose. The ssh TARGET is operator config
- * (`execution.ssh.*` in ~/.ethos/config.yaml), never this key.
+ * The three literals this key used to accept and no longer does, each with the
+ * sentence that tells its author where the thing they meant now lives. Named
+ * individually rather than folded into the generic "expected one of" error
+ * because the fix differs per value: `ssh` has a direct replacement, and
+ * `docker` / `local` have none — they were never the personality's to state.
+ */
+const RETIRED_EXECUTION_VALUES: Record<string, string> = {
+  ssh:
+    'a personality declares a REQUIREMENT, not a transport. Use `execution: remote` ' +
+    'and name the machine under `execution.ssh.*` in ~/.ethos/config.yaml.',
+  docker:
+    "sandboxing is the operator's choice, not the personality's. Remove this key — " +
+    'an exec-bearing personality is already sandboxed by default.',
+  local:
+    "running un-sandboxed on this host is the operator's choice, not the " +
+    "personality's. Remove this key and set `execution.containerized` in " +
+    '~/.ethos/config.yaml (or ETHOS_EXECUTION_BACKEND=local) if this deployment ' +
+    'is itself the boundary.',
+};
+
+/**
+ * Execution requirement — what this personality demands of wherever its
+ * execution tools run. Validated rather than silently dropped: a typo would
+ * otherwise fall through to the resolver's default and run the agent's hands
+ * somewhere the author did not choose.
+ *
+ * The retired transport literals (`ssh`, `docker`, `local`) are REJECTED, not
+ * translated. `ssh` → `remote` is a translation anyone could argue is safe, and
+ * it is exactly the kind of quiet contract shift this key exists to prevent —
+ * the author should read the one sentence that says a personality no longer
+ * names transports. `docker` and `local` have no honest translation at all: a
+ * silent drop would move where an agent's hands run without telling anyone.
+ * The remote TARGET is operator config (`execution.ssh.*` in
+ * ~/.ethos/config.yaml), never this key.
  */
 function parseExecutionPosture(raw: string | undefined): PersonalityConfig['execution'] {
   if (!raw) return undefined;
-  const posture = EXECUTION_POSTURES.find((p) => p === raw);
-  if (!posture) {
-    throw new Error(
-      `Invalid execution: "${raw}". Expected one of: ${EXECUTION_POSTURES.join(', ')}`,
-    );
-  }
-  return posture;
+  const requirement = EXECUTION_REQUIREMENTS.find((r) => r === raw);
+  if (requirement) return requirement;
+  const retired = RETIRED_EXECUTION_VALUES[raw];
+  const expected = `Expected one of: ${EXECUTION_REQUIREMENTS.join(', ')}`;
+  throw new Error(
+    retired
+      ? `Invalid execution: "${raw}" is no longer accepted — ${retired} ${expected}.`
+      : `Invalid execution: "${raw}". ${expected}`,
+  );
 }
 
 function buildOutboundPolicy(

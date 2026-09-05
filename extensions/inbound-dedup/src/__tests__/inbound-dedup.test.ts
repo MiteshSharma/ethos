@@ -80,3 +80,40 @@ describe('SQLiteInboundDedupStore — seen()', () => {
     second.close();
   });
 });
+
+// ---------------------------------------------------------------------------
+// Durability posture — see AGENTS.md's SQLite store roster.
+// ---------------------------------------------------------------------------
+
+/** Reads `PRAGMA synchronous` off the store's OWN handle — it is a
+ *  per-connection setting, so a second connection to the same file would
+ *  report its own default and prove nothing. 2 = FULL (SQLite's default),
+ *  1 = NORMAL. */
+function syncPragma(store: unknown): number {
+  const rows = (store as { db: { pragma(s: string): unknown } }).db.pragma('synchronous');
+  return (rows as Array<{ synchronous: number }>)[0]?.synchronous ?? -1;
+}
+
+describe('SQLiteInboundDedupStore — durability posture', () => {
+  it('stays at synchronous = FULL', () => {
+    // NOT a candidate for `synchronous = NORMAL` — pinned so a later blanket
+    // sweep cannot take it silently, even though NORMAL would be ~330x faster
+    // on this INSERT.
+    //
+    // This store is the DURABLE half of inbound dedup; the Gateway's in-memory
+    // Set is the fast path and this is what survives a restart. A power cut IS
+    // a restart, and it is the one restart that can roll back the last
+    // sightings under NORMAL. A platform retry landing afterwards would then be
+    // fully reprocessed — a second LLM turn, billed again, replying again to a
+    // message that was already answered. That is precisely the bug this file
+    // exists to prevent, so it pays the fsync.
+    //
+    // The path is not hot in practice: `seen()` is consulted only on a Set
+    // miss, so it is one commit per NEW inbound message, at conversation
+    // rate.
+    const store = new SQLiteInboundDedupStore(':memory:');
+    // Asserted against the opened database, not the source text.
+    expect(syncPragma(store)).toBe(2);
+    store.close();
+  });
+});

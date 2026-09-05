@@ -121,3 +121,32 @@ describe('SqliteApiKeyStore', () => {
     });
   });
 });
+
+// ---------------------------------------------------------------------------
+// Durability posture — see AGENTS.md's SQLite store roster.
+// ---------------------------------------------------------------------------
+
+/** Reads `PRAGMA synchronous` off the store's OWN handle — it is a
+ *  per-connection setting, so a second connection to the same file would
+ *  report its own default and prove nothing. 2 = FULL (SQLite's default),
+ *  1 = NORMAL. */
+function syncPragma(store: unknown): number {
+  const rows = (store as { db: { pragma(s: string): unknown } }).db.pragma('synchronous');
+  return (rows as Array<{ synchronous: number }>)[0]?.synchronous ?? -1;
+}
+
+describe('SqliteApiKeyStore — durability posture', () => {
+  it('stays at synchronous = FULL', () => {
+    // NOT a candidate for `synchronous = NORMAL` — pinned so a later blanket
+    // sweep cannot take it silently.
+    //
+    // A created key is handed to the user once and never shown again. If the
+    // insert rolls back after a power cut, the user holds a secret that
+    // authenticates nothing and cannot be recovered. Key creation and
+    // revocation are rare, so FULL costs nothing that matters.
+    const store = new SqliteApiKeyStore(':memory:');
+    // Asserted against the opened database, not the source text.
+    expect(syncPragma(store)).toBe(2);
+    store.close();
+  });
+});

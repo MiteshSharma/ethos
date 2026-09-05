@@ -245,3 +245,35 @@ describe('SQLiteContextLog', () => {
     expect(refs).toContain(sharedHash);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Durability posture — see AGENTS.md's SQLite store roster.
+// ---------------------------------------------------------------------------
+
+/** Reads `PRAGMA synchronous` off the store's OWN handle — it is a
+ *  per-connection setting, so a second connection to the same file would
+ *  report its own default and prove nothing. 2 = FULL (SQLite's default),
+ *  1 = NORMAL. */
+function syncPragma(store: unknown): number {
+  const rows = (store as { db: { pragma(s: string): unknown } }).db.pragma('synchronous');
+  return (rows as Array<{ synchronous: number }>)[0]?.synchronous ?? -1;
+}
+
+describe('SQLiteContextLog — durability posture', () => {
+  it('stays at synchronous = FULL', () => {
+    // Same file as sessions.db, separate handle — and `synchronous` is a
+    // PER-CONNECTION setting, so this handle needs its own pin. Same reasoning
+    // as SQLiteSessionStore: this is what `ethos why` reconstructs a turn's
+    // context from, and a rolled-back tail is a turn that can no longer be
+    // explained.
+    const dir = mkdtempSync(join(tmpdir(), 'ethos-context-log-sync-'));
+    // `sessions` must exist before SQLiteContextLog's CREATE TABLE ... REFERENCES.
+    const sessions = new SQLiteSessionStore(join(dir, 'sessions.db'));
+    const log = new SQLiteContextLog(join(dir, 'sessions.db'));
+    // Asserted against the opened database, not the source text.
+    expect(syncPragma(log)).toBe(2);
+    log.close();
+    sessions.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+});

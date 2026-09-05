@@ -269,10 +269,10 @@ register_anchors:
     - { path: packages/safety/redact/src/index.ts, line: 45, contains: "export function detectSecrets" }
     - { path: packages/safety/redact/src/index.ts, line: 57, contains: "export function redactString" }
     - { path: packages/safety/redact/src/index.ts, line: 74, contains: "export function redactJson" }
-    - { path: extensions/observability-sqlite/src/store.ts, line: 157, contains: "redactJson(trace.attrs)" }
-    - { path: extensions/observability-sqlite/src/store.ts, line: 295, contains: "redactJson(span.attrs, extraRedactPatterns)" }
-    - { path: extensions/observability-sqlite/src/store.ts, line: 348, contains: "redactJson(attrs, extraRedactPatterns)" }
-    - { path: extensions/observability-sqlite/src/store.ts, line: 478, contains: "redactJson(event.details, extraRedactPatterns)" }
+    - { path: extensions/observability-sqlite/src/store.ts, line: 179, contains: "redactJson(trace.attrs)" }
+    - { path: extensions/observability-sqlite/src/store.ts, line: 317, contains: "redactJson(span.attrs, extraRedactPatterns)" }
+    - { path: extensions/observability-sqlite/src/store.ts, line: 370, contains: "redactJson(attrs, extraRedactPatterns)" }
+    - { path: extensions/observability-sqlite/src/store.ts, line: 500, contains: "redactJson(event.details, extraRedactPatterns)" }
     - { path: extensions/platform-slack/src/blocks/approval.ts, line: 118, contains: "function formatArgs" }
     - { path: extensions/platform-discord/src/blocks/approval.ts, line: 77, contains: "function formatArgs" }
 
@@ -287,10 +287,14 @@ register_anchors:
     - { path: packages/core/src/agent-loop/approval-posture.ts, line: 38, contains: "export function createApprovalPostureGuard" }
 
   G-EXEC:
-    - { path: packages/wiring/src/resolve-execution-posture.ts, line: 234, contains: "export function resolveExecutionPosture" }
-    - { path: packages/wiring/src/resolve-execution-posture.ts, line: 289, contains: "const dockerUnbuildable" }
-    - { path: packages/wiring/src/resolve-execution-posture.ts, line: 329, contains: "posture.hostFallback = { reason: 'docker-disabled' }" }
-    - { path: packages/wiring/src/resolve-execution-posture.ts, line: 406, contains: "dockerAvailable === false && !posture.dockerAbsent" }
+    - { path: packages/wiring/src/resolve-execution-posture.ts, line: 249, contains: "export function resolveExecutionPosture" }
+    - { path: packages/wiring/src/resolve-execution-posture.ts, line: 306, contains: "const dockerUnbuildable" }
+    - { path: packages/wiring/src/resolve-execution-posture.ts, line: 345, contains: "posture.hostFallback = { reason: 'docker-disabled' }" }
+    - { path: packages/wiring/src/resolve-execution-posture.ts, line: 411, contains: "dockerAvailable === false && !posture.dockerAbsent" }
+    # The `execution: remote` requirement this deployment cannot meet. Refused
+    # without consulting the constitution — a permitting one is permission to
+    # run on THIS host, which is the one place the personality ruled out.
+    - { path: packages/wiring/src/resolve-execution-posture.ts, line: 388, contains: "if (sshUnconfigured) {" }
 
   G-WATCH:
     - { path: packages/safety/watcher/src/rules.ts, line: 20, contains: "export function rateLimitRule" }
@@ -307,7 +311,7 @@ register_anchors:
     - { path: packages/safety/channel/src/channel-filter.ts, line: 33, contains: "contextVisibility?:" }
 
   G-AUDIT:
-    - { path: extensions/observability-sqlite/src/store.ts, line: 157, contains: "redactJson(trace.attrs)" }
+    - { path: extensions/observability-sqlite/src/store.ts, line: 179, contains: "redactJson(trace.attrs)" }
 
 # ---- Security tiers -------------------------------------------------------
 # Every workspace package under packages/, packages/safety/, extensions/, and

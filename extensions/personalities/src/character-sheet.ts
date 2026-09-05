@@ -169,6 +169,18 @@ const POSTURE_LABEL: Record<ExecutionPosture['backend'], string> = {
 };
 
 /**
+ * What the PERSONALITY asked for, in the same voice as the posture label. Kept
+ * separate from `POSTURE_LABEL` on purpose: a requirement and a transport are
+ * different questions, and the sheet's job here is to let an operator read both
+ * answers side by side — "this agent's work belongs elsewhere" above "and here
+ * is where it actually goes".
+ */
+const REQUIREMENT_LABEL: Record<'remote' | 'none', string> = {
+  remote: "remote (another machine — the transport is the operator's)",
+  none: 'none (this personality does not execute)',
+};
+
+/**
  * The one posture label. Used by `## Execution` and by the `G-EXEC` row of
  * `## Boundary`, so the boundary summary cannot describe the posture in
  * different words from the section it summarises.
@@ -192,6 +204,16 @@ function executionSection(config: PersonalityConfig, exec: CharacterSheetExecuti
   const platform = exec.platform ?? process.platform;
   const lines: string[] = ['## Execution'];
 
+  // What was ASKED FOR, then what this deployment actually provides. Both, in
+  // that order, always — an operator reading only the posture cannot tell a
+  // refused `remote` requirement apart from a personality that never executed.
+  lines.push(
+    `- Required:   ${
+      posture.requirement
+        ? REQUIREMENT_LABEL[posture.requirement]
+        : '(none declared — the deployment chooses)'
+    }`,
+  );
   lines.push(`- Posture:    ${postureLabelFor(posture)}`);
   lines.push(`- Network:    ${posture.networkMode}`);
   lines.push(`- Memory cap: ${posture.memoryMb} MB`);
@@ -241,14 +263,10 @@ function executionSection(config: PersonalityConfig, exec: CharacterSheetExecuti
         '  target with NO path floor — an unrestricted shell on another machine.',
       );
     } else if (!posture.sshRefused) {
-      // P2 — no target, and no typed refusal to explain it. This note is the
-      // ONLY explanation the operator gets, so it must render. When the resolver
-      // DID attach a refusal it is strictly more specific than this note, and
-      // rendering both would say nearly the same thing twice.
-      lines.push(
-        '- Note (P2): no ssh execution backend is wired in this build; the constitution',
-        '  forbids the un-sandboxed host fallback, so execution tools refuse (not_available).',
-      );
+      // A target IS configured (an unconfigured one always carries a refusal)
+      // but this surface was not handed its address. Say that, rather than let
+      // the missing line read as "no target".
+      lines.push('- ssh target: (configured, but this surface was not given the address)');
     }
     // The refusal wording comes from the resolver, verbatim — one explanation,
     // one source, so the sheet cannot drift from the reason exec tools refused.
@@ -575,7 +593,10 @@ function guaranteeRows(
   } else if (execution.posture.backend === 'none') {
     execRow = {
       status: 'n/a',
-      detail: 'posture none — no exec-bearing tool in this toolset',
+      detail:
+        execution.posture.requirement === 'none'
+          ? 'posture none — this personality declares execution: none'
+          : 'posture none — no exec-bearing tool in this toolset',
     };
   } else {
     execRow = {
@@ -583,6 +604,12 @@ function guaranteeRows(
       detail: joinParts([
         `posture ${postureLabelFor(execution.posture)}`,
         `network ${execution.posture.networkMode}`,
+        // A refused posture still NAMES a transport, so the row must say the
+        // transport is not reached — otherwise "posture ssh (remote host)"
+        // reads as a machine the agent is running on.
+        execution.posture.sshRefused
+          ? `remote requirement unmet (${execution.posture.sshRefused.reason}) — exec tools unavailable`
+          : '',
         execution.posture.hostFallback
           ? `host fallback: ${execution.posture.hostFallback.reason}`
           : '',

@@ -786,3 +786,37 @@ describe('SQLiteDeliveryLedger — operator reads', () => {
     expect(row?.content).toBe('the spoken text');
   });
 });
+
+// ---------------------------------------------------------------------------
+// Durability posture — see AGENTS.md's SQLite store roster.
+// ---------------------------------------------------------------------------
+
+/** Reads `PRAGMA synchronous` off the store's OWN handle — it is a
+ *  per-connection setting, so a second connection to the same file would
+ *  report its own default and prove nothing. 2 = FULL (SQLite's default),
+ *  1 = NORMAL. */
+function syncPragma(store: unknown): number {
+  const rows = (store as { db: { pragma(s: string): unknown } }).db.pragma('synchronous');
+  return (rows as Array<{ synchronous: number }>)[0]?.synchronous ?? -1;
+}
+
+describe('SQLiteDeliveryLedger — durability posture', () => {
+  it('stays at synchronous = FULL', () => {
+    // NOT a candidate for `synchronous = NORMAL`, and this pin is here so a
+    // later blanket sweep of the SQLite stores cannot take it silently.
+    //
+    // This ledger exists SPECIFICALLY to survive a crash: an obligation is
+    // written `pending` BEFORE the platform call and marked `delivered` only
+    // after it is confirmed, so that `sweepPendingDeliveries()` can redeliver
+    // whatever is still pending. Under NORMAL a power loss can roll back the
+    // last commits — which is exactly the `pending` row for the reply that was
+    // in flight when the power went. The sweep would then find nothing and the
+    // reply is lost for good, the one outcome this file was built to prevent.
+    // The write path is ~2 commits per reply on a human-conversation cadence,
+    // so FULL costs roughly 9ms against a multi-second turn.
+    const store = new SQLiteDeliveryLedger(':memory:');
+    // Asserted against the opened database, not the source text.
+    expect(syncPragma(store)).toBe(2);
+    store.close();
+  });
+});

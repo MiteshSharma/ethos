@@ -66,11 +66,16 @@ const COLUMNS = `
  * error. AUTOINCREMENT keeps the high-water mark in `sqlite_sequence`, which
  * DELETE does not touch, so an id is never handed out twice.
  *
- * Measured cost on the inbound path: none. `record()` runs in autocommit, so
- * it is dominated by the WAL fsync — 4.21 ms/record plain against 4.34
+ * Measured cost on the inbound path: negligible, but no longer invisible.
+ * These figures were first taken while the commit still paid a WAL fsync,
+ * which swallowed the difference whole — 4.21 ms/record plain against 4.34
  * ms/record with AUTOINCREMENT, inside the 4.11-4.43 ms spread of the runs
- * themselves. The `sqlite_sequence` update rides in a commit that was already
- * being flushed.
+ * themselves. The constructor now sets `synchronous = NORMAL` (see the note
+ * there), so there is no fsync left to hide behind: re-measured on the same
+ * machine, 0.018 ms/record plain against 0.032 ms/record with AUTOINCREMENT.
+ * The `sqlite_sequence` update is a second row written in the same commit,
+ * and 14µs is what that costs. AUTOINCREMENT is here for the correctness
+ * reason above, not because it was free; it is still the right call at 14µs.
  */
 const SCHEMA = `
   CREATE TABLE IF NOT EXISTS transcript (
@@ -208,6 +213,33 @@ export class SQLiteChannelTranscriptStore implements ChannelTranscriptStore {
     }
     this.db = new Database(dbPath);
     this.db.pragma('journal_mode = WAL');
+    // A DURABILITY TRADE, taken deliberately and only for this file.
+    //
+    // SQLite's default is `synchronous = FULL`: every commit fsyncs the WAL.
+    // Measured on this write path, that fsync IS the write — 4.7ms per
+    // `record()` against 0.07ms with NORMAL, a 71x difference and ~98% of the
+    // uncontended inbound cost. It is per-COMMIT, not per-row, so it is the
+    // same 4.7ms whatever the row holds.
+    //
+    // What NORMAL gives up is precise (sqlite.org/pragma.html#pragma_synchronous):
+    // in WAL mode it is "safe from corruption" and "always consistent", but
+    // "a transaction committed in WAL mode with synchronous=NORMAL might roll
+    // back following a power loss or system crash". Process crashes lose
+    // nothing — the OS still holds the writes. So the exposure is exactly:
+    // a power cut or kernel panic can drop the last few observed messages.
+    //
+    // That is the right trade HERE and nowhere near automatic elsewhere. This
+    // table is observational: lines other people said in a room the bot is
+    // watching, kept for a retention window and pruned by cron. Losing the tail
+    // of it costs a digest a few lines. Nothing reads it to decide whether work
+    // still needs doing — that is what delivery-ledger, job-store, notify-queue,
+    // inbound-dedup and the A2A task store are for, and they all stay at FULL.
+    // See AGENTS.md's SQLite roster before copying this line into another store.
+    //
+    // The comment below is the other half of the argument: this write happens
+    // inline on the gateway's inbound path, in a synchronous API, so every
+    // millisecond here stops the whole event loop for every bot.
+    this.db.pragma('synchronous = NORMAL');
     // The file is read by web-api while the gateway writes it. An explicit
     // busy timeout makes a concurrent write wait instead of throwing
     // SQLITE_BUSY on the inbound path.
