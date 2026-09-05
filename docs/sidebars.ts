@@ -53,6 +53,7 @@ const sidebars: SidebarsConfig = {
             'using/how-to/back-up-and-restore',
             'using/how-to/use-zero-mode',
             'using/how-to/run-in-docker',
+            'using/how-to/run-tools-over-ssh',
             'using/how-to/monitor-with-grafana',
             'using/how-to/use-skills',
             'using/how-to/interactive-charts-in-chat',

@@ -1,5 +1,6 @@
 import { EthosError } from '@ethosagent/types';
 import type { ConfigService } from './config.service';
+import type { ExecutionService } from './execution.service';
 import type { PlatformsService } from './platforms.service';
 import type { PluginsService } from './plugins.service';
 
@@ -42,6 +43,17 @@ export interface AdminStatus {
     status: 'connected' | 'disconnected' | 'error';
     toolCount?: number;
   }>;
+  /**
+   * The remote execution backend, when this deployment declares one
+   * (plan/phases/remote-execution-routing.md §6). Null when it does not — a
+   * fresh install has no remote target and must not be told anything failed.
+   *
+   * `resolved: false` is the boot failure: the backend the posture names could
+   * not be constructed, so nothing routed to it will run. Not a reachability
+   * answer — resolving opens no connection, and this panel must not spend an
+   * ssh round trip per poll. Reachability is `execution.probeSsh`.
+   */
+  executionBackend: { name: 'ssh'; resolved: boolean; error: string | null } | null;
 }
 
 /** Unified status view for the admin page. Each section degrades to empty
@@ -50,6 +62,7 @@ export async function gatherAdminStatus(deps: {
   platforms: PlatformsService;
   config: ConfigService;
   plugins: PluginsService;
+  execution: ExecutionService;
 }): Promise<AdminStatus> {
   let channels: AdminStatus['channels'] = [];
   try {
@@ -88,7 +101,12 @@ export async function gatherAdminStatus(deps: {
     // plugins service may not be available
   }
 
-  return { channels, providers, mcpServers };
+  // Deliberately NOT degraded to null on a throw, unlike the three sections
+  // above: `backendHealth` already answers a failure AS a value, so a catch
+  // here could only turn a reportable fault into silence.
+  const executionBackend = await deps.execution.backendHealth();
+
+  return { channels, providers, mcpServers, executionBackend };
 }
 
 /**

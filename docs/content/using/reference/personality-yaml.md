@@ -4,7 +4,7 @@ description: "Every field in a personality's config.yaml and toolset.yaml — mo
 kind: reference
 audience: user
 slug: personality-yaml
-updated: 2026-09-02
+updated: 2026-09-05
 ---
 
 A [personality](../../getting-started/glossary.md#personality) is a directory at `~/.ethos/personalities/<id>/` with three files:
@@ -117,6 +117,25 @@ Watchdog for the LLM stream. If no chunk arrives within this many milliseconds, 
 ```yaml
 streamingTimeoutMs: 300000
 ```
+
+## execution {#execution}
+
+Type: string · Default: unset (the resolver decides)
+
+Execution posture — where this personality's execution tools (`terminal`, `run_code`, `run_tests`, `lint`) run. Identity, not setting: an agent whose hands only ever reach a remote build box is a different agent from one holding a shell on the host. Absent means the resolver picks from the environment, `~/.ethos/config.yaml`, and the constitution. A posture the deployment cannot satisfy is refused or honestly relabelled, never silently downgraded — `ethos personality show <id>` prints which happened.
+
+- `local` — the Ethos host, un-sandboxed.
+- `docker` — a mount-confined container.
+- `ssh` — a remote target reached over ssh. Refused under a constitution that sets `execution.requireSandbox` or `execution.forbidLocal`: ssh is remote-host trust, not confinement.
+- `none` — execution refused.
+
+```yaml
+execution: ssh
+```
+
+- This is **not** the ssh host. The target — host, user, port, identity file, known-hosts file, remote workdir — is operator config under `execution.ssh.*` in [`~/.ethos/config.yaml`](./config-yaml.md), one per deployment. Two deployments of the same personality agree on the posture and disagree about the machine. Never put a hostname, user, or key path in this file.
+- An unrecognised value (`execution: remote`) is a load error, not a silent drop.
+- The posture is resolved when a loop is composed, so a change takes effect on restart.
 
 ## fs_reach.read / fs_reach.write {#fs-reach}
 
@@ -386,5 +405,6 @@ Optional sibling directory at `~/.ethos/personalities/<id>/skills/`. Per-persona
 - [CLI reference](./cli.md#ethos-personality) — the `ethos personality` subcommands that scaffold and edit these files.
 - [Glossary: personality](../../getting-started/glossary.md#personality) — one-line definition shared across every page that names the construct.
 - [Glossary: fs_reach](../../getting-started/glossary.md#fs-reach) — the path-allowlist field this file declares; backed by `ScopedStorage`.
+- [Run agent tools on a remote host](../how-to/run-tools-over-ssh.md) — the `execution: ssh` posture end to end, and what the remote host is exposed to.
 - [Retrieve files the agent wrote](../how-to/retrieve-agent-files.md) — `fs_reach.workdir` in practice, on a headless deployment.
 - [Local voice: Kokoro TTS + Whisper large v3 STT](../how-to/local-voice.md) — configure the providers this file's `voice.*` block picks between.

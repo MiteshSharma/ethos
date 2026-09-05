@@ -297,6 +297,110 @@ describe('renderCharacterSheet — ## Execution section', () => {
     expect(sheet).toMatch(/execution tools refuse \(not_available\)/);
   });
 
+  // A configured target makes the "no ssh backend is wired" note a lie — an ssh
+  // posture now routes. The note is the UNCONFIGURED case only.
+  it('names the configured ssh target and drops the P2 not-wired note', () => {
+    const sheet = renderCharacterSheet(fullConfig, soulMd, {
+      posture: {
+        ...dockerPosture(),
+        backend: 'ssh',
+        mounts: [],
+        scratchPaths: [],
+        sshTarget: 'deploy@build-01:2222',
+      },
+      platform: 'linux',
+    });
+    expect(sheet).toContain('- ssh target: deploy@build-01:2222');
+    expect(sheet).not.toMatch(/no ssh execution backend is wired in this build/);
+    expect(sheet).not.toMatch(/Note \(P2\)/);
+  });
+
+  // D4 — file tools stay local, terminal goes remote with no path floor. The
+  // operator must read this as "an unrestricted shell on another machine".
+  it('states the D4 split plainly for a configured ssh posture', () => {
+    const sheet = renderCharacterSheet(fullConfig, soulMd, {
+      posture: {
+        ...dockerPosture(),
+        backend: 'ssh',
+        mounts: [],
+        scratchPaths: [],
+        sshTarget: 'deploy@build-01:2222',
+      },
+      platform: 'linux',
+    });
+    expect(sheet).toMatch(/file tools operate on THIS host/);
+    expect(sheet).toMatch(/terminal runs on the remote/);
+    expect(sheet).toMatch(/NO path floor — an unrestricted shell on another machine/);
+  });
+
+  // `formatSshTarget` prints only what the operator configured; the sheet must
+  // not decorate it with a default port they never set.
+  it('renders a portless ssh target without inventing :22', () => {
+    const sheet = renderCharacterSheet(fullConfig, soulMd, {
+      posture: {
+        ...dockerPosture(),
+        backend: 'ssh',
+        mounts: [],
+        scratchPaths: [],
+        sshTarget: 'build-01',
+      },
+      platform: 'linux',
+    });
+    expect(sheet).toContain('- ssh target: build-01');
+    expect(sheet).not.toContain(':22');
+  });
+
+  // The refusal wording is the resolver's, rendered verbatim — one explanation
+  // from one source, so the sheet cannot drift from why exec tools refused.
+  it('renders the resolver refusal verbatim and still names the refused target (D7)', () => {
+    const sheet = renderCharacterSheet(fullConfig, soulMd, {
+      posture: {
+        ...dockerPosture(),
+        backend: 'ssh',
+        mounts: [],
+        scratchPaths: [],
+        sshTarget: 'deploy@build-01:2222',
+        sshRefused: {
+          reason: 'constitution-requires-sandbox',
+          message:
+            'ssh refused: the constitution requires a sandbox (execution.requireSandbox / forbidLocal). ssh is remote-host trust, not mount-confinement, so it does not satisfy that requirement.',
+        },
+      },
+      platform: 'linux',
+    });
+    expect(sheet).toContain(
+      'ssh refused: the constitution requires a sandbox (execution.requireSandbox / forbidLocal). ssh is remote-host trust, not mount-confinement, so it does not satisfy that requirement.',
+    );
+    // The operator has to know WHAT was refused, not just that something was.
+    expect(sheet).toContain('- ssh target: deploy@build-01:2222');
+  });
+
+  // Unconfigured + FORBIDDING constitution: the resolver's message is strictly
+  // more specific than the P2 note, so the note is suppressed — one canonical
+  // explanation, never two lines saying nearly the same thing.
+  it('replaces the P2 note with the resolver message when ssh is refused as unconfigured', () => {
+    const sheet = renderCharacterSheet(fullConfig, soulMd, {
+      posture: {
+        ...dockerPosture(),
+        backend: 'ssh',
+        mounts: [],
+        scratchPaths: [],
+        sshRefused: {
+          reason: 'unconfigured',
+          message:
+            'ssh refused: no execution.ssh.host is configured, and the constitution forbids the local host fallback (execution.requireSandbox / forbidLocal).',
+        },
+      },
+      platform: 'linux',
+    });
+    expect(sheet).toContain(
+      'ssh refused: no execution.ssh.host is configured, and the constitution forbids the local host fallback (execution.requireSandbox / forbidLocal).',
+    );
+    expect(sheet).not.toMatch(/Note \(P2\)/);
+    expect(sheet).not.toMatch(/no ssh execution backend is wired in this build/);
+    expect(sheet).not.toContain('- ssh target:');
+  });
+
   it('renders a constitution clamp notice for the active personality', () => {
     const sheet = renderCharacterSheet(fullConfig, soulMd, {
       posture: dockerPosture(),

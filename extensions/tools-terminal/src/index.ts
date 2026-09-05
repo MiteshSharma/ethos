@@ -12,6 +12,15 @@ const DEFAULT_TIMEOUT_MS = 30_000;
 const MAX_TIMEOUT_MS = 600_000; // 10 minutes
 
 /**
+ * Refusal text for the docker posture with no backend. Postures whose refusal
+ * has a different reason (ssh under a sandbox-requiring constitution) pass
+ * their own message rather than letting this sentence speak for them — it names
+ * Docker, and saying "Docker" about an ssh refusal is simply false.
+ */
+const DEFAULT_HOST_EXEC_FORBIDDEN =
+  'Execution requires a Docker sandbox, but none is available and the constitution forbids running un-sandboxed on the host.';
+
+/**
  * Drain an `ExecChunk` stream into combined stdout/stderr strings, mirroring
  * the ScopedProcess result shape so the routed and local paths produce the
  * same ToolResult. Throws on backend stream errors (timeout/abort/unavailable),
@@ -44,7 +53,15 @@ function makeTerminalTool(
   backend: ExecutionBackend | undefined,
   personality: PersonalityConfig | undefined,
   hostExecForbidden = false,
+  hostExecForbiddenMessage: string = DEFAULT_HOST_EXEC_FORBIDDEN,
 ): Tool {
+  // Remoteness is a property OF the backend, never a flag passed beside it. An
+  // independently-settable boolean can disagree with the backend actually
+  // wired, and every consequence of that disagreement is silent: the host
+  // `ctx.workingDir` goes to the remote as a remote path (D8), and the
+  // capability ledger names the wrong binary. Deriving it here means the two
+  // cannot come apart.
+  const remoteBackend = backend?.name === 'ssh';
   return {
     name: 'terminal',
     description:
@@ -82,7 +99,15 @@ function makeTerminalTool(
 
       if (!command) return { ok: false, error: 'command is required', code: 'input_invalid' };
 
-      const workDir = cwd ?? ctx.workingDir;
+      // D8 — the host's `ctx.workingDir` is NEVER sent to a remote backend. It
+      // names a directory on THIS machine; on the remote it is either absent
+      // (the `cd` fails, and the command that should have run does not) or, far
+      // worse, a path that happens to exist there and is not the one anyone
+      // meant. Omitting it lets the ssh backend fall back to the operator's
+      // `execution.ssh.remoteWorkdir`, or to the remote login directory. An
+      // explicit `cwd` argument still passes through verbatim, as a REMOTE path.
+      // Local/docker postures keep the host default: there the cwd is real.
+      const workDir = cwd ?? (remoteBackend ? undefined : ctx.workingDir);
       const timeout = Math.min(timeout_ms ?? DEFAULT_TIMEOUT_MS, MAX_TIMEOUT_MS);
 
       // Routed path: run inside the mount-confined backend. env is empty by
@@ -141,12 +166,7 @@ function makeTerminalTool(
       // no backend is available AND the constitution forbids the host fallback.
       // Refuse rather than silently run on the host (F1).
       if (hostExecForbidden) {
-        return {
-          ok: false,
-          error:
-            'Execution requires a Docker sandbox, but none is available and the constitution forbids running un-sandboxed on the host.',
-          code: 'not_available' as const,
-        };
+        return { ok: false, error: hostExecForbiddenMessage, code: 'not_available' as const };
       }
 
       // Local path (posture local/none): unchanged ScopedProcess execution.
@@ -163,7 +183,7 @@ function makeTerminalTool(
           'bash',
           ['-c', command],
           {
-            cwd: workDir,
+            cwd: cwd ?? ctx.workingDir,
             timeout,
           },
         );
@@ -206,10 +226,22 @@ export const terminalTool: Tool = makeTerminalTool(undefined, undefined);
 export function createTerminalTools(opts?: {
   backend?: ExecutionBackend;
   personality?: PersonalityConfig;
-  /** Refuse host execution when the posture requires Docker but none is wired. */
+  /** Refuse host execution when the posture requires a sandbox/remote but none is wired. */
   hostExecForbidden?: boolean;
+  /**
+   * Why host execution is refused, in the posture's own words. Absent → the
+   * Docker sentence. The ssh posture passes `posture.sshRefused.message`.
+   */
+  hostExecForbiddenMessage?: string;
 }): Tool[] {
-  return [makeTerminalTool(opts?.backend, opts?.personality, opts?.hostExecForbidden)];
+  return [
+    makeTerminalTool(
+      opts?.backend,
+      opts?.personality,
+      opts?.hostExecForbidden,
+      opts?.hostExecForbiddenMessage,
+    ),
+  ];
 }
 
 export { checkCommand, createTerminalGuardHook } from './guard';

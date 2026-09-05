@@ -75,6 +75,16 @@ const CHECK_RUN_TIMEOUT_MS = 120_000;
  */
 const NO_EXIT_CODE = -1;
 
+/**
+ * Why a `check: run` does not execute under an `ssh` posture (D4). Worded like
+ * the `process_*` refusal next door in `compose-tools.ts` and the resolver's
+ * `sshRefused.message` — one dialect for one decision, not a third.
+ */
+const CHECK_RUN_SSH_UNSUPPORTED =
+  '`check: run` is not routed over ssh in v1: the file verbs it sits beside ' +
+  'read this host, where the work is, so a command run on the remote target ' +
+  'would verify a filesystem the work never touched';
+
 export interface CheckRunExecOptions {
   /** The resolved posture for the active personality (compose-tools.ts). */
   posture: ExecutionPosture;
@@ -162,6 +172,8 @@ function withDeadline(
  *     the check, which is the correct direction to fail.
  *   - `local` posture → the host `ScopedProcess` the `terminal` tool uses at
  *     that posture, with the allowlist's binaries as its `allowedBinaries`.
+ *   - `ssh` posture → NO ROUTE, with a reason (see the guard below). The work
+ *     being verified is on THIS host; the remote target has no copy of it.
  *   - `none` posture, or a sandbox/remote posture with no backend wired → NO
  *     ROUTE. A personality that may not run commands does not get to run them
  *     by way of a ticket it wrote the acceptance criteria for. `undefined`
@@ -175,6 +187,31 @@ export function createCheckRunExec(opts: CheckRunExecOptions): CheckExec | undef
   const { posture, backend, personality } = opts;
 
   if (opts.hostExecForbidden || posture.backend === 'none') return undefined;
+
+  // D4, applied to the verification gate. Under an `ssh` posture the routed
+  // backend runs on ANOTHER MACHINE, and `run` is the only `check:` verb that
+  // would go there: `file_exists`, `file_min_bytes` and `file_contains` read
+  // through this process's `Storage`, scoped to the host workdir, because file
+  // tools are not remoted in v1. So a remote `run` would settle a criterion
+  // against a filesystem that never saw the work — a green `pnpm test` on a
+  // machine holding someone else's checkout, or none at all. Worse, the cwd it
+  // would carry is `verifyWorkdir` (`~/.ethos/teams/<name>` or the
+  // personality's asset dir): a HOST path sent as a remote one, the same leak
+  // `tools-terminal` and `tools-code` already refuse to make. Routing with no
+  // cwd would fix the leak and keep the meaninglessness, which is the half-fix
+  // that reads as a check.
+  //
+  // Falling through to the host `ScopedProcess` below is not the alternative
+  // either: that would spawn on this machine under a posture that says
+  // commands run elsewhere — exactly what `process_*` is refused for.
+  //
+  // So: no route, and one that says why. A THROWING route rather than
+  // `undefined` because the verifier turns a probe throw into the rejection's
+  // reason, and "no execution route is configured" would send a ticket author
+  // looking for a missing setting instead of a posture that excludes them.
+  if (posture.backend === 'ssh') {
+    return () => Promise.reject(new Error(CHECK_RUN_SSH_UNSUPPORTED));
+  }
 
   if (backend) {
     // The argv was admitted by a whole-command match against an entry an

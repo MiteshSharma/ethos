@@ -644,6 +644,9 @@ export async function runBoot(args: string[], config: EthosConfig | null): Promi
     onMemoryCaptured: shared.onMemoryCaptured,
     refreshLoopPersonalities: shared.refreshPersonalities,
     skillsInjector: shared.skillsInjector,
+    // Settings › Execution probe — the SYSTEM loop's own registry, so the
+    // instance it probes is the one that executes (`resolve()` memoises).
+    executionBackends: shared.executionBackends,
     skillsCatalogDir,
     sttProviders: shared.sttProviders,
     ttsProviders: shared.ttsProviders,

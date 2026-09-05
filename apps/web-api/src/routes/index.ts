@@ -125,6 +125,7 @@ export interface ServiceContainer {
   toolSettings: import('../services/tool-settings.service').ToolSettingsService;
   /** Local `~/.ethos` archives: status, create, identity-only restore. */
   backup: import('../services/backup.service').BackupService;
+  execution: import('../services/execution.service').ExecutionService;
   voice?: import('../services/voice.service').VoiceService;
   /** Durable per-conversation voice mode, shared with the gateway's lanes. */
   voiceLaneMode: import('../services/voice-lane-mode.service').VoiceLaneModeService;

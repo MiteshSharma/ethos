@@ -1243,13 +1243,29 @@ async function runPersonalityShow(argv: string[]): Promise<void> {
     });
     return;
   }
+  // Read the deployment config BEFORE the posture: `execution.ssh.host`'s
+  // presence is what makes an `ssh` posture real, and the sheet must say the
+  // same thing the compose path will do. Fail-soft — an unreadable config means
+  // no remote target, the same as an absent block.
+  let cfg: Awaited<ReturnType<typeof readConfig>> = null;
+  try {
+    cfg = await readConfig(storage, await getSecretsResolver());
+  } catch {
+    cfg = null;
+  }
+  const sshCfg = cfg?.execution?.ssh;
+
   // Resolve the execution posture so `## Execution` renders on the sheet
   // (Phase 2a, lane E1). Read-only — no daemon probe here; the static posture
   // (backend / network / memory / mounts / macOS caveat) is what `show` audits.
-  const { buildExecutionPosture, resolvePersonalityModelFit } = await import('@ethosagent/wiring');
+  const { buildExecutionPosture, formatSshTarget, resolvePersonalityModelFit } = await import(
+    '@ethosagent/wiring'
+  );
   const posture = await buildExecutionPosture({
     personality: described.config,
     substitutionVars: { ethosHome: ethosDir(), cwd: process.cwd() },
+    sshConfigured: sshCfg?.host !== undefined,
+    ...(sshCfg ? { sshTarget: formatSshTarget(sshCfg) } : {}),
   });
 
   // Lane 6 — the arithmetic model-fit verdict, rendered as the sheet's
@@ -1265,7 +1281,6 @@ async function runPersonalityShow(argv: string[]): Promise<void> {
   let renderers: string[] | undefined;
   let loopConstructed = false;
   try {
-    const cfg = await readConfig(storage, await getSecretsResolver());
     if (cfg) {
       const { createAgentLoop } = await import('./wiring');
       const result = await createAgentLoop(cfg);

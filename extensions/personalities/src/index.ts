@@ -1732,6 +1732,7 @@ export class FilePersonalityRegistry implements PersonalityRegistry {
     const outboundPolicy = buildOutboundPolicy(cfg);
     const voice = buildVoiceConfig(cfg);
     const display = buildDisplayConfig(cfg);
+    const execution = parseExecutionPosture(cfg.execution);
 
     const model = buildModelConfig(cfg);
 
@@ -1768,6 +1769,7 @@ export class FilePersonalityRegistry implements PersonalityRegistry {
         : {}),
       ...(voice !== undefined ? { voice } : {}),
       ...(display !== undefined ? { display } : {}),
+      ...(execution !== undefined ? { execution } : {}),
     };
 
     validateUnsafeCombinations(id, config);
@@ -2091,6 +2093,26 @@ function buildDisplayConfig(
   return avatarUrl ? { avatar_url: avatarUrl } : undefined;
 }
 
+const EXECUTION_POSTURES = ['local', 'docker', 'ssh', 'none'] as const;
+
+/**
+ * Execution posture — where this personality's execution tools run. Validated
+ * rather than silently dropped: a typo (`execution: remote`) would otherwise
+ * fall through to the resolver's default and run the agent's hands somewhere
+ * the author did not choose. The ssh TARGET is operator config
+ * (`execution.ssh.*` in ~/.ethos/config.yaml), never this key.
+ */
+function parseExecutionPosture(raw: string | undefined): PersonalityConfig['execution'] {
+  if (!raw) return undefined;
+  const posture = EXECUTION_POSTURES.find((p) => p === raw);
+  if (!posture) {
+    throw new Error(
+      `Invalid execution: "${raw}". Expected one of: ${EXECUTION_POSTURES.join(', ')}`,
+    );
+  }
+  return posture;
+}
+
 function buildOutboundPolicy(
   cfg: Record<string, string>,
 ): import('@ethosagent/types').OutboundPolicyConfig | undefined {
@@ -2386,6 +2408,7 @@ type RenderConfigInput = Omit<CreatePersonalityInput, 'id' | 'soulMd' | 'safety'
     | 'outbound_policy'
     | 'voice'
     | 'display'
+    | 'execution'
   >;
 
 function renderConfigYaml(input: RenderConfigInput): string {
@@ -2507,6 +2530,9 @@ function renderConfigYaml(input: RenderConfigInput): string {
   }
   if (input.evolution_approval_mode !== undefined) {
     lines.push(`evolution_approval_mode: ${yamlScalar(input.evolution_approval_mode)}`);
+  }
+  if (input.execution !== undefined) {
+    lines.push(`execution: ${yamlScalar(input.execution)}`);
   }
   if (input.voice !== undefined) {
     const v = input.voice;

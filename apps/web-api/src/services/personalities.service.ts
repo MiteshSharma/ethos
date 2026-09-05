@@ -23,6 +23,7 @@ import {
   type Storage,
 } from '@ethosagent/types';
 import type { McpPolicy, Personality, PersonalitySkill } from '@ethosagent/web-contracts';
+import type { ConfigRepository } from '../repositories/config.repository';
 
 /** Latest Personality-Judge alignment, mapped from `.judge-history/state.json`. */
 interface JudgeWire {
@@ -70,6 +71,19 @@ export interface PersonalitiesServiceOptions {
    * Defaults to `true` (server deployments where Docker is available).
    */
   dockerBuildable?: boolean;
+  /**
+   * `<dataDir>/config.yaml`, read for `execution.ssh.*` when resolving the
+   * character sheet's `## Execution` section. `execution.ssh.host`'s presence
+   * is the switch for the whole remote posture, so without this the sheet
+   * cannot tell a personality that runs on a remote target from one that runs
+   * on this machine — and would render the wrong one of the two.
+   *
+   * Read through the repository rooted at `dataDir` rather than `readConfig()`
+   * from `@ethosagent/config`, which resolves against the process-global
+   * `ethosDir()`; see `BackupServiceOptions.config` for the same reasoning.
+   * Absent → no remote target, the same as an absent `execution.ssh` block.
+   */
+  config?: ConfigRepository;
   /**
    * Optional refresh closure — reloads the personality registry from disk
    * before a read so a hot-dropped or edited personality is visible without a
@@ -222,13 +236,33 @@ export class PersonalitiesService {
         posture: null,
       };
     }
+    // `execution.ssh.*` — the deployment's single remote execution target. Read
+    // from the same file the compose path reads, so the sheet's claim about
+    // WHERE this personality executes matches what will actually happen.
+    const passthrough = (await this.opts.config?.read())?.passthrough ?? {};
+    const sshHost = passthrough['execution.ssh.host'];
+    const sshUser = passthrough['execution.ssh.user'];
+    const sshPortRaw = passthrough['execution.ssh.port'];
+    const sshPort =
+      sshPortRaw !== undefined && /^\d+$/.test(sshPortRaw) ? Number(sshPortRaw) : undefined;
+
     // Same posture resolver + renderer the CLI `personality show` uses — one
     // artifact, no second renderer (Phase 2a, lane E1).
-    const { buildExecutionPosture } = await import('@ethosagent/wiring');
+    const { buildExecutionPosture, formatSshTarget } = await import('@ethosagent/wiring');
     const posture = await buildExecutionPosture({
       personality: described.config,
       substitutionVars: { ethosHome: dataDir, cwd: process.cwd() },
       ...(this.opts.dockerBuildable === false ? { dockerBuildable: false } : {}),
+      sshConfigured: sshHost !== undefined && sshHost.length > 0,
+      ...(sshHost
+        ? {
+            sshTarget: formatSshTarget({
+              host: sshHost,
+              ...(sshUser ? { user: sshUser } : {}),
+              ...(sshPort !== undefined ? { port: sshPort } : {}),
+            }),
+          }
+        : {}),
     });
     return {
       markdown: renderCharacterSheet(

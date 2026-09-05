@@ -267,6 +267,77 @@ describe('`check: run` executes where this personality executes, or not at all',
     await expect(exec?.(['rm', '-rf', '/'], process.cwd())).rejects.toThrow('BINARY_NOT_ALLOWED');
   });
 
+  // D4 extended to the verification gate: `check: run` is not routed over ssh.
+  it('refuses under an ssh posture, saying why, instead of running on the remote', async () => {
+    const remote: ExecutionBackend = {
+      name: 'ssh',
+      exec() {
+        throw new Error('the remote must never be reached for a `run` check');
+      },
+    } as unknown as ExecutionBackend;
+
+    const exec = createCheckRunExec({
+      posture: posture('ssh'),
+      backend: remote,
+      personality: PERSONALITY,
+      allowedCheckCommands: ['pnpm test'],
+      hostExecForbidden: false,
+    });
+
+    // A route that REFUSES, not `undefined`: the verifier turns the throw into
+    // the rejection's reason, so the ticket author is told about the posture
+    // rather than sent looking for a missing setting.
+    expect(exec).toBeDefined();
+    await expect(exec?.(['pnpm', 'test'], '/verify')).rejects.toThrow(
+      '`check: run` is not routed over ssh in v1',
+    );
+  });
+
+  it('does not fall back to the host under an ssh posture either', async () => {
+    // The host `ScopedProcess` route would spawn HERE under a posture that says
+    // commands run elsewhere — the hazard `process_*` is excluded for. `node`
+    // is allowlisted, so a fallthrough would exit 3 rather than reject.
+    const exec = createCheckRunExec({
+      posture: posture('ssh'),
+      personality: PERSONALITY,
+      allowedCheckCommands: ['node -e process.exit(3)'],
+      hostExecForbidden: false,
+    });
+    await expect(exec?.(['node', '-e', 'process.exit(3)'], process.cwd())).rejects.toThrow(
+      'is not routed over ssh in v1',
+    );
+  });
+
+  it('leaves docker and local untouched — the refusal is the ssh posture only', async () => {
+    const backend: ExecutionBackend = {
+      name: 'docker',
+      async *exec() {
+        yield { stream: 'exit' as const, code: 0 };
+      },
+    } as unknown as ExecutionBackend;
+
+    // Docker control: still routed, still in the verification workdir.
+    expect(
+      await createCheckRunExec({
+        posture: posture('docker'),
+        backend,
+        personality: PERSONALITY,
+        allowedCheckCommands: ['pnpm test'],
+        hostExecForbidden: false,
+      })?.(['pnpm', 'test'], '/verify'),
+    ).toBe(0);
+
+    // Local control: still the host ScopedProcess.
+    expect(
+      await createCheckRunExec({
+        posture: posture('local'),
+        personality: PERSONALITY,
+        allowedCheckCommands: ['node -e process.exit(3)'],
+        hostExecForbidden: false,
+      })?.(['node', '-e', 'process.exit(3)'], process.cwd()),
+    ).toBe(3);
+  });
+
   it('wiring hands the probe that route instead of letting it spawn its own', () => {
     const src = readFileSync(COMPOSE_TOOLS, 'utf-8');
     expect(src).toContain('const checkRunExec = createCheckRunExec({');

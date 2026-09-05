@@ -456,6 +456,22 @@ export function buildConfigPatch(
       cpu: values.executionDocker.cpu ?? null,
       diskMb: values.executionDocker.diskMb ?? null,
     },
+    executionSsh: {
+      host: strOrNull(values.executionSsh.host),
+      user: strOrNull(values.executionSsh.user),
+      port: values.executionSsh.port ?? null,
+      identityFile: strOrNull(values.executionSsh.identityFile),
+      knownHostsFile: strOrNull(values.executionSsh.knownHostsFile),
+      // The Select's "unset" option is the empty string, which `strOrNull`
+      // turns into the `null` that CLEARS the key — the two enum values are
+      // the only strings this field may carry to the wire.
+      strictHostKeys:
+        values.executionSsh.strictHostKeys === 'accept-new' ||
+        values.executionSsh.strictHostKeys === 'yes'
+          ? values.executionSsh.strictHostKeys
+          : null,
+      remoteWorkdir: strOrNull(values.executionSsh.remoteWorkdir),
+    },
     toolLoop: {
       maxToolCallsWarnAt: values.toolLoop.maxToolCallsWarnAt ?? null,
       maxIdenticalToolCallsWarnAt: values.toolLoop.maxIdenticalToolCallsWarnAt ?? null,

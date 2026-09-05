@@ -12,13 +12,16 @@ import {
  *   - chat-only (no exec tool) → `none`;
  *   - exec-bearing → `docker`, unless Ethos is containerized → `local`.
  *
- * `ssh` is a valid posture, but tool composition routes only `docker` through a
- * backend today (local/ssh/none leave tools on the existing ScopedProcess host
- * path), so callers branch on `=== 'docker'`.
+ * `sshConfigured` is a REQUIRED positional argument, not an optional one, and
+ * sits ahead of `containerized` for that reason: an `ssh`-posture personality
+ * resolves to `ssh` only when the deployment actually has an
+ * `execution.ssh.host`, and a caller that could omit the answer would silently
+ * be told `local` — host execution under a sheet claiming a remote target.
  */
 export function resolveExecutionBackendName(
   personality: PersonalityConfig,
+  sshConfigured: boolean,
   containerized?: ContainerizedDetectionInput,
 ): 'docker' | 'local' | 'ssh' | 'none' {
-  return resolveExecutionPosture({ personality, containerized }).backend;
+  return resolveExecutionPosture({ personality, sshConfigured, containerized }).backend;
 }

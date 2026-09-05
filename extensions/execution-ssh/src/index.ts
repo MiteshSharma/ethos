@@ -37,9 +37,409 @@ export class SshHostMissingError extends Error {
 }
 
 /**
+ * The configured `user`/`host` cannot be spelled into an ssh destination
+ * safely.
+ *
+ * A destination is appended to ssh's own argv, and ssh parses any argument
+ * beginning with `-` as ANOTHER LOCAL OPTION — so a host of
+ * `-oProxyCommand=<cmd>` runs `<cmd>` ON THE ETHOS HOST, which is precisely the
+ * local/remote confusion this backend exists to prevent. Verified against
+ * OpenSSH 9.6p1: `ssh -G -oProxyCommand=touch /tmp/x realhost true` reports
+ * `proxycommand touch /tmp/x` in its resolved config.
+ *
+ * {@link buildSshArgs} neutralises this in the argv with a `--` terminator; this
+ * error is the SECOND layer, refusing the value outright before anything is
+ * spawned (`packages/config` carries a third, at boot). Defence in depth is
+ * deliberate: the terminator relies on ssh's parser, the grammar does not.
+ */
+export class SshDestinationInvalidError extends Error {
+  readonly code = 'SSH_DESTINATION_INVALID';
+  constructor(reason: string) {
+    super(reason);
+    this.name = 'SshDestinationInvalidError';
+  }
+}
+
+/**
+ * `knownHostsFile` names a destination that cannot REMEMBER a host key.
+ *
+ * The default policy is `StrictHostKeyChecking=accept-new` — learn the key on
+ * first sight, refuse it if it ever changes. The second half of that promise is
+ * bought entirely by PERSISTENCE: the learned key has to still be there next
+ * time. Point `UserKnownHostsFile` at OpenSSH's literal `none`, or at a null
+ * device, and nothing is ever written back, so every connection is a first
+ * connection and accepts whatever key it is offered — silent MITM exposure,
+ * with no diagnostic anywhere.
+ *
+ * That is host-key verification OFF, which this surface refuses to spell:
+ * `strictHostKeys` is an `'accept-new' | 'yes'` literal union precisely so
+ * `no` cannot be written down. Rejecting `no` while accepting
+ * `knownHostsFile: none` would leave the refusal decorative.
+ *
+ * Rejected outright rather than downgraded (e.g. to "then you must also set
+ * `strictHostKeys: yes`"): with a destination that keeps nothing, `yes` matches
+ * NOTHING, so every connection fails. That is safe and useless, and it fails at
+ * the first tool call with an ssh error instead of at boot with this one.
+ *
+ * {@link sshKnownHostsError} is the pre-spawn layer; `packages/config` carries
+ * the other, at boot. KNOWN LIMIT: the check is LEXICAL — it refuses the
+ * spellings an operator would actually write, not every path that happens to
+ * resolve to a null device (`/dev/./null`, a symlink to it). Deciding that
+ * needs a filesystem oracle, which would put raw `node:fs` behind a personality
+ * boundary for no gain against an operator who is circumventing on purpose.
+ */
+export class SshKnownHostsInvalidError extends Error {
+  readonly code = 'SSH_KNOWN_HOSTS_INVALID';
+  constructor(reason: string) {
+    super(reason);
+    this.name = 'SshKnownHostsInvalidError';
+  }
+}
+
+/**
+ * `opts.env` carried a value. v1 has no way to deliver it: `AcceptEnv` is
+ * sshd-side operator config this backend cannot see, and inlining `K=V` into
+ * the remote command string would silently change quoting semantics for the
+ * caller. Routed callers (terminal, run_code) pass `{}` — so a non-empty env is
+ * a wiring mistake, and failing is the only honest answer (plan §5).
+ */
+export class SshEnvUnsupportedError extends Error {
+  readonly code = 'SSH_ENV_UNSUPPORTED';
+  constructor(keys: readonly string[]) {
+    super(
+      `ssh backend cannot deliver environment variables (${keys.join(', ')}); ` +
+        'set them inside the command instead',
+    );
+    this.name = 'SshEnvUnsupportedError';
+  }
+}
+
+/**
+ * ssh itself failed — it could not connect, authenticate, or hold the session
+ * open — as opposed to the remote command running and exiting non-zero.
+ *
+ * ssh reports BOTH as exit status 255: it exits 255 on its own failures, and it
+ * also propagates a remote command that genuinely exited 255. The two are told
+ * apart by the diagnostic ssh writes to stderr, which it prefixes `ssh:`
+ * (plan §5). KNOWN LIMIT: authentication refusals are printed by ssh WITHOUT
+ * that prefix (`user@host: Permission denied (publickey).`), so they surface as
+ * a remote exit 255 rather than as this error. `probe()` reports those verbatim
+ * — that is the surface an operator should be reading for a credential problem.
+ */
+export class SshTransportError extends Error {
+  readonly code = 'SSH_TRANSPORT_FAILED';
+  constructor(diagnostic: string) {
+    super(`ssh transport failed: ${diagnostic}`);
+    this.name = 'SshTransportError';
+  }
+}
+
+/**
+ * The ssh target as the operator configures it (plan D2) — `execution.ssh` from
+ * `~/.ethos/config.yaml`, carried on `ExecutionBackendConfig` in
+ * `@ethosagent/types`. A local alias for the contract's own shape, not a
+ * widening of it: `shell` on `ExecOpts` and the full `ssh` block landed in
+ * `packages/types` with the wiring lane (plan T5), so the two temporary
+ * intersection types this file used to declare are gone.
+ */
+export type SshTarget = NonNullable<ExecutionBackendConfig['ssh']>;
+
+/**
+ * POSIX single-quote wrap.
+ *
+ * Copied — not imported — from `apps/ethos/src/commands/personality-export.ts`,
+ * which carries the index of the other copies
+ * (`apps/ethos/src/commands/backup.ts`, `apps/ethos/src/lib/tui-capabilities.ts`,
+ * `packages/wiring/src/backup/secrets-manifest.ts`, `extensions/cron/src/index.ts`,
+ * `apps/web`'s AddMcpModal). Same dialect, deliberately: an embedded `'` is
+ * closed, escaped, and reopened, so a quote inside the command survives instead
+ * of ending the wrap. This is the SEVENTH copy; those files' comments still say
+ * six, and correcting them belongs to whoever consolidates them.
+ */
+function shellQuote(arg: string): string {
+  return `'${arg.replaceAll("'", `'\\''`)}'`;
+}
+
+/** Byte ceiling for one exec stream. Copied from `extensions/execution-docker/src/index.ts:183`. */
+const MAX_EXEC_OUTPUT_BYTES = 1_000_000;
+
+/** How long a successful availability probe is trusted (plan §4). */
+const AVAILABILITY_TTL_MS = 60_000;
+
+/** Bytes of stderr retained for transport diagnosis — bounded on purpose. */
+const MAX_DIAGNOSTIC_BYTES = 4096;
+
+/**
+ * The largest `n <= limit` at which `buf` can be cut without splitting a UTF-8
+ * sequence.
+ *
+ * A continuation byte is `10xxxxxx`. If the byte AT the cut is one, the
+ * character starting before the cut runs past it, so walk back to that
+ * character's lead byte and exclude the whole thing. If it is not, `limit` is
+ * already a boundary. Never more than three steps — no UTF-8 sequence is longer
+ * than four bytes.
+ */
+function utf8SafeEnd(buf: Buffer, limit: number): number {
+  if (limit >= buf.length) return buf.length;
+  let end = limit;
+  while (end > 0 && (buf[end] & 0xc0) === 0x80) end--;
+  return end;
+}
+
+/**
+ * A byte-exact PREFIX of a stream, capped at {@link MAX_DIAGNOSTIC_BYTES}.
+ *
+ * Retains raw bytes and decodes once, at the end. Two reasons, both of which
+ * the previous `if (s.length < MAX) s += chunk.toString()` got wrong:
+ *
+ *  - It bounded nothing. The length test ran BEFORE appending a whole chunk, so
+ *    a single 10 MB stderr burst was retained in full — the one case a bound
+ *    exists for.
+ *  - `String.length` counts UTF-16 code units, not bytes, so the cap was off by
+ *    up to 3x either way depending on the encoding of what ssh printed.
+ *
+ * Decoding at the end is also what keeps the text READABLE, which is the whole
+ * point of this buffer — an operator reads it to diagnose a transport failure.
+ * A multi-byte character split across two `data` events decodes correctly
+ * because the halves are rejoined before decoding, and the cap itself lands on
+ * a character boundary via {@link utf8SafeEnd} rather than emitting U+FFFD.
+ *
+ * Once a chunk does not fit, the buffer is FULL and later chunks are dropped
+ * whole. Topping it up with a smaller later chunk would splice together bytes
+ * that were never adjacent, which reads as a plausible ssh message that was
+ * never printed.
+ */
+function createDiagnosticBuffer(): { push: (chunk: Buffer) => void; text: () => string } {
+  const parts: Buffer[] = [];
+  let len = 0;
+  let full = false;
+  return {
+    push(chunk: Buffer): void {
+      if (full) return;
+      const room = MAX_DIAGNOSTIC_BYTES - len;
+      if (chunk.length <= room) {
+        parts.push(chunk);
+        len += chunk.length;
+        return;
+      }
+      const end = utf8SafeEnd(chunk, room);
+      if (end > 0) {
+        parts.push(chunk.subarray(0, end));
+        len += end;
+      }
+      full = true;
+    },
+    text(): string {
+      return Buffer.concat(parts).toString('utf-8');
+    },
+  };
+}
+
+/** `-o ConnectTimeout=` for a real exec. */
+const EXEC_CONNECT_TIMEOUT_SEC = 10;
+
+/** `-o ConnectTimeout=` for the availability probe (plan §5). */
+const PROBE_CONNECT_TIMEOUT_SEC = 5;
+
+/**
+ * Hostnames, IPv4, IPv6 literals (`[::1]`, `fe80::1%eth0`) and `~/.ssh/config`
+ * aliases. Excludes whitespace, control characters, `@`, `/`, and every shell
+ * metacharacter — a destination is an argv word, not a command.
+ */
+const SSH_HOST_GRAMMAR = /^[A-Za-z0-9._:%[\]-]+$/;
+
+/** POSIX-shaped login names. Same exclusions as the host grammar. */
+const SSH_USER_GRAMMAR = /^[A-Za-z0-9._-]+$/;
+
+/**
+ * `UserKnownHostsFile` values that keep nothing (see
+ * {@link SshKnownHostsInvalidError}). `none` is an OpenSSH literal, not a path;
+ * the rest are null devices — `/dev/null` on POSIX, `nul` on Windows. Compared
+ * lower-cased: OpenSSH's own `none` is case-sensitive, but refusing `None` too
+ * costs only a file literally named that, and nobody keeps host keys in one.
+ */
+const NON_PERSISTENT_KNOWN_HOSTS = new Set(['none', '/dev/null', 'nul']);
+
+/**
+ * Why `ssh.user`/`ssh.host` cannot be spelled into a destination, or `null`
+ * when they can. A leading `-` is called out separately from the grammar
+ * because it is the ACTUAL attack (see {@link SshDestinationInvalidError}) and
+ * an operator reading `invalid characters` would not learn that.
+ *
+ * Duplicated — not imported — in `packages/config/src/index.ts`
+ * (`sshDestinationError`), which applies the same grammar at config-parse time
+ * so a bad target is fatal at boot rather than at first tool call. `config` is
+ * a lower layer than `extensions` and cannot import from one (ARCHITECTURE.md
+ * §II); the two copies MUST change together.
+ */
+export function sshDestinationError(ssh: SshTarget): string | null {
+  if (ssh.host.startsWith('-')) {
+    return `execution.ssh.host: must not begin with '-' (got '${ssh.host}'); ssh would parse it as a local option.`;
+  }
+  if (!SSH_HOST_GRAMMAR.test(ssh.host)) {
+    return `execution.ssh.host: contains characters that are not valid in a hostname (got '${ssh.host}').`;
+  }
+  const user = ssh.user;
+  if (user !== undefined) {
+    if (user.startsWith('-')) {
+      return `execution.ssh.user: must not begin with '-' (got '${user}'); ssh would parse it as a local option.`;
+    }
+    if (!SSH_USER_GRAMMAR.test(user)) {
+      return `execution.ssh.user: contains characters that are not valid in a login name (got '${user}').`;
+    }
+  }
+  return null;
+}
+
+/**
+ * Why `ssh.knownHostsFile` cannot hold a pinned host key, or `null` when it
+ * can. See {@link SshKnownHostsInvalidError} for why a destination that keeps
+ * nothing is host-key verification switched off.
+ *
+ * `UserKnownHostsFile` takes a whitespace-separated LIST, so every token is
+ * checked, not just the first: a list is only as trustworthy as what ssh
+ * actually consults, and no legitimate list names a null device. A value that
+ * tokenises to nothing (all whitespace) is the same hole spelled emptily.
+ *
+ * A path that does not exist YET is fine and must stay fine — `accept-new`
+ * creates the file on the first connection, which is the ordinary way an
+ * operator adopts a dedicated `knownHostsFile`.
+ *
+ * Duplicated — not imported — in `packages/config/src/index.ts`
+ * (`sshKnownHostsError`), which applies the same rule at config-parse time so a
+ * non-persistent target is fatal at boot rather than silently trusting whatever
+ * key is offered at the first tool call. `config` is a lower layer than
+ * `extensions` and cannot import from one (ARCHITECTURE.md §II); the two copies
+ * MUST change together.
+ */
+export function sshKnownHostsError(ssh: SshTarget): string | null {
+  const raw = ssh.knownHostsFile;
+  if (raw === undefined) return null;
+  const paths = raw.split(/\s+/).filter((p) => p.length > 0);
+  if (paths.length === 0) {
+    return `execution.ssh.knownHostsFile: must not be blank; omit the key to use ssh's own known_hosts.`;
+  }
+  for (const path of paths) {
+    if (NON_PERSISTENT_KNOWN_HOSTS.has(path.toLowerCase())) {
+      return (
+        `execution.ssh.knownHostsFile: '${path}' cannot persist a learned host key, ` +
+        'so every connection would be a first connection and accept any key offered. ' +
+        "Point it at a writable file path, or omit the key to use ssh's own known_hosts."
+      );
+    }
+  }
+  return null;
+}
+
+function sshDestination(ssh: SshTarget): string {
+  return ssh.user ? `${ssh.user}@${ssh.host}` : ssh.host;
+}
+
+/**
+ * The ssh argv for one invocation, up to and including the destination and the
+ * remote words.
+ *
+ * `-o BatchMode=yes` — never prompt; a passphrase prompt on a background exec
+ * hangs forever. `-T` — no pseudo-tty, so remote output is not line-disciplined
+ * and stdout/stderr stay separable. Host keys default to `accept-new` (TOFU:
+ * unknown hosts are learned, CHANGED ones still refused); `strictHostKeys` is
+ * forwarded verbatim when the operator set it. The "changed ones refused" half
+ * only holds if the learned key is KEPT, so `knownHostsFile` is refused before
+ * this point when it names a destination that keeps nothing — see
+ * {@link sshKnownHostsError}. There is no argv-level neutralisation for that
+ * the way `--` neutralises a hostile destination: `UserKnownHostsFile=none`
+ * means exactly what it says.
+ *
+ * The `--` goes BEFORE the destination, which is where ssh honours it. A
+ * TRAILING `--` would be wrong for the reason an earlier lane removed one: ssh
+ * ends option parsing at the destination, so anything after it is sent to the
+ * remote verbatim and a trailing `--` runs as the remote command's argv[0].
+ *
+ * Verified against OpenSSH 9.6p1:
+ *   - `ssh -G -- '-oProxyCommand=touch /tmp/x' true` → `hostname contains
+ *     invalid characters`; the option is NOT applied and nothing runs locally.
+ *     Without the `--` the same argument resolves to `proxycommand touch
+ *     /tmp/x`, i.e. local execution.
+ *   - `ssh -G -- deploy@build-01 <words>` and the same line without `--`
+ *     produce byte-identical resolved config, so the terminator costs an
+ *     ordinary destination nothing.
+ *   - Remote words after a `--`'d destination are still remote words: `ssh -G
+ *     -- build-01 -o ProxyCommand=touch` sets no local proxycommand.
+ */
+export function buildSshArgs(
+  ssh: SshTarget,
+  remoteWords: readonly string[],
+  connectTimeoutSec: number = EXEC_CONNECT_TIMEOUT_SEC,
+): string[] {
+  const args = [
+    '-o',
+    'BatchMode=yes',
+    '-o',
+    `ConnectTimeout=${connectTimeoutSec}`,
+    '-T',
+    '-o',
+    `StrictHostKeyChecking=${ssh.strictHostKeys ?? 'accept-new'}`,
+  ];
+  if (ssh.knownHostsFile) args.push('-o', `UserKnownHostsFile=${ssh.knownHostsFile}`);
+  if (ssh.port !== undefined) args.push('-p', String(ssh.port));
+  if (ssh.identityFile) args.push('-i', ssh.identityFile);
+  args.push('--', sshDestination(ssh), ...remoteWords);
+  return args;
+}
+
+/**
+ * The remote words for `cmd` (plan §5, D8).
+ *
+ * ssh joins its remote words with spaces and hands the result to the remote
+ * LOGIN shell, which parses it — so the script is quoted once here and arrives
+ * as a single `sh -c` argument.
+ *
+ * cwd policy (D8): the host's `ctx.workingDir` is never sent anywhere near this
+ * function. The remote cwd is `opts.cwd` when the tool call supplied one (used
+ * verbatim as a REMOTE path), else `ssh.remoteWorkdir`, else nothing — in which
+ * case the remote login directory stands.
+ *
+ * `shell: false` means ONE thing here: do not put a QUOTING layer around `cmd`.
+ * The caller composed `cmd` as a ready remote command line for a stdin-driven
+ * runner (`python3 -`, `node --input-type=module`, `bash -s`), so it is
+ * interpolated raw and parsed by exactly one shell — the same single parse the
+ * unwrapped form gets from the remote login shell.
+ *
+ * It does NOT mean "no remote cwd", which is what it used to mean by accident.
+ * `sh -c` does not consume its child's stdin — the runner inherits the
+ * descriptor and still reads the program from it — so the cwd can and must be
+ * applied to `run_code` too, which otherwise ran in the remote LOGIN directory
+ * while `config.yaml`, the character sheet and the injected prompt all said
+ * `remoteWorkdir`. Verified: `printf 'import os; print(os.getcwd())' | sh -c
+ * "cd '/tmp/x' && exec python3 -"` prints `/tmp/x`, and the same shape carries
+ * stdin to `node --input-type=module` and `bash -s`.
+ *
+ * `exec` is why the wrap is free: the runner REPLACES the wrapping shell, so
+ * its pid, its signal disposition and its exit status are the remote command's
+ * own (`sh -c "cd /tmp/x && exec python3 -"` on a script calling `sys.exit(7)`
+ * exits 7). With no workdir to apply there is nothing to wrap and `cmd` is sent
+ * as-is.
+ */
+export function buildRemoteWords(ssh: SshTarget, cmd: string, opts: ExecOpts): string[] {
+  const workdir = opts.cwd ?? ssh.remoteWorkdir;
+  if (opts.shell === false) {
+    if (!workdir) return [cmd];
+    return ['sh', '-c', shellQuote(`cd ${shellQuote(workdir)} && exec ${cmd}`)];
+  }
+  const script = workdir ? `cd ${shellQuote(workdir)} && ${cmd}` : cmd;
+  return ['sh', '-c', shellQuote(script)];
+}
+
+/**
  * Queue-backed async generator that streams interleaved stdout/stderr chunks
- * from a spawned child process. Self-contained per backend (duplicated, not
+ * from a spawned ssh client. Self-contained per backend (duplicated, not
  * shared) so each execution package has zero cross-package coupling.
+ *
+ * Timeout (plan D6): the timer kills the LOCAL ssh client only. There is no
+ * remote `timeout(1)` wrapper — it is GNU coreutils, not POSIX, and this
+ * backend targets POSIX remotes. Killing the client drops the connection and
+ * sshd normally hangs up the remote session, but a remote process that ignores
+ * SIGHUP, or has detached from it, MAY SURVIVE the timeout. Same for abort.
  */
 async function* streamChild(child: ChildProcess, opts: ExecOpts): AsyncIterable<ExecChunk> {
   const chunks: ExecChunk[] = [];
@@ -47,18 +447,32 @@ async function* streamChild(child: ChildProcess, opts: ExecOpts): AsyncIterable<
   let error: Error | null = null;
   let resolveNext: (() => void) | null = null;
   let exitCode: number | null = null;
+  const stderrHead = createDiagnosticBuffer();
 
   child.stdout?.on('data', (c: Buffer) => {
     chunks.push({ stream: 'stdout', data: c.toString('utf-8') });
     resolveNext?.();
   });
   child.stderr?.on('data', (c: Buffer) => {
+    stderrHead.push(c);
     chunks.push({ stream: 'stderr', data: c.toString('utf-8') });
     resolveNext?.();
   });
-  // ssh propagates the remote command's exit status as its own exit code.
+  // ssh propagates the remote command's exit status as its own exit code, and
+  // uses 255 for its OWN failures. Exit 255 with an `ssh:`-prefixed diagnostic
+  // on stderr is ssh failing; exit 255 without one is the remote command
+  // genuinely exiting 255, which is passed through as an ordinary exit chunk.
   child.on('close', (code) => {
     exitCode = code ?? null;
+    if (code === 255) {
+      const diagnostic = stderrHead
+        .text()
+        .split('\n')
+        .filter((line) => line.startsWith('ssh:'))
+        .join('; ')
+        .trim();
+      if (diagnostic) error = new SshTransportError(diagnostic);
+    }
     done = true;
     resolveNext?.();
   });
@@ -123,6 +537,40 @@ async function* streamChild(child: ChildProcess, opts: ExecOpts): AsyncIterable<
 }
 
 /**
+ * Byte-ceiling wrapper. Counts bytes yielded by `inner`; once the running total
+ * exceeds `maxBytes` it kills the ssh client, emits a final stderr truncation
+ * marker, and stops. The cap is enforced HERE — inside the exec stream — so
+ * host memory stays bounded regardless of downstream result trimming.
+ *
+ * Copied — not imported — from `extensions/execution-docker/src/index.ts:465`,
+ * per the repo's cross-package rule. The only difference is what `onCeiling`
+ * kills: docker kills the container, this kills the local client (the remote
+ * process may survive, exactly as for a timeout — see {@link streamChild}).
+ */
+export async function* withByteCeiling(
+  inner: AsyncIterable<ExecChunk>,
+  maxBytes: number,
+  onCeiling: () => void,
+): AsyncIterable<ExecChunk> {
+  let total = 0;
+  for await (const chunk of inner) {
+    // The terminal exit chunk carries no payload — pass it through untouched so
+    // the exit code survives truncation, and don't count it toward the ceiling.
+    if (chunk.stream === 'exit') {
+      yield chunk;
+      continue;
+    }
+    total += Buffer.byteLength(chunk.data, 'utf-8');
+    if (total > maxBytes) {
+      onCeiling();
+      yield { stream: 'stderr', data: `\n[output truncated at ${maxBytes} bytes]\n` };
+      return;
+    }
+    yield chunk;
+  }
+}
+
+/**
  * SSH execution backend.
  *
  * NOTE: the ssh backend provides remote-host trust ONLY; it does NOT enforce
@@ -133,41 +581,122 @@ async function* streamChild(child: ChildProcess, opts: ExecOpts): AsyncIterable<
 export class SshExecutionBackend implements ExecutionBackend {
   readonly name = 'ssh';
   private readonly config: ExecutionBackendConfig;
+  private readonly logger: Logger;
+  /**
+   * Retained for a later passphrase-less `${secrets:}` key feature (plan D3).
+   * v1 authenticates with a key PATH or a running ssh-agent and never reads
+   * this — no vault materialisation, no temp files, no cleanup lifecycle.
+   */
+  readonly secrets: SecretsResolver;
+  /** Epoch ms until which a successful probe is trusted. Failures never set it. */
+  private availableUntil = 0;
+  /**
+   * stderr from the most recent FAILED probe, so a caller that got `false` from
+   * {@link isAvailable} can say why without opening a second connection.
+   */
+  lastProbeError: string | undefined;
+  /**
+   * The ssh target this instance was CONSTRUCTED with — a frozen copy taken in
+   * the constructor, never re-read.
+   *
+   * The registry MEMOISES: once `resolve('ssh', ctx)` has built one of these,
+   * every later caller gets this same object, whatever config they passed. So
+   * after an operator edits `execution.ssh.*` the running backend — the one the
+   * tools actually execute on — still points at the OLD machine until the
+   * process restarts. A surface that pairs freshly-read config with this
+   * instance would name one host and contact another; comparing against this
+   * field is how it can tell instead. Frozen, and a copy, because the identity
+   * has to be the thing this backend will really dial for the rest of its life.
+   */
+  readonly configuredTarget: Readonly<SshTarget> | undefined;
 
   constructor(ctx: { config: ExecutionBackendConfig; secrets: SecretsResolver; logger: Logger }) {
     this.config = ctx.config;
+    this.secrets = ctx.secrets;
+    this.logger = ctx.logger;
+    this.configuredTarget = ctx.config.ssh ? Object.freeze({ ...ctx.config.ssh }) : undefined;
   }
 
-  private sshArgs(cmd: string): string[] {
+  private target(): SshTarget {
     const ssh = this.config.ssh;
     if (!ssh?.host) throw new SshHostMissingError();
-    const target = ssh.user ? `${ssh.user}@${ssh.host}` : ssh.host;
-    const args: string[] = [];
-    if (ssh.port !== undefined) args.push('-p', String(ssh.port));
-    if (ssh.identityFile) args.push('-i', ssh.identityFile);
-    args.push(target, '--', cmd);
-    return args;
+    const invalid = sshDestinationError(ssh);
+    if (invalid) throw new SshDestinationInvalidError(invalid);
+    const knownHosts = sshKnownHostsError(ssh);
+    if (knownHosts) throw new SshKnownHostsInvalidError(knownHosts);
+    return ssh;
   }
 
-  isAvailable(): Promise<boolean> {
-    if (!this.config.ssh?.host) return Promise.resolve(false);
-    return new Promise<boolean>((resolve) => {
-      try {
-        const child = spawn('ssh', ['-V'], { stdio: 'ignore' });
-        child.on('close', (exitCode) => resolve(exitCode === 0));
-        child.on('error', () => resolve(false));
-      } catch {
-        resolve(false);
-      }
+  /**
+   * One uncached reachability check: `ssh -o BatchMode=yes -o ConnectTimeout=5
+   * <target> true`. Returns the failure's stderr verbatim — `Permission denied
+   * (publickey)` and `Connection timed out` need different fixes and only the
+   * real line says which.
+   */
+  probe(): Promise<{ ok: boolean; error?: string }> {
+    const ssh = this.config.ssh;
+    if (!ssh?.host) {
+      return Promise.resolve({ ok: false, error: new SshHostMissingError().message });
+    }
+    // Mirrors the missing-host guard rather than throwing: `isAvailable` must
+    // still answer false (uncached) for an unusable target, not reject.
+    const invalid = sshDestinationError(ssh) ?? sshKnownHostsError(ssh);
+    if (invalid) return Promise.resolve({ ok: false, error: invalid });
+    const args = buildSshArgs(ssh, ['true'], PROBE_CONNECT_TIMEOUT_SEC);
+    return new Promise((resolve) => {
+      const child = spawn('ssh', args, { stdio: ['ignore', 'ignore', 'pipe'] });
+      const stderr = createDiagnosticBuffer();
+      child.stderr?.on('data', (c: Buffer) => {
+        stderr.push(c);
+      });
+      child.on('close', (code) => {
+        if (code === 0) resolve({ ok: true });
+        else
+          resolve({ ok: false, error: stderr.text().trim() || `ssh exited with status ${code}` });
+      });
+      child.on('error', (err: Error) => resolve({ ok: false, error: err.message }));
     });
   }
 
-  async *exec(cmd: string, opts: ExecOpts): AsyncIterable<ExecChunk> {
-    const args = this.sshArgs(cmd);
-    const child = spawn('ssh', args, { stdio: ['pipe', 'pipe', 'pipe'] });
-    yield* streamChild(child, opts);
+  /**
+   * Reachability of the configured target — NOT whether an ssh binary exists
+   * locally. A success is trusted for 60 s; a FAILURE is never cached, so a
+   * transient network blip does not pin the backend to `not_available` for a
+   * minute. The failing stderr is kept in {@link lastProbeError}.
+   */
+  async isAvailable(): Promise<boolean> {
+    if (Date.now() < this.availableUntil) return true;
+    const result = await this.probe();
+    if (result.ok) {
+      this.availableUntil = Date.now() + AVAILABILITY_TTL_MS;
+      this.lastProbeError = undefined;
+      return true;
+    }
+    this.lastProbeError = result.error;
+    this.logger.debug(`ssh backend unavailable: ${result.error}`);
+    return false;
   }
 
+  async *exec(cmd: string, opts: ExecOpts): AsyncIterable<ExecChunk> {
+    const ssh = this.target();
+    const envKeys = Object.keys(opts.env ?? {});
+    if (envKeys.length > 0) throw new SshEnvUnsupportedError(envKeys);
+    const args = buildSshArgs(ssh, buildRemoteWords(ssh, cmd, opts));
+    const child = spawn('ssh', args, { stdio: ['pipe', 'pipe', 'pipe'] });
+    yield* withByteCeiling(streamChild(child, opts), MAX_EXEC_OUTPUT_BYTES, () => {
+      child.kill();
+    });
+  }
+
+  /**
+   * Thin session — the same shape `execution-local` uses, and the one
+   * `ExecSession.stop?` in `@ethosagent/types` names explicitly ("local/ssh
+   * thin sessions"). Each `exec` opens its OWN ssh connection, so nothing
+   * persists across calls: no shared shell, no surviving cwd or exported
+   * variables, and no in-session pid to signal (hence no `stop`). A persistent
+   * remote shell would need ControlMaster, which is out of scope; nothing wraps
+   * this backend in `SessionManager` (plan D5).
+   */
   spawnSession(personalityId: string): ExecSession {
     return {
       personalityId,

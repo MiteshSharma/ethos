@@ -567,6 +567,29 @@ export interface PersonalityConfig {
    * leaf type — same precedent as `fs_reach`).
    */
   display?: { avatar_url?: string };
+  /**
+   * Execution POSTURE — where this personality's execution tools run:
+   * `local` (the host), `docker` (a sandbox), `ssh` (a remote target), or
+   * `none` (execution refused). Identity, not setting: an agent whose hands
+   * only ever reach a remote build box is a different agent from one holding
+   * a shell on the host, and the posture decides what every execution tool
+   * it owns can touch.
+   *
+   * This is NOT the ssh HOST. The target — host, user, port, identity file,
+   * known-hosts, remote workdir — is operator config (`execution.ssh.*` in
+   * `~/.ethos/config.yaml`), one target per deployment. Two deployments of
+   * the same personality agree on the posture and disagree about the
+   * machine. Never put a hostname, user, or key path here.
+   *
+   * Absent = the resolver decides from environment, config, and constitution
+   * (`resolveExecutionPosture`); a declared posture is honoured for the
+   * personality a loop was composed with. A posture the deployment cannot
+   * satisfy (e.g. `ssh` with no configured target, or any un-sandboxed
+   * posture under a `requireSandbox` constitution) is refused, not silently
+   * downgraded.
+   * Counts as ONE field for the schema-freeze gate.
+   */
+  execution?: 'local' | 'docker' | 'ssh' | 'none';
 }
 
 /**

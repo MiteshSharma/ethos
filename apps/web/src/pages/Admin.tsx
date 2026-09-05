@@ -37,6 +37,32 @@ type McpServer = {
   toolCount?: number;
 };
 
+/** `admin.getStatus().executionBackend` — null when no remote target is
+ *  configured, which is what a fresh install looks like. */
+type ExecutionBackendStatus = { name: string; resolved: boolean; error: string | null } | null;
+
+/**
+ * Boot failure for the remote execution backend
+ * (plan/phases/remote-execution-routing.md §6). A row, not a Tag in a table:
+ * this is not one of many peers, it is a single fact about whether the backend
+ * the posture NAMES exists at all.
+ *
+ * Renders NOTHING when there is no remote target (`null`) or when the backend
+ * resolves — a panel that announced "execution ok" on every install would be
+ * noise, and this row exists to be seen when it appears. Glyph and word carry
+ * the state; the outline colour is the third signal.
+ */
+export function AdminExecutionRow({ backend }: { backend: ExecutionBackendStatus }) {
+  if (!backend || backend.resolved) return null;
+  return (
+    <div className="admin-execution-row admin-execution-row--error">
+      <span aria-hidden="true">✗</span>
+      <span>failed</span>
+      <span>Execution backend {backend.name} failed to resolve — see logs</span>
+    </div>
+  );
+}
+
 export function Admin() {
   const { notification } = AntApp.useApp();
   const qc = useQueryClient();
@@ -323,6 +349,7 @@ export function Admin() {
         <h1 className="page-h1">Admin</h1>
         <span className="page-subtitle">Channels, keys, and MCP servers</span>
       </header>
+      <AdminExecutionRow backend={status?.executionBackend ?? null} />
       <Tabs items={tabItems} />
 
       <Modal

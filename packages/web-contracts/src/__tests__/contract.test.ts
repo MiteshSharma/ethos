@@ -294,6 +294,7 @@ describe('contract router', () => {
       'documents',
       'eval',
       'evolver',
+      'execution',
       'files',
       'goals',
       'kanban',

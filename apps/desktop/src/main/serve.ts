@@ -204,6 +204,7 @@ export async function startServer(port: number): Promise<number> {
     voiceStack,
     refreshPersonalities,
     skillsInjector,
+    executionBackends,
     onMemoryCaptured,
     runCallCapture,
   } = await createAgentLoop(wiringConfig, {
@@ -279,6 +280,11 @@ export async function startServer(port: number): Promise<number> {
     // Renderer-capability seam for `personalities.renderers` (the loop's own
     // injector — one scanner, one mtime cache for the process).
     skillsInjector,
+    // Settings › Execution — the probe reaches the loop's own backend instance
+    // through this registry (`resolve()` memoises), so `Test connection` tests
+    // the object remote commands run on. Same seam `ethos serve`/`ethos boot`
+    // pass; the desktop is the third in-process web-API host.
+    executionBackends,
     chatDefaults: { model, provider },
     // Threaded with the turn's personality (learned from the loop's
     // `session_start`) so `denyRules` and `approvalMode` are enforced, plus a

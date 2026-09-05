@@ -1258,15 +1258,76 @@ export interface EthosConfig {
    */
   memoryCharLimits?: { memory?: number; user?: number };
   /**
-   * Execution-backend resource caps, forwarded to `ExecutionBackendConfig`.
-   * `cpu` is the docker `--cpus` quota (default 2); `diskMb` is a best-effort
-   * `--storage-opt size=<N>m` quota honoured only where the daemon's storage
-   * driver and backing filesystem can enforce it (the backend warns and skips
-   * otherwise). Flat keys:
+   * Execution-backend configuration, forwarded to `ExecutionBackendConfig`.
+   *
+   * `docker` — resource caps. `cpu` is the docker `--cpus` quota (default 2);
+   * `diskMb` is a best-effort `--storage-opt size=<N>m` quota honoured only
+   * where the daemon's storage driver and backing filesystem can enforce it
+   * (the backend warns and skips otherwise). Flat keys:
    *   execution.docker.cpu: 4
    *   execution.docker.diskMb: 20480
+   *
+   * `ssh` — the ONE remote target this deployment executes on. There is no
+   * roster and no per-personality target: a personality declares the posture,
+   * the operator declares the machine. Presence of `host` is the switch (the
+   * same posture as `background.pi.image`): without it there is nothing to
+   * connect to, so the block is absent and a personality asking for ssh falls
+   * back honestly. Flat keys:
+   *   execution.ssh.host: build-01.internal
+   *   execution.ssh.user: deploy
+   *   execution.ssh.port: 2222
+   *   execution.ssh.identityFile: ~/.ssh/id_ed25519
+   *   execution.ssh.knownHostsFile: ~/.ssh/known_hosts_ethos
+   *   execution.ssh.strictHostKeys: accept-new
+   *   execution.ssh.remoteWorkdir: /srv/work
    */
-  execution?: { docker?: { cpu?: number; diskMb?: number } };
+  execution?: {
+    docker?: { cpu?: number; diskMb?: number };
+    ssh?: {
+      /** Hostname or IP of the remote target. Non-empty; its presence is the switch. */
+      host: string;
+      /**
+       * Remote login user. Absent means ssh's own resolution — the local
+       * username, or whatever `~/.ssh/config` matches for this host.
+       */
+      user?: string;
+      /** Remote sshd port, 1-65535. Absent means ssh's default of 22. */
+      port?: number;
+      /**
+       * Private key path passed as `ssh -i`. A PATH, never key material: absent
+       * means ssh-agent or ssh's own default key search.
+       */
+      identityFile?: string;
+      /**
+       * Passed as `-o UserKnownHostsFile=`. Absent means ssh's own
+       * `~/.ssh/known_hosts`. A destination that cannot PERSIST a learned key
+       * (`none`, a null device) is rejected: it would switch off the pinning
+       * `strictHostKeys` exists to enforce. See {@link sshKnownHostsError}.
+       */
+      knownHostsFile?: string;
+      /**
+       * Passed VERBATIM as ssh's `-o StrictHostKeyChecking=<value>`, so the
+       * consumer has nothing to map. Only the two safe values are accepted:
+       * `'accept-new'` (trust on first connection, then pin) and `'yes'` (the
+       * host key must already be in the known-hosts file). `'no'` is
+       * deliberately not accepted — it disables host-key verification
+       * altogether, and this surface will not spell that. A literal string
+       * rather than a boolean because `false` would have to mean one of
+       * `'accept-new'` or `'no'`, and those two differ by exactly the
+       * man-in-the-middle guarantee.
+       */
+      strictHostKeys?: 'accept-new' | 'yes';
+      /**
+       * The working directory ON THE REMOTE HOST. The host's own working
+       * directory is never sent to the remote.
+       *
+       * ABSENT MEANS THE REMOTE LOGIN DIRECTORY — the backend does not `cd` at
+       * all. It is not the local cwd, and it is not `/`. Set this only when
+       * commands must run somewhere other than where the ssh login lands.
+       */
+      remoteWorkdir?: string;
+    };
+  };
   baseUrl?: string;
   /** Azure-only: REST API version (e.g. `2024-10-21`). Required when
    *  `provider === 'azure'`; ignored otherwise. */
@@ -2687,6 +2748,16 @@ export async function writeConfig(
       lines.push(`execution.docker.diskMb: ${config.execution.docker.diskMb}`);
     }
   }
+  if (config.execution?.ssh) {
+    const ssh = config.execution.ssh;
+    lines.push(`execution.ssh.host: ${ssh.host}`);
+    if (ssh.user) lines.push(`execution.ssh.user: ${ssh.user}`);
+    if (ssh.port !== undefined) lines.push(`execution.ssh.port: ${ssh.port}`);
+    if (ssh.identityFile) lines.push(`execution.ssh.identityFile: ${ssh.identityFile}`);
+    if (ssh.knownHostsFile) lines.push(`execution.ssh.knownHostsFile: ${ssh.knownHostsFile}`);
+    if (ssh.strictHostKeys) lines.push(`execution.ssh.strictHostKeys: ${ssh.strictHostKeys}`);
+    if (ssh.remoteWorkdir) lines.push(`execution.ssh.remoteWorkdir: ${ssh.remoteWorkdir}`);
+  }
   if (config.baseUrl) lines.push(`baseUrl: ${config.baseUrl}`);
   if (config.apiVersion) lines.push(`apiVersion: ${config.apiVersion}`);
   if (config.region) lines.push(`region: ${config.region}`);
@@ -3645,6 +3716,8 @@ function parseConfigYaml(src: string): EthosConfig {
   const memoryCharLimitsKv: Record<string, string> = {};
   // execution.docker.<cpu|diskMb>: <value> — container resource caps.
   const executionDockerKv: Record<string, string> = {};
+  // execution.ssh.<field>: <value> — the deployment's single remote target.
+  const executionSshKv: Record<string, string> = {};
   // kanban.<maxInProgress|maxInProgressPerProfile>: <n> — board WIP caps.
   const kanbanKv: Record<string, string> = {};
   // grounding.<field>: <value> — ground-truth verification policy. The nested
@@ -4392,6 +4465,17 @@ function parseConfigYaml(src: string): EthosConfig {
       executionDockerKv[exd[1]] = exd[2].trim().replace(/^["']|["']$/g, '');
       continue;
     }
+    // execution.ssh.<field>: <value>  (the single remote execution target).
+    // The field list is an alternation, so an unrecognised `execution.ssh.*`
+    // key falls through to the generic `key: value` catch-all below and is
+    // then never read — dropped, not rejected, like every other stray key.
+    const exs = line.match(
+      /^execution\.ssh\.(host|user|port|identityFile|knownHostsFile|strictHostKeys|remoteWorkdir):\s*(.+)$/,
+    );
+    if (exs) {
+      executionSshKv[exs[1]] = exs[2].trim().replace(/^["']|["']$/g, '');
+      continue;
+    }
     // browser.<navigationTimeoutMs|commandTimeoutMs>: <ms>  (Playwright budgets).
     const brw = line.match(/^browser\.(navigationTimeoutMs|commandTimeoutMs):\s*(.+)$/);
     if (brw) {
@@ -4570,7 +4654,8 @@ function parseConfigYaml(src: string): EthosConfig {
   const models = buildModelProfiles(modelsKv);
   const compaction = buildCompaction(compactionKv);
   const memoryCharLimits = buildMemoryCharLimits(memoryCharLimitsKv);
-  const execution = buildExecutionConfig(executionDockerKv);
+  const executionResult = buildExecutionConfig(executionDockerKv, executionSshKv);
+  const execution = executionResult.execution;
   const restartLoopGuard = buildRestartLoopGuard(restartLoopGuardKv);
   const discordBackfill = buildDiscordBackfill(discordBackfillKv);
   const discordModeResult = buildDiscordDefaultMode(discordKv);
@@ -4782,6 +4867,7 @@ function parseConfigYaml(src: string): EthosConfig {
     ...voiceBargeInResult.errors,
     ...webhooksResult.errors,
     ...discordModeResult.errors,
+    ...executionResult.errors,
   ];
 
   const pluginsAutoInstall: boolean | undefined =
@@ -5563,20 +5649,203 @@ function buildMemoryCharLimits(
   return Object.keys(result).length > 0 ? result : undefined;
 }
 
+/** The two `StrictHostKeyChecking` values `execution.ssh.strictHostKeys` accepts. */
+const SSH_STRICT_HOST_KEYS = ['accept-new', 'yes'] as const;
+
 /**
- * Item 9 — docker execution-backend resource caps. `cpu` is a positive
- * (possibly fractional) core count, `diskMb` a positive integer; out-of-range
- * values are dropped so the backend keeps its `--cpus 2` / no-quota defaults.
+ * Hostnames, IPv4, IPv6 literals (`[::1]`, `fe80::1%eth0`) and `~/.ssh/config`
+ * aliases. Excludes whitespace, control characters, `@`, `/`, and every shell
+ * metacharacter — a destination is an argv word, not a command.
  */
-function buildExecutionConfig(kv: Record<string, string>): EthosConfig['execution'] | undefined {
+const SSH_HOST_GRAMMAR = /^[A-Za-z0-9._:%[\]-]+$/;
+
+/** POSIX-shaped login names. Same exclusions as the host grammar. */
+const SSH_USER_GRAMMAR = /^[A-Za-z0-9._-]+$/;
+
+/**
+ * Why `execution.ssh.user`/`.host` cannot be spelled into an ssh destination,
+ * or `null` when they can.
+ *
+ * The destination is appended to ssh's OWN argv, and ssh parses any argument
+ * beginning with `-` as another LOCAL option — a host of `-oProxyCommand=<cmd>`
+ * runs `<cmd>` on the Ethos host, not the remote one. Verified against OpenSSH
+ * 9.6p1: `ssh -G -oProxyCommand=touch /tmp/x realhost true` resolves
+ * `proxycommand touch /tmp/x`.
+ *
+ * This is the boot-time layer. `extensions/execution-ssh` carries the other
+ * two: the same grammar re-checked before spawn, and a `--` terminator ahead of
+ * the destination in the argv. Duplicated — not imported — because `config` is
+ * a lower layer than `extensions` and cannot import from one (ARCHITECTURE.md
+ * §II); `sshDestinationError` there is the other copy and the two MUST change
+ * together.
+ */
+/**
+ * `UserKnownHostsFile` values that keep nothing: `none` is an OpenSSH literal,
+ * not a path; the rest are null devices — `/dev/null` on POSIX, `nul` on
+ * Windows. Compared lower-cased (see {@link sshKnownHostsError}).
+ */
+const SSH_NON_PERSISTENT_KNOWN_HOSTS = new Set(['none', '/dev/null', 'nul']);
+
+/**
+ * Why `execution.ssh.knownHostsFile` cannot hold a pinned host key, or `null`
+ * when it can.
+ *
+ * `strictHostKeys` is an `'accept-new' | 'yes'` literal union precisely so
+ * `no` cannot be written down: this surface will not spell host-key
+ * verification off. `knownHostsFile` spells it by another route. The default
+ * `accept-new` promises "learn the key on first sight, refuse it if it ever
+ * changes", and the second half is bought entirely by PERSISTENCE — point
+ * `UserKnownHostsFile` at `none` or at a null device and nothing is written
+ * back, so every connection is a first connection and accepts whatever key is
+ * offered. Silent MITM exposure, with no diagnostic anywhere.
+ *
+ * Rejected outright rather than downgraded to "then you must also set
+ * `strictHostKeys: yes`": against a destination that keeps nothing, `yes`
+ * matches NOTHING, so every connection fails. Safe and useless, and it surfaces
+ * at the first tool call as an ssh error instead of here, at boot, as this one.
+ *
+ * `UserKnownHostsFile` takes a whitespace-separated LIST, so every token is
+ * checked — a list is only as trustworthy as what ssh actually consults. A path
+ * that does not exist YET is fine and must stay fine: `accept-new` creates it
+ * on the first connection, which is how an operator adopts a dedicated file.
+ *
+ * KNOWN LIMIT: lexical. It refuses the spellings an operator would write, not
+ * every path that resolves to a null device (`/dev/./null`, a symlink to it).
+ *
+ * This is the boot-time layer. `extensions/execution-ssh` carries the other, a
+ * pre-spawn re-check. Duplicated — not imported — because `config` is a lower
+ * layer than `extensions` and cannot import from one (ARCHITECTURE.md §II);
+ * `sshKnownHostsError` there is the other copy and the two MUST change
+ * together.
+ */
+function sshKnownHostsError(raw: string): string | null {
+  const paths = raw.split(/\s+/).filter((p) => p.length > 0);
+  if (paths.length === 0) {
+    return `execution.ssh.knownHostsFile: must not be blank; omit the key to use ssh's own known_hosts.`;
+  }
+  for (const path of paths) {
+    if (SSH_NON_PERSISTENT_KNOWN_HOSTS.has(path.toLowerCase())) {
+      return (
+        `execution.ssh.knownHostsFile: '${path}' cannot persist a learned host key, ` +
+        'so every connection would be a first connection and accept any key offered. ' +
+        "Point it at a writable file path, or omit the key to use ssh's own known_hosts."
+      );
+    }
+  }
+  return null;
+}
+
+function sshDestinationError(host: string, user: string | undefined): string | null {
+  if (host.startsWith('-')) {
+    return `execution.ssh.host: must not begin with '-' (got '${host}'); ssh would parse it as a local option.`;
+  }
+  if (!SSH_HOST_GRAMMAR.test(host)) {
+    return `execution.ssh.host: contains characters that are not valid in a hostname (got '${host}').`;
+  }
+  if (user !== undefined) {
+    if (user.startsWith('-')) {
+      return `execution.ssh.user: must not begin with '-' (got '${user}'); ssh would parse it as a local option.`;
+    }
+    if (!SSH_USER_GRAMMAR.test(user)) {
+      return `execution.ssh.user: contains characters that are not valid in a login name (got '${user}').`;
+    }
+  }
+  return null;
+}
+
+/**
+ * Item 9 — the `execution:` block.
+ *
+ * `docker` is resource caps: `cpu` is a positive (possibly fractional) core
+ * count, `diskMb` a positive integer; out-of-range values are dropped so the
+ * backend keeps its `--cpus 2` / no-quota defaults.
+ *
+ * `ssh` is the deployment's single remote target, and `host` is its switch —
+ * no `host`, no block, and every other `execution.ssh.*` key is inert (the same
+ * posture `background.pi.image` has for the Pi runner). Once a `host` IS
+ * present a malformed value is a parse ERROR rather than a silent drop: a
+ * dropped port or host-key policy means commands quietly run on the wrong
+ * machine, or with a weaker guarantee than the operator wrote down. Each
+ * message names the flat key exactly as it appears in `config.yaml`.
+ *
+ * A `host`/`user` that fails {@link sshDestinationError} drops the whole block
+ * on top of erroring, the same as an empty `host`: those two values become
+ * ssh's own argv, so a value that could begin a local option must never reach a
+ * backend even if a caller ignores the errors.
+ */
+function buildExecutionConfig(
+  dockerKv: Record<string, string>,
+  sshKv: Record<string, string>,
+): { execution: EthosConfig['execution'] | undefined; errors: string[] } {
   const docker: NonNullable<NonNullable<EthosConfig['execution']>['docker']> = {};
-  const cpu = Number(kv.cpu);
-  if (kv.cpu !== undefined && Number.isFinite(cpu) && cpu > 0) docker.cpu = cpu;
-  const diskMb = Number(kv.diskMb);
-  if (kv.diskMb !== undefined && Number.isFinite(diskMb) && diskMb > 0) {
+  const cpu = Number(dockerKv.cpu);
+  if (dockerKv.cpu !== undefined && Number.isFinite(cpu) && cpu > 0) docker.cpu = cpu;
+  const diskMb = Number(dockerKv.diskMb);
+  if (dockerKv.diskMb !== undefined && Number.isFinite(diskMb) && diskMb > 0) {
     docker.diskMb = Math.floor(diskMb);
   }
-  return Object.keys(docker).length > 0 ? { docker } : undefined;
+
+  const errors: string[] = [];
+  let ssh: NonNullable<NonNullable<EthosConfig['execution']>['ssh']> | undefined;
+  const rawHost = sshKv.host;
+  if (rawHost !== undefined) {
+    const host = rawHost.trim();
+    const user = sshKv.user;
+    const destinationError = host ? sshDestinationError(host, user) : null;
+    if (!host) {
+      errors.push('execution.ssh.host: must not be empty.');
+    } else if (destinationError) {
+      errors.push(destinationError);
+    } else {
+      let port: number | undefined;
+      const rawPort = sshKv.port;
+      if (rawPort !== undefined) {
+        port = parseBoundedInt(rawPort, 1, 65535);
+        if (port === undefined) {
+          errors.push(
+            `execution.ssh.port: must be an integer between 1 and 65535 (got '${rawPort}').`,
+          );
+        }
+      }
+      // Same shape as `strictHostKeys` below: the bad value is an ERROR and the
+      // field is dropped, so a caller that ignores the errors falls back to
+      // ssh's own `~/.ssh/known_hosts` — which persists, and therefore still
+      // pins. Dropping the whole block (what a bad destination does) is not
+      // needed here: the safe fallback is the default.
+      let knownHostsFile: string | undefined;
+      const rawKnownHosts = sshKv.knownHostsFile;
+      if (rawKnownHosts !== undefined) {
+        const knownHostsError = sshKnownHostsError(rawKnownHosts);
+        if (knownHostsError) errors.push(knownHostsError);
+        else knownHostsFile = rawKnownHosts;
+      }
+      let strictHostKeys: (typeof SSH_STRICT_HOST_KEYS)[number] | undefined;
+      const rawStrict = sshKv.strictHostKeys;
+      if (rawStrict !== undefined) {
+        if (isOneOf(SSH_STRICT_HOST_KEYS, rawStrict)) {
+          strictHostKeys = rawStrict;
+        } else {
+          errors.push(
+            `execution.ssh.strictHostKeys: invalid value '${rawStrict}' (expected ${quotedList(SSH_STRICT_HOST_KEYS)}).`,
+          );
+        }
+      }
+      ssh = {
+        host,
+        ...(user ? { user } : {}),
+        ...(port !== undefined ? { port } : {}),
+        ...(sshKv.identityFile ? { identityFile: sshKv.identityFile } : {}),
+        ...(knownHostsFile ? { knownHostsFile } : {}),
+        ...(strictHostKeys ? { strictHostKeys } : {}),
+        ...(sshKv.remoteWorkdir ? { remoteWorkdir: sshKv.remoteWorkdir } : {}),
+      };
+    }
+  }
+
+  const execution: NonNullable<EthosConfig['execution']> = {};
+  if (Object.keys(docker).length > 0) execution.docker = docker;
+  if (ssh) execution.ssh = ssh;
+  return { execution: Object.keys(execution).length > 0 ? execution : undefined, errors };
 }
 
 /**

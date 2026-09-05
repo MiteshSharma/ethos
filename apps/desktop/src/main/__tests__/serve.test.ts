@@ -1,3 +1,4 @@
+import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { ethosDir } from '@ethosagent/config';
 import { InMemorySecretsResolver, InMemoryStorage } from '@ethosagent/storage-fs';
@@ -118,5 +119,30 @@ describe('readSharedVoiceAndCallCaptureConfig', () => {
     const result = await readSharedVoiceAndCallCaptureConfig(storage, secrets);
 
     expect(result).toEqual({});
+  });
+});
+
+// Settings › Execution probe — the desktop's half of the registry thread
+// (plan `remote-execution-routing.md`, T7 follow-up). The desktop is the third
+// in-process web-API host alongside `ethos serve` and `ethos boot`; without
+// this the probe answers `backend_unresolved` in the desktop app only.
+//
+// The property is INSTANCE IDENTITY: `DefaultExecutionBackendRegistry.resolve()`
+// memoises, so the loop's registry holds the SAME backend the tools execute on.
+// A probe against a second registry built here would report on an object
+// nothing runs commands through — worse than no probe, because it reads as
+// reassurance. Asserted against source (`startServer` cannot be called without
+// a live Electron main process), the same way apps/ethos's
+// execution-probe-thread.test.ts covers `serve.ts`/`boot.ts`.
+describe('the desktop backend threads the loop execution-backend registry', () => {
+  it('takes the registry off the createAgentLoop result and forwards it', async () => {
+    const src = await readFile(join(import.meta.dirname, '..', 'serve.ts'), 'utf8');
+    // Destructured from the loop result — not constructed here.
+    expect(src).toContain('executionBackends,');
+    expect(src).not.toContain('new DefaultExecutionBackendRegistry');
+    // One binding, used twice: once out of `createAgentLoop`, once into
+    // `createWebApi`. Two occurrences is the thread; one would mean a dangling
+    // destructure or an invented object.
+    expect(src.match(/^\s*executionBackends,$/gm)).toHaveLength(2);
   });
 });

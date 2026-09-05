@@ -73,9 +73,12 @@ import { createVoiceTools } from '@ethosagent/tools-voice';
 import { compose as composeWatchers } from '@ethosagent/tools-watchers/compose';
 import { createXSearchTool } from '@ethosagent/tools-x-search';
 import type {
+  Constitution,
   ContextInjector,
   ExecutionBackend,
   ExecutionBackendConfig,
+  ExecutionBackendRegistry,
+  ExecutionPosture,
   InjectionResult,
   LLMProvider,
   LLMProviderRegistry,
@@ -103,7 +106,11 @@ import type { CreateAgentLoopOptions, WiringConfig, WiringProfile } from './inde
 import { resolveKanbanDbPath } from './kanban-path';
 import { MODEL_CATALOG } from './model-catalog';
 import { fetchManifest, loadModelCatalog, manifestToEntries } from './model-catalog-loader';
-import { resolveExecutionPosture } from './resolve-execution-posture';
+import {
+  constitutionForbidsLocal,
+  formatSshTarget,
+  resolveExecutionPosture,
+} from './resolve-execution-posture';
 import { applySkillPassthrough, deriveSkillPassthrough } from './skill-passthrough';
 import type { WiringContext } from './types';
 import { resolveSipTrunkClient } from './voice-stack';
@@ -428,6 +435,49 @@ export function createPersonalityFilesInjector(
 }
 
 /**
+ * D4 — the injector for an `ssh` posture that actually routes.
+ *
+ * A personality whose commands run on another machine is split down the middle,
+ * and the model has to know exactly where the seam is: its shell is remote, its
+ * files are local, and NOTHING confines the remote half. There is no remote
+ * `fs_reach`, no denied-path floor, no mount set — the ssh backend provides
+ * remote-host TRUST, not containment (review A3). That is a real property of
+ * this deployment, so it is stated plainly rather than implied; an agent that
+ * believes a path floor is protecting it will write commands as if one were.
+ *
+ * Static by construction (target and workdir come from operator config, not
+ * from the turn), so the cached prompt prefix stays byte-identical.
+ */
+export function createRemoteExecutionInjector(opts: {
+  personalityId: string;
+  target: string;
+  remoteWorkdir?: string;
+}): ContextInjector {
+  const where = opts.remoteWorkdir
+    ? `\`${opts.remoteWorkdir}\` on the remote host`
+    : 'the remote login directory';
+  return {
+    id: `remote-execution:${opts.personalityId}`,
+    priority: 30,
+    shouldInject(ctx: PromptContext): boolean {
+      return ctx.personalityId === opts.personalityId;
+    },
+    inject(_ctx: PromptContext): Promise<InjectionResult | null> {
+      return Promise.resolve({
+        content: [
+          '## Remote execution',
+          `Your \`terminal\`, \`run_code\`, \`run_tests\` and \`lint\` tools run on the remote host \`${opts.target}\` over ssh. They do NOT run on this machine.`,
+          'There is NO path floor on that host: the remote side has no fs_reach allowlist and no denied-path list, so a command you run there can read or write anything the ssh login user can. Treat every remote command as unconfined and say what you are about to do before you do it.',
+          'Your file tools (`read_file`, `write_file`, `list_directory`, and the rest) stay on THIS machine. The two halves see different filesystems: a file you write with `write_file` does not exist on the remote host, and a file a remote command creates cannot be read with `read_file`. Move bytes between them with explicit commands, never by assuming a shared path.',
+          `Commands run in ${where} unless you pass an explicit \`cwd\`, which is a path on the REMOTE host.`,
+          '`process_*` (background processes) is not routed over ssh and will refuse.',
+        ].join('\n'),
+      });
+    },
+  };
+}
+
+/**
  * Gap 11 — live tool-reach getter for skills gating (`requires.tools` +
  * capability-mode filtering). Lazy on purpose: the closure re-reads the
  * registry on every `resolveSkills()` call, so MCP and plugin tools
@@ -484,6 +534,118 @@ export interface ComposeToolsResult {
   /** Ground-truth consult for `MemoryCaptureRunner` (R8). Absent when
    *  `grounding.enabled: false`, so capture behaves exactly as before. */
   memoryConsult?: GroundingMemoryConsult;
+}
+
+/**
+ * Resolve the ssh execution backend for a personality whose posture routes
+ * remotely (plan T5). `undefined` means "nothing is routed remotely" — the
+ * caller then leaves execution where it already was: the host `ScopedProcess`
+ * at a `local`/`none` posture, or a refusal at an `ssh` posture that reaches
+ * `hostExecForbidden` with no backend.
+ *
+ * Three conditions, all load-bearing:
+ *   - the posture is `ssh` — the personality declared it and the resolver kept
+ *     it (an ssh posture with no target already became honest `local`);
+ *   - a target is actually configured — `execution.ssh.host` IS the switch;
+ *   - the constitution permits un-sandboxed execution (D7). ssh is remote-host
+ *     TRUST, not mount-confinement, so `requireSandbox` / `forbidLocal` refuses
+ *     it: no backend is built, and exec tools answer `not_available` rather
+ *     than quietly running on this machine.
+ *
+ * `constitutionForbidsLocal` is CALLED, with the constitution. It is a
+ * function: naming it without calling it yields a truthy object, `!fn` is a
+ * constant `false`, and the whole gate becomes dead code that both `tsc` and
+ * Biome accept — an ssh personality would then execute locally while its
+ * character sheet named a remote host.
+ *
+ * No `SessionManager` wrap (D5): each ssh exec opens its own connection, so
+ * there is no persistent session to keep alive and nothing for the wrapper's
+ * lane bookkeeping to describe.
+ */
+export async function resolveSshExecutionBackend(input: {
+  posture: ExecutionPosture;
+  ssh?: NonNullable<ExecutionBackendConfig['ssh']>;
+  constitution?: Constitution;
+  substitutionVars: { ethosHome: string; cwd: string };
+  registry: ExecutionBackendRegistry;
+  secrets: SecretsResolver;
+  logger: Logger;
+}): Promise<ExecutionBackend | undefined> {
+  const { posture, ssh, constitution } = input;
+  if (posture.backend !== 'ssh') return undefined;
+  if (ssh?.host === undefined) return undefined;
+  if (constitutionForbidsLocal(constitution)) return undefined;
+
+  try {
+    return await input.registry.resolve('ssh', {
+      config: {
+        substitutionVars: input.substitutionVars,
+        ...(constitution ? { constitution } : {}),
+        ssh,
+      },
+      secrets: input.secrets,
+      logger: input.logger,
+    });
+  } catch (err) {
+    // Fail loud, exactly as docker does — and name the target, because the one
+    // thing an operator needs from a boot failure here is WHICH machine could
+    // not be reached and what ssh said about it.
+    const detail = err instanceof Error ? err.message : String(err);
+    throw new Error(
+      `execution backend "ssh" (${formatSshTarget(ssh)}, required by this personality's posture) could not be resolved: ${detail}`,
+      { cause: err },
+    );
+  }
+}
+
+/**
+ * The refusal a `none` posture speaks with. Its own sentence, in the dialect the
+ * other postures already use (`process tools are not routed over ssh in v1`, the
+ * resolver's `sshRefused.message`) — never the tools' built-in Docker sentence,
+ * which would blame a missing sandbox for a personality that declared it does
+ * not run commands at all.
+ */
+const POSTURE_NONE_REFUSAL =
+  'execution posture "none": this personality has no execution backend and does not run commands';
+
+/**
+ * What a personality's posture says about running commands on THIS host, and —
+ * when the posture has its own words for a refusal — what to say. Exported so
+ * the decision is testable on its own: `composeAllTools` needs a whole
+ * `InfrastructureResult` to call, and this is the gate that decides whether a
+ * shell opens.
+ *
+ * Three postures refuse:
+ *   - `none` — the personality declares that it does not run commands at all.
+ *     `execution: none` is loadable from a personality's `config.yaml` and
+ *     documented as "execution refused", so falling through to the host
+ *     `ScopedProcess` would make the field grant precisely what it denies. Every
+ *     other reader of the posture already treats `none` as refusal
+ *     (`createCheckRunExec` returns no route; the character sheet's G-EXEC row
+ *     reads `n/a`) — this gate was the one that disagreed. It refuses
+ *     unconditionally: no backend is ever resolved at this posture, so there is
+ *     no wiring for a `backendWired` argument to excuse.
+ *   - `docker` with no backend (disableDocker / daemon down) AND a constitution
+ *     that forbids the `local` host fallback — the resolver leaves the posture
+ *     `docker` with a `dockerAbsent` hard-fail.
+ *   - `ssh` with no backend AND a constitution that forbids `local`. A
+ *     permitting constitution with no target already became honest `local`, and
+ *     one WITH a target resolved the ssh backend — so an `ssh` posture arriving
+ *     here unwired means refusal, never silent host.
+ *
+ * `message: undefined` means the posture has no wording of its own and the
+ * tools’ built-in Docker sentence is the right one. The ssh refusals carry the
+ * resolver’s own explanation (`sshRefused.message`), because the Docker sentence
+ * names Docker, which under an ssh posture is simply false.
+ */
+export function resolveExecRefusal(
+  posture: ExecutionPosture,
+  backendWired: boolean,
+): { forbidden: boolean; message?: string } {
+  if (posture.backend === 'none') return { forbidden: true, message: POSTURE_NONE_REFUSAL };
+  const forbidden = (posture.backend === 'docker' || posture.backend === 'ssh') && !backendWired;
+  const message = posture.sshRefused?.message;
+  return message !== undefined ? { forbidden, message } : { forbidden };
 }
 
 export interface ComposeToolsDeps {
@@ -634,16 +796,24 @@ export async function composeAllTools(
     constitution: infra.constitution,
     containerized: { env: process.env },
     dockerBuildable: !opts.disableDocker,
+    // `execution.ssh.host`'s presence is the switch for the whole remote
+    // posture. This is the call that decides what ACTUALLY executes, so it must
+    // answer truthfully: claiming "not configured" here resolves an ssh
+    // personality to `local` and runs its `terminal` / `run_code` / `run_tests`
+    // / `lint` on this machine while the character sheet names a remote target.
+    sshConfigured: config.execution?.ssh?.host !== undefined,
+    ...(config.execution?.ssh ? { sshTarget: formatSshTarget(config.execution.ssh) } : {}),
   });
+
+  const NOOP_SECRETS: SecretsResolver = {
+    get: async () => null,
+    set: async () => {},
+    delete: async () => {},
+    list: async () => [],
+  };
 
   let executionBackend: ExecutionBackend | undefined;
   if (posture.backend === 'docker' && !opts.disableDocker && !posture.dockerAbsent) {
-    const NOOP_SECRETS: SecretsResolver = {
-      get: async () => null,
-      set: async () => {},
-      delete: async () => {},
-      list: async () => [],
-    };
     const backendConfig: ExecutionBackendConfig = {
       substitutionVars: { ethosHome: dataDir, cwd: wiringCtx.workingDir },
       // `execution.docker.*` — container resource caps. Absent leaves the
@@ -683,22 +853,25 @@ export async function composeAllTools(
         },
       });
     }
+  } else {
+    // Remote routing (plan T5). Returns undefined unless the posture, the
+    // operator config and the constitution ALL say route — which is the common
+    // case here, since this arm also runs for `local` and `none` postures.
+    executionBackend = await resolveSshExecutionBackend({
+      posture,
+      ...(config.execution?.ssh ? { ssh: config.execution.ssh } : {}),
+      ...(infra.constitution ? { constitution: infra.constitution } : {}),
+      substitutionVars: { ethosHome: dataDir, cwd: wiringCtx.workingDir },
+      registry: infra.executionBackends,
+      secrets: config.secretsResolver ?? NOOP_SECRETS,
+      logger: log,
+    });
   }
 
-  // Host execution is forbidden when the personality's posture requires a
-  // sandbox/remote backend that is not wired here, AND the host fallback is not
-  // permitted. Two cases:
-  //   - `docker` posture with no backend (disableDocker / daemon down) AND the
-  //     constitution forbids the `local` host fallback (resolver leaves it
-  //     `docker` + a `dockerAbsent` hard-fail);
-  //   - `ssh` posture with no backend (Phase 2a wires none) AND the constitution
-  //     forbids `local` (resolver leaves it `ssh`; a permitting constitution
-  //     already became honest `local` above, so an `ssh` posture reaching here
-  //     means refusal — never silent host).
-  // In both cases exec tools must refuse (`not_available`) — never silently run
-  // on the host while the sheet claims docker/ssh.
-  const hostExecForbidden =
-    (posture.backend === 'docker' || posture.backend === 'ssh') && executionBackend === undefined;
+  // Whether host execution is forbidden, and in whose words. See
+  // `resolveExecRefusal` for the three postures that refuse and why.
+  const refusal = resolveExecRefusal(posture, executionBackend !== undefined);
+  const hostExecForbidden = refusal.forbidden;
   if (hostExecForbidden) {
     log.warn(
       'execution posture: sandbox/remote backend required but none available; host exec forbidden',
@@ -709,6 +882,27 @@ export async function composeAllTools(
       },
     );
   }
+
+  // Execution is routed to ANOTHER machine. Two consequences the tools have to
+  // know about: the host working directory is not a path that exists there
+  // (D8), and the binary this process spawns is `ssh`, not `docker`.
+  const remoteExec = posture.backend === 'ssh' && executionBackend !== undefined;
+
+  // The refusal, in the posture's OWN words. The resolver already wrote the
+  // truthful explanation onto `sshRefused` — a constitution that requires a
+  // sandbox, or a target nobody configured — and the tools' built-in sentence
+  // names Docker, which under an ssh posture is simply false. One wording, from
+  // the component that made the decision.
+  const execForbiddenMessage = refusal.message;
+
+  // D4 — `process_*` is NOT routed over ssh in v1: a background process needs a
+  // remote lifecycle (kill on stop, log capture, env delivery) that this
+  // backend has no design for. It must not fall through to the host either —
+  // that would put a detached process on the wrong machine while every other
+  // exec tool is remote. So under an ssh posture these tools get NO backend and
+  // an explicit refusal, whatever the constitution says.
+  const processSshUnsupported = 'process tools are not routed over ssh in v1';
+  const sshPosture = posture.backend === 'ssh';
 
   // -------------------------------------------------------------------------
   // Group A: inline tool factories
@@ -722,6 +916,9 @@ export async function composeAllTools(
     backend: executionBackend,
     personality: activePerson,
     hostExecForbidden,
+    ...(execForbiddenMessage !== undefined
+      ? { hostExecForbiddenMessage: execForbiddenMessage }
+      : {}),
   }))
     tools.register(tool);
   const assetDirFor = createAssetDirResolver((id) => personalities.get(id), {
@@ -855,9 +1052,16 @@ export async function composeAllTools(
 
   for (const tool of composeProcess(wiringCtx, {
     hookRegistry: hooks,
-    backend: executionBackend,
+    // D4 — deliberately NOT `executionBackend`: under an ssh posture these
+    // tools are excluded from remote routing and must refuse, not run.
+    ...(sshPosture ? {} : { backend: executionBackend }),
     personality: activePerson,
-    hostExecForbidden,
+    hostExecForbidden: sshPosture ? true : hostExecForbidden,
+    ...(sshPosture
+      ? { hostExecForbiddenMessage: processSshUnsupported }
+      : execForbiddenMessage !== undefined
+        ? { hostExecForbiddenMessage: execForbiddenMessage }
+        : {}),
   }).tools)
     tools.register(tool);
   for (const tool of createImageTools({
@@ -875,6 +1079,9 @@ export async function composeAllTools(
     backend: executionBackend,
     personality: activePerson,
     hostExecForbidden,
+    ...(execForbiddenMessage !== undefined
+      ? { hostExecForbiddenMessage: execForbiddenMessage }
+      : {}),
   }).tools)
     tools.register(tool);
 
@@ -1181,6 +1388,23 @@ export async function composeAllTools(
     // web-api processes.
     const notifyQueue = new SQLiteNotifyQueue(join(dataDir, 'notify-queue.db'));
     injectors.push(createPendingNotifyInjector(notifyQueue, config.teamName));
+  }
+
+  // -------------------------------------------------------------------------
+  // Remote execution injector (D4) — only when execution ACTUALLY routes over
+  // ssh. A refused or fallen-back ssh posture must not tell the model its
+  // commands run on another machine when they do not run at all, or run here.
+  // -------------------------------------------------------------------------
+
+  if (remoteExec) {
+    const sshCfg = config.execution?.ssh;
+    injectors.push(
+      createRemoteExecutionInjector({
+        personalityId: activePerson.id,
+        target: posture.sshTarget ?? (sshCfg ? formatSshTarget(sshCfg) : 'the configured host'),
+        ...(sshCfg?.remoteWorkdir !== undefined ? { remoteWorkdir: sshCfg.remoteWorkdir } : {}),
+      }),
+    );
   }
 
   // -------------------------------------------------------------------------

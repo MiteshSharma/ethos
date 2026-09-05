@@ -1027,6 +1027,13 @@ export async function buildAgentLoop(
       // rather than failing at spawn time. The docker backend comes from the
       // SAME registry (and, by its cache, is the SAME instance) exec tools
       // use: D4's containment claim rests on one mount derivation, not two.
+      //
+      // ALWAYS docker, never the personality's posture: a Pi run is a container
+      // by construction — a digest-pinned image, a mount set derived from
+      // `fs_reach`, a workspace `git worktree`. An `ssh` posture routes the
+      // exec TOOLS to a remote host; it does not turn this runner into
+      // something a remote shell could host. A personality with `execution:
+      // ssh` still gets its Pi jobs in a local container.
       if (piConfig?.image) {
         const piBackend = await infra.executionBackends.resolve('docker', {
           config: {
@@ -1060,6 +1067,9 @@ export async function buildAgentLoop(
       // (D4) — resolved ONCE here and shared across every configured agent,
       // not re-resolved per entry; resolving 'docker' again returns the SAME
       // cached instance either way.
+      // Docker for the same reason Pi is (above): an ACP agent run is
+      // container-specific, so an `ssh` posture on the personality does not
+      // move it to the remote host.
       if (acpAgentNames.length > 0) {
         const acpBackend = await infra.executionBackends.resolve('docker', {
           config: {
@@ -1414,6 +1424,11 @@ export async function buildAgentLoop(
     // warning uses (no second measurement path).
     contextWindow: llm.maxContextTokens,
     mcpManager,
+    // The registry the tools resolved their backend from. `resolve()` memoises,
+    // so handing this out is handing out the very instance `compose-tools`
+    // built — which is the point: a Settings probe against a second registry
+    // would answer about an object nothing runs on.
+    executionBackends: infra.executionBackends,
     skillsInjector,
     setMessagingSend: (fn) => {
       ref.fn = fn;

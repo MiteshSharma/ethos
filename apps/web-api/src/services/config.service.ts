@@ -166,6 +166,13 @@ const RECORD_KEY_RE = /^[A-Za-z0-9_-]+$/;
 const LOG_LEVELS = ['debug', 'info', 'warn', 'error'] as const;
 type LogLevelValue = (typeof LOG_LEVELS)[number];
 
+/** The two `StrictHostKeyChecking` values `execution.ssh.strictHostKeys` takes.
+ *  Duplicated from `@ethosagent/config` for the reason every other enum in this
+ *  file is: this reader parses the raw passthrough map and shares no code with
+ *  the CLI loader, so an unrecognised value must read back as "unset" here too
+ *  rather than as a string the runtime will not honour. */
+const SSH_STRICT_HOST_KEYS = ['accept-new', 'yes'] as const;
+
 /** Redacted view of one auxiliary model slot (`auxiliary.<slot>.*`). */
 export interface AuxModelGetResult {
   model: string | null;
@@ -830,6 +837,7 @@ const SETTINGS_PATCH_KEYS = [
   'logsLevel',
   'memoryCharLimits',
   'executionDocker',
+  'executionSsh',
   'kanban',
   'cronMaxParallelJobs',
   'toolLoop',
@@ -986,6 +994,13 @@ function validateSettingsPatch(patch: ConfigUpdateInput): void {
     // `cpu` is the one cap that may be fractional (`--cpus 1.5`).
     checkPositive('executionDocker.cpu', patch.executionDocker.cpu);
     checkInt('executionDocker.diskMb', patch.executionDocker.diskMb, 1);
+  }
+  if (patch.executionSsh) {
+    // Only the port is a number, and it is the one field a typo turns into a
+    // connection that hangs rather than a config error. Everything else is a
+    // host, a user or a path — `@ethosagent/config` is the authority on what
+    // those may contain, and re-deciding it here is how two validators drift.
+    checkInt('executionSsh.port', patch.executionSsh.port, 1, 65535);
   }
   if (patch.kanban) {
     checkInt('kanban.maxInProgress', patch.kanban.maxInProgress, 1);
@@ -1415,6 +1430,16 @@ export interface ConfigGetResult {
   memoryCharLimits: { memory: number; user: number };
   /** `execution.docker.*` — container resource caps; `diskMb` null = no quota. */
   executionDocker: { cpu: number; diskMb: number | null };
+  /** `execution.ssh.*` — the single remote target. `host` null = none configured. */
+  executionSsh: {
+    host: string | null;
+    user: string | null;
+    port: number | null;
+    identityFile: string | null;
+    knownHostsFile: string | null;
+    strictHostKeys: 'accept-new' | 'yes' | null;
+    remoteWorkdir: string | null;
+  };
   /** `kanban.*` WIP caps; null = uncapped. */
   kanban: { maxInProgress: number | null; maxInProgressPerProfile: number | null };
   /** `cron.maxParallelJobs`; null = uncapped. */
@@ -1664,6 +1689,15 @@ export interface ConfigUpdateInput {
   logsLevel?: LogLevelValue | null;
   memoryCharLimits?: { memory?: number | null; user?: number | null };
   executionDocker?: { cpu?: number | null; diskMb?: number | null };
+  executionSsh?: {
+    host?: string | null;
+    user?: string | null;
+    port?: number | null;
+    identityFile?: string | null;
+    knownHostsFile?: string | null;
+    strictHostKeys?: 'accept-new' | 'yes' | null;
+    remoteWorkdir?: string | null;
+  };
   kanban?: { maxInProgress?: number | null; maxInProgressPerProfile?: number | null };
   cronMaxParallelJobs?: number | null;
   toolLoop?: { maxToolCallsWarnAt?: number | null; maxIdenticalToolCallsWarnAt?: number | null };
@@ -1975,6 +2009,18 @@ export class ConfigService {
         cpu: passPositiveNum(p, 'execution.docker.cpu') ?? 2,
         diskMb: passBoundedInt(p, 'execution.docker.diskMb', 1),
       },
+      executionSsh: {
+        // RAW. No defaults anywhere in this block: a defaulted `user` or `port`
+        // would render a target string the operator never wrote, and the pane
+        // shows that string as the thing it just probed.
+        host: passStr(p, 'execution.ssh.host'),
+        user: passStr(p, 'execution.ssh.user'),
+        port: passBoundedInt(p, 'execution.ssh.port', 1, 65535),
+        identityFile: passStr(p, 'execution.ssh.identityFile'),
+        knownHostsFile: passStr(p, 'execution.ssh.knownHostsFile'),
+        strictHostKeys: pickEnumOrNull(p['execution.ssh.strictHostKeys'], SSH_STRICT_HOST_KEYS),
+        remoteWorkdir: passStr(p, 'execution.ssh.remoteWorkdir'),
+      },
       kanban: {
         maxInProgress: passBoundedInt(p, 'kanban.maxInProgress', 1),
         maxInProgressPerProfile: passBoundedInt(p, 'kanban.maxInProgressPerProfile', 1),
@@ -2258,6 +2304,15 @@ export class ConfigService {
     if (patch.executionDocker) {
       set('execution.docker.cpu', patch.executionDocker.cpu);
       set('execution.docker.diskMb', patch.executionDocker.diskMb);
+    }
+    if (patch.executionSsh) {
+      set('execution.ssh.host', patch.executionSsh.host);
+      set('execution.ssh.user', patch.executionSsh.user);
+      set('execution.ssh.port', patch.executionSsh.port);
+      set('execution.ssh.identityFile', patch.executionSsh.identityFile);
+      set('execution.ssh.knownHostsFile', patch.executionSsh.knownHostsFile);
+      set('execution.ssh.strictHostKeys', patch.executionSsh.strictHostKeys);
+      set('execution.ssh.remoteWorkdir', patch.executionSsh.remoteWorkdir);
     }
     if (patch.kanban) {
       set('kanban.maxInProgress', patch.kanban.maxInProgress);

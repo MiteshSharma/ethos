@@ -23,6 +23,8 @@ import type { McpManager } from '@ethosagent/tools-mcp';
 import type { MessagingSendFn } from '@ethosagent/tools-messaging';
 import type {
   CliSubcommandContext,
+  ExecutionBackendConfig,
+  ExecutionBackendRegistry,
   GlobalMemoryStore,
   LLMProvider,
   Logger,
@@ -125,8 +127,18 @@ export interface WiringConfig {
   /**
    * Execution-backend resource caps (mapped from `EthosConfig.execution`).
    * Forwarded to `ExecutionBackendConfig` when the docker backend is resolved.
+   *
+   * `ssh` is the deployment's single remote execution target, and `host`'s
+   * presence is the switch: no `host`, no remote posture. It is the CONTRACT's
+   * own shape, not a copy: the compose path forwards this object straight to
+   * `ExecutionBackendConfig.ssh` when it resolves the ssh backend, so a field
+   * this type dropped would be a field the operator set and the backend never
+   * saw — a configured `remoteWorkdir` or `identityFile` silently ignored.
    */
-  execution?: { docker?: { cpu?: number; diskMb?: number } };
+  execution?: {
+    docker?: { cpu?: number; diskMb?: number };
+    ssh?: NonNullable<ExecutionBackendConfig['ssh']>;
+  };
   /**
    * Board work-in-progress caps (mapped from `EthosConfig.kanban`). Forwarded
    * to `KanbanStore`, which refuses a claim past the cap. Absent = uncapped.
@@ -1082,6 +1094,15 @@ export interface CreateAgentLoopResult {
   /** The McpManager instance from tool composition. Pass to createWebApi so
    *  re-auth via the web UI hits the live manager and updates the tool registry. */
   mcpManager: McpManager;
+  /**
+   * THIS loop's execution-backend registry (`buildInfrastructure`). Exposed so a
+   * composition root that also hosts the web API can hand web-api's
+   * `ExecutionService` the registry the TOOLS run on — `resolve()` memoises, so
+   * `get('ssh')` there is literally the instance `compose-tools` resolved, and
+   * the Settings probe tests the object that executes rather than a look-alike
+   * built for the occasion. Without it the probe answers `backend_unresolved`.
+   */
+  executionBackends: ExecutionBackendRegistry;
   /** The SkillsInjector from tool composition — the single eligibility decision
    *  ("which skills does personality P see"). Pass to createWebApi so read-only
    *  surfaces derive from THIS instance rather than building a second injector
@@ -1567,6 +1588,7 @@ export {
   type ContainerizedSignal,
   constitutionForbidsLocal,
   detectContainerized,
+  formatSshTarget,
   hasExecTool,
   isExecTool,
   type ResolveExecutionPostureInput,

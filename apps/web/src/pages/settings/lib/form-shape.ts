@@ -180,6 +180,17 @@ export interface FormShape extends VoiceTelephonyFormValues {
   memoryCharLimits: { memory: number | null; user: number | null };
   /** `execution.docker.*` — container caps; `diskMb` null = no quota. */
   executionDocker: { cpu: number | null; diskMb: number | null };
+  /** `execution.ssh.*` — the single remote target. Blank `host` = no remote
+   *  execution on this deployment; blank elsewhere = ssh's own default. */
+  executionSsh: {
+    host: string;
+    user: string;
+    port: number | null;
+    identityFile: string;
+    knownHostsFile: string;
+    strictHostKeys: string;
+    remoteWorkdir: string;
+  };
   /** `toolLoop.*` — soft-warn tiers; null = no warn tier. */
   toolLoop: { maxToolCallsWarnAt: number | null; maxIdenticalToolCallsWarnAt: number | null };
   /** `browser.*` — Playwright budgets, milliseconds. */

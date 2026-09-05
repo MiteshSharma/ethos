@@ -6,8 +6,10 @@ export interface ProcessToolsComposeOpts {
   hookRegistry?: HookRegistry;
   backend?: ExecutionBackend;
   personality?: PersonalityConfig;
-  /** Refuse host spawn when the posture requires Docker but none is wired. */
+  /** Refuse host spawn when the posture requires a sandbox/remote but none is wired. */
   hostExecForbidden?: boolean;
+  /** Why the spawn is refused, in the posture's own words (ssh has its own). */
+  hostExecForbiddenMessage?: string;
 }
 
 export interface ProcessToolsCompose {
@@ -21,6 +23,7 @@ export function compose(ctx: WiringContext, opts?: ProcessToolsComposeOpts): Pro
       backend: opts?.backend,
       personality: opts?.personality,
       hostExecForbidden: opts?.hostExecForbidden,
+      hostExecForbiddenMessage: opts?.hostExecForbiddenMessage,
     }),
   };
 }

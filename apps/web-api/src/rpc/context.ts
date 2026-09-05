@@ -16,6 +16,7 @@ import type { DeliveriesService } from '../services/deliveries.service';
 import type { DigestService } from '../services/digest.service';
 import type { DocumentsService } from '../services/documents.service';
 import type { EvolverService } from '../services/evolver.service';
+import type { ExecutionService } from '../services/execution.service';
 import type { GoalsService } from '../services/goals.service';
 import type { KanbanService } from '../services/kanban.service';
 import type { KeysService } from '../services/keys.service';
@@ -84,6 +85,10 @@ export interface RpcContext {
   toolSettings: ToolSettingsService;
   /** Local `~/.ethos` archives: status, create, identity-only restore. */
   backup: BackupService;
+  /** The remote execution target: uncached reachability, and whether the ssh
+   *  backend resolves at all. Not optional — it answers `not_configured` on a
+   *  deployment with no remote target, which is a state, not an absence. */
+  execution: ExecutionService;
   toolRegistry?: ToolRegistry;
   dashboards?: DashboardsService;
   pluginLoader?: PluginLoader;

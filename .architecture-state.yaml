@@ -287,10 +287,10 @@ register_anchors:
     - { path: packages/core/src/agent-loop/approval-posture.ts, line: 38, contains: "export function createApprovalPostureGuard" }
 
   G-EXEC:
-    - { path: packages/wiring/src/resolve-execution-posture.ts, line: 197, contains: "export function resolveExecutionPosture" }
-    - { path: packages/wiring/src/resolve-execution-posture.ts, line: 252, contains: "const dockerUnbuildable" }
-    - { path: packages/wiring/src/resolve-execution-posture.ts, line: 289, contains: "posture.hostFallback = { reason: 'docker-disabled' }" }
-    - { path: packages/wiring/src/resolve-execution-posture.ts, line: 338, contains: "dockerAvailable === false && !posture.dockerAbsent" }
+    - { path: packages/wiring/src/resolve-execution-posture.ts, line: 234, contains: "export function resolveExecutionPosture" }
+    - { path: packages/wiring/src/resolve-execution-posture.ts, line: 289, contains: "const dockerUnbuildable" }
+    - { path: packages/wiring/src/resolve-execution-posture.ts, line: 329, contains: "posture.hostFallback = { reason: 'docker-disabled' }" }
+    - { path: packages/wiring/src/resolve-execution-posture.ts, line: 406, contains: "dockerAvailable === false && !posture.dockerAbsent" }
 
   G-WATCH:
     - { path: packages/safety/watcher/src/rules.ts, line: 20, contains: "export function rateLimitRule" }
@@ -477,6 +477,31 @@ tiers:
     package: "@ethosagent/execution-local"
     tier: 1
     assigned: 2026-08-12
+
+  # PROMOTED back to Tier 1 on 2026-09-05, executing the STANDING PROMOTION
+  # recorded on its 2026-08-12 demotion: "this returns to Tier 1 the day
+  # `ExecutionBackendConfig.ssh` acquires a writer, because that is the moment a
+  # remote host becomes reachable from a personality." That day has arrived.
+  # The demotion rested on three facts, all three now false: the backend was
+  # registered (packages/wiring/src/build-infrastructure.ts:295) but never
+  # resolved; nothing resolved any backend name but `'docker'`; and
+  # `ExecutionBackendConfig.ssh` (packages/types/src/execution.ts:233) had no
+  # writer. Today `resolveSshExecutionBackend`
+  # (packages/wiring/src/compose-tools.ts:565) resolves the literal `'ssh'`
+  # (:580) and is called from the composition path (:860) with the operator's
+  # target (:862); `ExecutionBackendConfig.ssh` gained `knownHostsFile`,
+  # `strictHostKeys` and `remoteWorkdir`; and packages/config parses the whole
+  # block from `execution.ssh.*` in ~/.ethos/config.yaml
+  # (packages/config/src/index.ts:4471) and writes it back (:2751-2757).
+  # Tier 1 for the same reason execution-docker is: it sits ON a trust boundary.
+  # A different one — remote-host TRUST, not mount-confinement — which is why
+  # the composition path refuses it under a `requireSandbox` / `forbidLocal`
+  # constitution rather than treating it as a sandbox. It owes Tier 1's
+  # adversarial tests for that boundary.
+  extensions/execution-ssh:
+    package: "@ethosagent/execution-ssh"
+    tier: 1
+    assigned: 2026-09-05
 
   extensions/gateway:
     package: "@ethosagent/gateway"
@@ -706,22 +731,16 @@ tiers:
   # it is a reference plugin with no production caller, no tests, and a name no
   # resolution path can reach — `activate()` registers it as
   # `<pluginId>/process` (packages/plugin-sdk/src/index.ts:606) while
-  # packages/wiring/src/compose-tools.ts:541 resolves the literal `'docker'`
-  # and nothing else. Promote back the day a resolution path selects it.
+  # packages/wiring/src/compose-tools.ts resolves the literals `'docker'` (:831)
+  # and `'ssh'` (:580) and nothing else. The audit's original wording — "resolves
+  # the literal `'docker'` and nothing else" — was true on 2026-08-12 and stopped
+  # being true when the ssh execution lane landed `resolveSshExecutionBackend`;
+  # corrected 2026-09-05. The demotion is UNAFFECTED: neither literal is
+  # `<pluginId>/process`, so this package is still unreachable, and its own
+  # promotion condition is NOT met. Promote back the day a resolution path
+  # selects it.
   extensions/execution-process-backend:
     package: "@ethosagent/execution-process-backend"
-    tier: 2
-    assigned: 2026-08-12
-
-  # Demoted from Tier 1 by the same audit: the backend is registered
-  # (packages/wiring/src/build-infrastructure.ts:254) but never resolved —
-  # compose-tools.ts:541 resolves only `'docker'` — and `ExecutionBackendConfig.ssh`
-  # (packages/types/src/execution.ts:177) has no writer anywhere, so no line of
-  # this package can execute in production. STANDING PROMOTION: this returns to
-  # Tier 1 the day `ExecutionBackendConfig.ssh` acquires a writer, because that
-  # is the moment a remote host becomes reachable from a personality.
-  extensions/execution-ssh:
-    package: "@ethosagent/execution-ssh"
     tier: 2
     assigned: 2026-08-12
 

@@ -54,6 +54,30 @@ export interface ExecOpts {
    * personality share a single default lane (sessionId defaults to '').
    */
   sessionId?: string;
+  /**
+   * Whether the backend may put a QUOTING layer around `cmd` (`sh -c '<cmd>'`).
+   * Defaults to true. Callers pass `false` when they have already composed
+   * `cmd` as a ready remote command line — every `run_code` runner
+   * (`python3 -`, `node --input-type=module`, `bash -s`) is one — so it is
+   * interpolated raw and parsed by exactly one shell, the same single parse the
+   * unwrapped form gets.
+   *
+   * It does NOT mean "no remote cwd": a workdir is still applied on this path,
+   * as `cd '<dir>' && exec <cmd>`. An `sh -c` wrap does not consume its child's
+   * stdin — the runner inherits the descriptor and still reads its program from
+   * it — and `exec` makes the runner REPLACE the wrapping shell, so pid, signal
+   * disposition and exit status stay the remote command's own. Both are proved
+   * against a real shell in
+   * `extensions/execution-ssh/src/__tests__/remote-words-stdin.test.ts`; the
+   * earlier rationale here (that a second wrap changes what the runner reads)
+   * was false, and while it stood `run_code` silently lost its remote cwd.
+   *
+   * The flag is thin. Only the `ssh` backend reads it (`local`/`docker` ignore
+   * it), exactly one call site sets it (`run_code` in `@ethosagent/tools-code`),
+   * and what it now buys is `exec` rather than a forked child, plus one fewer
+   * process when there is no workdir to apply.
+   */
+  shell?: boolean;
 }
 
 export interface ExecSession {
@@ -132,6 +156,33 @@ export interface ExecutionPosture {
     /** Why the requested sandbox/remote backend could not run. */
     reason: 'docker-disabled' | 'docker-unavailable' | 'ssh-unavailable';
   };
+  /**
+   * The deployment's remote execution target (`execution.ssh`), rendered as
+   * `user@host:port`, when the posture is `ssh`. Display only — the resolver
+   * never dials it. Absent when no `execution.ssh.host` is configured, or when
+   * the posture is not `ssh`.
+   */
+  sshTarget?: string;
+  /**
+   * Why an `ssh` posture will NOT reach its remote target. Present only when
+   * `backend` is `ssh` AND execution is refused outright — i.e. the constitution
+   * forbids the honest `local` host fallback, so exec tools become
+   * `not_available` rather than silently running on this machine. A permitting
+   * constitution never lands here: an unconfigured target becomes honest `local`
+   * with `hostFallback.reason === 'ssh-unavailable'`, and a configured one keeps
+   * `backend: 'ssh'` and actually routes remotely.
+   *
+   *   - `unconfigured` — no `execution.ssh.host` is set, so there is nothing to
+   *     connect to, and the host fallback is forbidden.
+   *   - `constitution-requires-sandbox` — a target IS configured, but ssh is
+   *     remote-host trust, not mount-confinement, so a constitution setting
+   *     `execution.requireSandbox` / `forbidLocal` refuses it.
+   */
+  sshRefused?: {
+    reason: 'unconfigured' | 'constitution-requires-sandbox';
+    /** Human-readable refusal, rendered verbatim by the character sheet. */
+    message: string;
+  };
 }
 
 /**
@@ -188,8 +239,32 @@ export interface ExecutionBackendConfig {
    * sandbox.
    */
   diskMb?: number;
-  /** ssh target — remote-host trust, NOT mount-confinement (review A3). */
-  ssh?: { host: string; user?: string; port?: number; identityFile?: string };
+  /**
+   * ssh target — remote-host trust, NOT mount-confinement (review A3). The
+   * deployment's single remote execution target; `host` is the switch (no
+   * `host`, no remote routing). Mirrors `execution.ssh.*` in
+   * `~/.ethos/config.yaml` field for field.
+   */
+  ssh?: {
+    host: string;
+    user?: string;
+    port?: number;
+    /** Private key PATH passed as `ssh -i`. Never key material. */
+    identityFile?: string;
+    /** Passed as `-o UserKnownHostsFile=`. Absent → ssh's own default. */
+    knownHostsFile?: string;
+    /**
+     * Passed VERBATIM as `-o StrictHostKeyChecking=`. A literal union, not a
+     * boolean: `false` would have to mean `no`, which disables host-key
+     * verification outright, and a boolean read of `'accept-new'` is truthy and
+     * would silently emit the stricter `yes`, breaking every first connection
+     * to a new host. Absent → the backend's `accept-new` default (TOFU:
+     * unknown hosts learned, CHANGED ones still refused).
+     */
+    strictHostKeys?: 'accept-new' | 'yes';
+    /** Remote cwd for every exec. Absent → the remote login directory (D8). */
+    remoteWorkdir?: string;
+  };
   /**
    * Substitution roots for resolving `${ETHOS_HOME}` and `${CWD}` in
    * `fs_reach` before deriving mounts. `${self}` resolves to the personality

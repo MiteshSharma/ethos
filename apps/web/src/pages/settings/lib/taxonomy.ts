@@ -191,6 +191,17 @@ export const SETTINGS_CATEGORIES: readonly SettingsCategory[] = [
     ],
   },
   {
+    // Where this machine's execution tools RUN — the single remote target
+    // (plan/phases/remote-execution-routing.md §6, D2). Machine group: a host,
+    // a key path and a workdir are what an operator sets once for this
+    // deployment, not what an agent IS. Which personalities route to it is
+    // identity and lives on the personality (`execution:`), not here.
+    slug: 'execution',
+    label: 'Execution',
+    group: 'Machine',
+    sections: [section('status', 'status'), section('remote-target', 'remote target')],
+  },
+  {
     // Local archives of `~/.ethos`, and the identity-only restore
     // (plan/phases/agent-state-backup.md §5, D6). Machine group: what this
     // machine holds and how it is copied off, not what the agent is.

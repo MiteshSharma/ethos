@@ -229,13 +229,32 @@ function executionSection(config: PersonalityConfig, exec: CharacterSheetExecuti
   // ssh relabel (A3) — remote-host trust, NOT mount-confinement.
   if (posture.backend === 'ssh') {
     lines.push('- Note (A3): ssh = remote-host trust — NOT mount-confined.');
-    // P2 — a `backend: 'ssh'` posture only survives resolution when NO ssh
-    // backend is wired AND the constitution forbids the local host fallback.
-    // Be honest: exec tools refuse rather than silently run on the host.
-    lines.push(
-      '- Note (P2): no ssh execution backend is wired in this build; the constitution',
-      '  forbids the un-sandboxed host fallback, so execution tools refuse (not_available).',
-    );
+    if (posture.sshTarget) {
+      // Exactly what the operator configured — `formatSshTarget` prints no
+      // guessed user or port, so the sheet never shows a value they never set.
+      lines.push(`- ssh target: ${posture.sshTarget}`);
+      // D4 — the honest cost of remoting `terminal` while file tools stay local.
+      // Stated plainly: there is no remote path floor, so this is an
+      // unrestricted shell on another machine.
+      lines.push(
+        '- Note (D4): file tools operate on THIS host; terminal runs on the remote',
+        '  target with NO path floor — an unrestricted shell on another machine.',
+      );
+    } else if (!posture.sshRefused) {
+      // P2 — no target, and no typed refusal to explain it. This note is the
+      // ONLY explanation the operator gets, so it must render. When the resolver
+      // DID attach a refusal it is strictly more specific than this note, and
+      // rendering both would say nearly the same thing twice.
+      lines.push(
+        '- Note (P2): no ssh execution backend is wired in this build; the constitution',
+        '  forbids the un-sandboxed host fallback, so execution tools refuse (not_available).',
+      );
+    }
+    // The refusal wording comes from the resolver, verbatim — one explanation,
+    // one source, so the sheet cannot drift from the reason exec tools refused.
+    if (posture.sshRefused) {
+      lines.push(`- ${posture.sshRefused.message}`);
+    }
   }
 
   // #7 macOS caveat — docker on macOS is best-effort, not a hard boundary.

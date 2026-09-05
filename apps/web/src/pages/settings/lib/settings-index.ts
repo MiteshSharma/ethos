@@ -1200,6 +1200,48 @@ export const SETTINGS_INDEX: readonly SettingEntry[] = [
         'Action button (codex:startAuth IPC); credentials land in the Codex auth store.',
     },
   ]),
+  // Execution (plan/phases/remote-execution-routing.md §6). The probe is
+  // `stateBacked` — it is a button that opens an ssh connection, not a
+  // `Form.Item`, and it writes no key. The target fields below are ordinary
+  // page-Save rows: `config.get`/`config.update` carry `execution.ssh.*`.
+  ...group('execution', 'status', [
+    {
+      // Deliberately NOT `saves: 'self'`, unlike the backup actions beside it:
+      // a probe opens a connection and writes NOTHING, so a "saves on its own"
+      // marker would claim a write that never happens.
+      key: null,
+      label: 'Test connection',
+      stateBacked: true,
+      keyUnresolved: 'Action button (rpc.execution.probeSsh); opens a connection, not a key.',
+    },
+  ]),
+  ...group('execution', 'remote-target', [
+    { key: 'execution.ssh.host', formName: 'executionSsh.host', label: 'Remote host' },
+    { key: 'execution.ssh.user', formName: 'executionSsh.user', label: 'Remote user' },
+    { key: 'execution.ssh.port', formName: 'executionSsh.port', label: 'Remote port' },
+    {
+      key: 'execution.ssh.identityFile',
+      formName: 'executionSsh.identityFile',
+      label: 'Identity file',
+    },
+    {
+      key: 'execution.ssh.remoteWorkdir',
+      formName: 'executionSsh.remoteWorkdir',
+      label: 'Remote working directory',
+    },
+    {
+      key: 'execution.ssh.knownHostsFile',
+      formName: 'executionSsh.knownHostsFile',
+      label: 'Known-hosts file',
+      advanced: true,
+    },
+    {
+      key: 'execution.ssh.strictHostKeys',
+      formName: 'executionSsh.strictHostKeys',
+      label: 'Host-key checking',
+      advanced: true,
+    },
+  ]),
   // Backup (plan/phases/agent-state-backup.md §5). The three ACTIONS are
   // `stateBacked` — none is a `Form.Item`, because none writes a config key:
   // they call `rpc.backup.*` or navigate to a raw streaming route. The

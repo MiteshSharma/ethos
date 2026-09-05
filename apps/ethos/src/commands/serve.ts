@@ -385,6 +385,10 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
   // The loop's SkillsInjector — backs `personalities.renderers`. Undefined on
   // the team-coordinator path, where the RPC degrades to no renderers.
   let skillsInjector: import('@ethosagent/skills').SkillsInjector | undefined;
+  // The loop's execution-backend registry — backs the Settings Execution
+  // probe. Undefined on the team-coordinator path, where the probe degrades to
+  // `backend_unresolved` rather than testing a registry this process invented.
+  let executionBackends: import('@ethosagent/types').ExecutionBackendRegistry | undefined;
   let voiceConfig: ServeVoiceConfig | undefined;
   // The voice stack, held only for its span writer: the browser realtime tier
   // records per-turn latency into the SAME writer the pipeline tier uses, so a
@@ -595,6 +599,7 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
     voiceStack = result.voiceStack;
     refreshLoopPersonalities = result.refreshPersonalities;
     skillsInjector = result.skillsInjector;
+    executionBackends = result.executionBackends;
   } else if (teamFlag) {
     // Chat UX: `ethos serve --team <name>` → run as the team's coordinator.
     const {
@@ -651,6 +656,7 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
     voiceStack = result.voiceStack;
     refreshLoopPersonalities = result.refreshPersonalities;
     skillsInjector = result.skillsInjector;
+    executionBackends = result.executionBackends;
   }
   let titleFn: ((systemPrompt: string, userMessage: string) => Promise<string>) | undefined;
   try {
@@ -1088,6 +1094,7 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
     onMemoryCaptured,
     refreshLoopPersonalities,
     skillsInjector,
+    executionBackends,
     skillsCatalogDir,
     sttProviders,
     ttsProviders,
@@ -1815,6 +1822,15 @@ export interface BuildServeWebApiOptions {
     | undefined;
   refreshLoopPersonalities: (() => Promise<void>) | undefined;
   skillsInjector: import('@ethosagent/skills').SkillsInjector | undefined;
+  /**
+   * The LOOP's execution-backend registry. Web-api's `ExecutionService` probes
+   * `get('ssh')` on it, and because `resolve()` memoises that is the instance
+   * `compose-tools` built for the tools — the probe tests what executes.
+   * Undefined on the team-coordinator path (`createTeamAgentLoop` exposes no
+   * registry) and in onboarding mode: the probe then answers
+   * `backend_unresolved` with the reason, never a guessed `unreachable`.
+   */
+  executionBackends: import('@ethosagent/types').ExecutionBackendRegistry | undefined;
   skillsCatalogDir: ReturnType<typeof resolveSkillsCatalogDir>;
   sttProviders: import('@ethosagent/types').SttProviderRegistry | undefined;
   ttsProviders: import('@ethosagent/types').TtsProviderRegistry | undefined;
@@ -1880,6 +1896,7 @@ export function buildServeWebApi(opts: BuildServeWebApiOptions): ReturnType<type
     onMemoryCaptured,
     refreshLoopPersonalities,
     skillsInjector,
+    executionBackends,
     skillsCatalogDir,
     sttProviders,
     ttsProviders,
@@ -1930,6 +1947,10 @@ export function buildServeWebApi(opts: BuildServeWebApiOptions): ReturnType<type
     // Renderer-capability seam for `personalities.renderers` — the loop's own
     // SkillsInjector, so the derivation reuses one scanner + mtime cache.
     ...(skillsInjector ? { skillsInjector } : {}),
+    // Settings › Execution — the probe reaches the loop's own backend instance
+    // through this registry (`resolve()` memoises), so `Test connection` tests
+    // the object remote commands run on.
+    ...(executionBackends ? { executionBackends } : {}),
     // Lane 6 (D5) — model-fit seam for the `personalities.characterSheet`
     // RPC: the SAME wiring assembler the CLI `personality show` calls, so the
     // two surfaces render one verdict. Cache-first probe (a web read is not a

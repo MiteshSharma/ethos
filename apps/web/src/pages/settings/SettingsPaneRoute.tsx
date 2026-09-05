@@ -14,6 +14,7 @@ import { ChatPane } from './panes/chat';
 import { DataPane } from './panes/data';
 import { DesktopPane } from './panes/desktop';
 import { DeveloperPane } from './panes/developer';
+import { ExecutionPane } from './panes/execution';
 import { GeneralPane } from './panes/general';
 import { JobsPane } from './panes/jobs';
 import { KeysPane } from './panes/keys';
@@ -32,6 +33,7 @@ const PANES: Record<string, () => React.JSX.Element | null> = {
   jobs: JobsPane,
   data: DataPane,
   backup: BackupPane,
+  execution: ExecutionPane,
   security: SecurityPane,
   keys: KeysPane,
   developer: DeveloperPane,

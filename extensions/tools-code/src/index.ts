@@ -12,6 +12,29 @@ import { buildShimCommand, type ShimRuntime } from './shim';
 const DEFAULT_TIMEOUT_MS = 30_000;
 
 /**
+ * Refusal text for the docker posture with no backend. A posture whose refusal
+ * has a different reason (ssh under a sandbox-requiring constitution) passes
+ * its own message instead — this sentence names Docker, and saying "Docker"
+ * about an ssh refusal is simply false.
+ */
+const DEFAULT_HOST_EXEC_FORBIDDEN =
+  'Execution requires a Docker sandbox, but none is available and the constitution forbids running un-sandboxed on the host.';
+
+/**
+ * The stderr of a backend's most recent FAILED availability probe, when it
+ * keeps one. `ExecutionBackend` does not declare it, and this package must not
+ * import a concrete backend to reach it, so it is read structurally: a backend
+ * that has nothing to say is simply absent from the error, and one that does
+ * (`Permission denied (publickey)` vs `Connection timed out`) says the one
+ * thing that tells an operator which fix is theirs.
+ */
+function lastProbeError(backend: ExecutionBackend): string | undefined {
+  if (!('lastProbeError' in backend)) return undefined;
+  const value = backend.lastProbeError;
+  return typeof value === 'string' && value.trim() !== '' ? value.trim() : undefined;
+}
+
+/**
  * Lane D — wall-clock ceiling for executions that use the in-script tool API.
  * A script looping over dozens of tool calls legitimately outlives the plain
  * 30s default; plain executions keep today's semantics untouched.
@@ -87,6 +110,12 @@ function createRunCodeTool(
   backend: ExecutionBackend | undefined,
   personality: PersonalityConfig | undefined,
 ): Tool {
+  // Remoteness is a property OF the backend, never a flag passed beside it. An
+  // independently-settable boolean can disagree with the backend actually
+  // wired, and both consequences are silent: the capability ledger names the
+  // wrong binary, and the host `ctx.workingDir` goes to the remote as a remote
+  // path (D8). Deriving it here means the two cannot come apart.
+  const remoteBackend = backend?.name === 'ssh';
   return {
     name: 'run_code',
     description:
@@ -102,7 +131,11 @@ function createRunCodeTool(
     maxResultChars: 10_000,
     outputIsUntrusted: true,
     capabilities: {
-      process: { allowedBinaries: ['docker'] },
+      // The host binary this tool actually spawns is the backend's, not the
+      // runtime's: `docker` for the container posture, `ssh` when execution is
+      // routed to a remote target. Declaring `docker` while running `ssh` would
+      // put a false entry in the capability ledger.
+      process: { allowedBinaries: remoteBackend ? ['ssh'] : ['docker'] },
     },
     // Sync gate per the Tool contract: report available when a backend is
     // wired. The async daemon liveness check happens in execute(), which
@@ -146,11 +179,19 @@ function createRunCodeTool(
         };
       }
       // No host fallback: if the backend is absent or unavailable, run_code is
-      // simply not available (it never executes on the host).
+      // simply not available (it never executes on the host). The check runs on
+      // EVERY invocation — the backend decides what to cache, and the ssh
+      // backend deliberately caches only successes, so a transient blip does not
+      // pin this tool to `not_available` for a minute. When the probe failed
+      // with something to say, say it: "not available" alone leaves an operator
+      // guessing between a wrong key and an unreachable host.
       if (!backend || !(await backend.isAvailable())) {
+        const detail = backend ? lastProbeError(backend) : undefined;
         return {
           ok: false,
-          error: 'Code execution backend is not available',
+          error: detail
+            ? `Code execution backend is not available: ${detail}`
+            : 'Code execution backend is not available',
           code: 'not_available',
         };
       }
@@ -160,8 +201,15 @@ function createRunCodeTool(
       // in-script RPC request is answered through the bridge (the SAME per-call
       // enforcement path as LLM-issued calls). A watcher halt aborts the whole
       // execution via the exec abort signal — the script cannot outlive it.
+      // The framed path needs a stdin that stays open for RPC frames after the
+      // script is delivered. The ssh backend has no framed mode — one exec, one
+      // connection, stdin written and closed — so a remote execution falls back
+      // to the plain runner rather than hanging waiting for frames that never
+      // come. `ethos` is then undefined in the script, which is an ordinary
+      // interpreter error the model can read.
       const scriptTools = ctx.scriptTools;
-      const framed = scriptTools !== undefined && (runtime === 'python' || runtime === 'js');
+      const framed =
+        !remoteBackend && scriptTools !== undefined && (runtime === 'python' || runtime === 'js');
       const cmd = framed
         ? buildShimCommand(runtime as ShimRuntime)
         : RUNTIMES[runtime as Runtime].cmd;
@@ -173,6 +221,15 @@ function createRunCodeTool(
         stdin: code,
         timeoutMs: timeout,
         env: {},
+        // `cmd` is already a ready command line — every run_code runner
+        // (`python3 -`, `node --input-type=module`, `bash -s`, or the shim's
+        // equivalent) takes its program from stdin, not from the command string
+        // — so the ssh backend interpolates it raw rather than adding a quoting
+        // layer around it. It still applies the remote workdir (`cd '<dir>' &&
+        // exec <cmd>`): an `sh -c` wrap does not eat the runner's stdin, which
+        // extensions/execution-ssh/src/__tests__/remote-words-stdin.test.ts
+        // proves by running a real shell. Ignored by local/docker.
+        shell: false,
         personality,
         sessionId: ctx.sessionId,
       };
@@ -274,7 +331,10 @@ function makeCommandTool(
   backend: ExecutionBackend | undefined,
   personality: PersonalityConfig | undefined,
   hostExecForbidden: boolean,
+  hostExecForbiddenMessage: string,
 ): Tool {
+  // Derived from the backend, not passed beside it — see `createRunCodeTool`.
+  const remoteBackend = backend?.name === 'ssh';
   return {
     name: opts.name,
     description: opts.description,
@@ -282,7 +342,10 @@ function makeCommandTool(
     maxResultChars: opts.maxResultChars,
     outputIsUntrusted: true,
     capabilities: {
-      process: { allowedBinaries: backend ? ['docker'] : ['bash'] },
+      // The binary this tool spawns on THIS host: the backend's, or `bash` when
+      // it runs on the host itself. `docker` while routed over ssh would be a
+      // false entry in the capability ledger.
+      process: { allowedBinaries: remoteBackend ? ['ssh'] : backend ? ['docker'] : ['bash'] },
     },
     schema: {
       type: 'object',
@@ -299,7 +362,13 @@ function makeCommandTool(
     },
     async execute(args, ctx): Promise<ToolResult> {
       const { command = opts.defaultCommand, cwd } = args as { command?: string; cwd?: string };
-      const workDir = cwd ?? ctx.workingDir;
+      // D8 — the host's `ctx.workingDir` is NEVER sent to a remote backend: it
+      // names a directory on THIS machine, and on the remote it is either absent
+      // or a different directory that happens to share the name. Omitting it
+      // lets the ssh backend fall back to `execution.ssh.remoteWorkdir`, or to
+      // the remote login directory. An explicit `cwd` argument passes through
+      // verbatim, as a REMOTE path. Local/docker keep the host default.
+      const workDir = cwd ?? (remoteBackend ? undefined : ctx.workingDir);
 
       // Routed path (docker posture): run inside the mount-confined backend.
       // env is empty so host secrets never cross into the container (review #3).
@@ -343,15 +412,10 @@ function makeCommandTool(
         }
       }
 
-      // Host execution forbidden: posture requires Docker but none is available
-      // and the constitution forbids the host fallback. Refuse (F1).
+      // Host execution forbidden: the posture requires a sandbox/remote backend
+      // that is not wired, and the constitution forbids the host fallback (F1).
       if (hostExecForbidden) {
-        return {
-          ok: false,
-          error:
-            'Execution requires a Docker sandbox, but none is available and the constitution forbids running un-sandboxed on the host.',
-          code: 'not_available' as const,
-        };
+        return { ok: false, error: hostExecForbiddenMessage, code: 'not_available' as const };
       }
 
       // Local path (posture local/none): host ScopedProcess execution.
@@ -368,7 +432,7 @@ function makeCommandTool(
           'bash',
           ['-c', command],
           {
-            cwd: workDir,
+            cwd: cwd ?? ctx.workingDir,
             timeout: opts.timeoutMs,
           },
         );
@@ -400,6 +464,7 @@ function createRunTestsTool(
   backend: ExecutionBackend | undefined,
   personality: PersonalityConfig | undefined,
   hostExecForbidden: boolean,
+  hostExecForbiddenMessage: string,
 ): Tool {
   return makeCommandTool(
     {
@@ -415,6 +480,7 @@ function createRunTestsTool(
     backend,
     personality,
     hostExecForbidden,
+    hostExecForbiddenMessage,
   );
 }
 
@@ -422,6 +488,7 @@ function createLintTool(
   backend: ExecutionBackend | undefined,
   personality: PersonalityConfig | undefined,
   hostExecForbidden: boolean,
+  hostExecForbiddenMessage: string,
 ): Tool {
   return makeCommandTool(
     {
@@ -437,6 +504,7 @@ function createLintTool(
     backend,
     personality,
     hostExecForbidden,
+    hostExecForbiddenMessage,
   );
 }
 
@@ -447,13 +515,19 @@ function createLintTool(
 export function createCodeTools(opts?: {
   backend?: ExecutionBackend;
   personality?: PersonalityConfig;
-  /** Refuse host execution when the posture requires Docker but none is wired. */
+  /** Refuse host execution when the posture requires a sandbox/remote but none is wired. */
   hostExecForbidden?: boolean;
+  /**
+   * Why host execution is refused, in the posture's own words. Absent → the
+   * Docker sentence. The ssh posture passes `posture.sshRefused.message`.
+   */
+  hostExecForbiddenMessage?: string;
 }): Tool[] {
   const hostExecForbidden = opts?.hostExecForbidden ?? false;
+  const message = opts?.hostExecForbiddenMessage ?? DEFAULT_HOST_EXEC_FORBIDDEN;
   return [
     createRunCodeTool(opts?.backend, opts?.personality),
-    createRunTestsTool(opts?.backend, opts?.personality, hostExecForbidden),
-    createLintTool(opts?.backend, opts?.personality, hostExecForbidden),
+    createRunTestsTool(opts?.backend, opts?.personality, hostExecForbidden, message),
+    createLintTool(opts?.backend, opts?.personality, hostExecForbidden, message),
   ];
 }

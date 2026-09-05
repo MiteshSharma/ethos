@@ -323,6 +323,35 @@ const ExecutionPostureSchema = z.object({
   ),
   scratchPaths: z.array(z.string()),
   dockerAbsent: DockerAbsentSchema.optional(),
+  /**
+   * Honest host fallback (Phase 2a F1) — the requested sandbox or remote
+   * backend could not run and the constitution permitted `local`, so `backend`
+   * says `local` and this says why. Without it the UI cannot tell an intended
+   * host posture from a demoted one.
+   */
+  hostFallback: z
+    .object({
+      reason: z.enum(['docker-disabled', 'docker-unavailable', 'ssh-unavailable']),
+    })
+    .optional(),
+  /**
+   * The remote target, ALREADY FORMATTED by the resolver — display only, the
+   * resolver never dials it. It prints exactly what the operator configured, so
+   * a host with no explicit port renders `build-01` and never `build-01:22`.
+   * Nothing downstream may default a port back in.
+   */
+  sshTarget: z.string().optional(),
+  /**
+   * Why an `ssh` posture will not reach its target. `message` is the canonical
+   * wording — render it verbatim rather than composing a second explanation of
+   * the same fact.
+   */
+  sshRefused: z
+    .object({
+      reason: z.enum(['unconfigured', 'constitution-requires-sandbox']),
+      message: z.string(),
+    })
+    .optional(),
 });
 /** Wire shape of the resolved execution posture (Phase 2a, lane E1). */
 export type ExecutionPostureWire = z.infer<typeof ExecutionPostureSchema>;
@@ -1720,6 +1749,29 @@ const ConfigGetOutput = z.object({
      *  quota. */
     diskMb: z.number().nullable(),
   }),
+  /**
+   * `execution.ssh.*` — the deployment's single remote execution target
+   * (plan/phases/remote-execution-routing.md D2). Reported RAW, as config.yaml
+   * carries it: `host` being non-null is the switch that makes the ssh backend
+   * configurable at all, so a defaulted value here would claim a target that
+   * does not exist.
+   */
+  executionSsh: z.object({
+    /** `execution.ssh.host`; null = no remote target on this deployment. */
+    host: z.string().nullable(),
+    /** `execution.ssh.user`; null = the local username, as ssh(1) defaults. */
+    user: z.string().nullable(),
+    /** `execution.ssh.port`; null = 22. */
+    port: z.number().nullable(),
+    /** `execution.ssh.identityFile` — key PATH or a running ssh-agent (D3). */
+    identityFile: z.string().nullable(),
+    /** `execution.ssh.knownHostsFile`; null = ssh's own default. */
+    knownHostsFile: z.string().nullable(),
+    /** `execution.ssh.strictHostKeys`; null = the backend's default. */
+    strictHostKeys: z.enum(['accept-new', 'yes']).nullable(),
+    /** `execution.ssh.remoteWorkdir`; null = the remote login directory (D8). */
+    remoteWorkdir: z.string().nullable(),
+  }),
   /** `kanban.*` — board WIP caps. Null = uncapped. */
   kanban: z.object({
     /** `kanban.maxInProgress` — running tasks across the whole board. */
@@ -2154,6 +2206,20 @@ const ConfigUpdateInput = z.object({
       cpu: z.number().positive().nullable().optional(),
       /** Positive integer megabytes. */
       diskMb: z.number().int().min(1).nullable().optional(),
+    })
+    .optional(),
+  /** `execution.ssh.*`. Per-field merge; null clears one key. Clearing `host`
+   *  turns the remote target off — the backend refuses without it. */
+  executionSsh: z
+    .object({
+      host: z.string().nullable().optional(),
+      user: z.string().nullable().optional(),
+      /** TCP port, 1–65535. */
+      port: z.number().int().min(1).max(65535).nullable().optional(),
+      identityFile: z.string().nullable().optional(),
+      knownHostsFile: z.string().nullable().optional(),
+      strictHostKeys: z.enum(['accept-new', 'yes']).nullable().optional(),
+      remoteWorkdir: z.string().nullable().optional(),
     })
     .optional(),
   /** `kanban.*` WIP caps. Per-field merge; null clears one key (uncapped). */
@@ -3350,6 +3416,26 @@ const admin = {
           toolCount: z.number().optional(),
         }),
       ),
+      /**
+       * The remote execution backend, when this deployment declares one
+       * (`execution.ssh.host`). Null when it does not — a fresh install has no
+       * remote target and must not be told anything is wrong with it.
+       *
+       * `resolved: false` is the boot-failure state
+       * (plan/phases/remote-execution-routing.md §6): the backend the posture
+       * NAMES could not be constructed in this process, so nothing routed to it
+       * will run. It is deliberately NOT a reachability answer — resolving a
+       * backend opens no connection, and this panel must not spend an ssh
+       * round trip on every status poll. Reachability is `execution.probeSsh`.
+       */
+      executionBackend: z
+        .object({
+          name: z.literal('ssh'),
+          resolved: z.boolean(),
+          /** Why resolution failed, verbatim. Null when it did not. */
+          error: z.string().nullable(),
+        })
+        .nullable(),
     }),
   ),
   rotateKey: oc
@@ -4778,6 +4864,99 @@ const backup = {
 };
 
 // ---------------------------------------------------------------------------
+// Execution — the deployment's single remote target
+// (plan/phases/remote-execution-routing.md §6, T7)
+//
+// One procedure, because the pane asks one question: can this machine reach the
+// host that `execution: ssh` personalities run their terminal on, right now?
+//
+// UNCACHED, and that word is the whole contract. The backend keeps a 60 s
+// success cache behind `isAvailable()` so a `run_code` invocation does not open
+// a connection per call; a `Test connection` button that read that cache would
+// answer about a moment the operator has already left — which is exactly the
+// moment they pressed the button to get past. So the service calls `probe()`,
+// which opens a real connection every time.
+//
+// `error` is the ssh client's own stderr, VERBATIM. `Permission denied
+// (publickey)` and `Connection timed out` need completely different fixes and
+// only the real line says which, so nothing here summarises, prettifies or
+// re-words it. (ssh prints auth refusals without its `ssh:` prefix, so those
+// arrive as a remote exit 255 rather than a transport error; `probe()` reports
+// them the same way, and so does this.)
+// ---------------------------------------------------------------------------
+
+const ExecutionProbeStateSchema = z.discriminatedUnion('state', [
+  /** No `execution.ssh.host`. NOT a failure — a fresh install has no target. */
+  z.object({ state: z.literal('not_configured') }),
+  z.object({
+    state: z.literal('reachable'),
+    /** `user@host:port`, as `formatSshTarget` renders it. */
+    target: z.string(),
+    /** Wall clock of the probe, milliseconds. */
+    latencyMs: z.number().int().nonnegative(),
+  }),
+  z.object({
+    state: z.literal('unreachable'),
+    target: z.string(),
+    /** The ssh client's stderr line, verbatim. */
+    error: z.string(),
+  }),
+  /**
+   * The backend could not be CONSTRUCTED — the boot failure of §6, seen from
+   * the surface that asked. Distinct from `unreachable`: no connection was
+   * attempted, so calling it unreachable would blame the network for a
+   * deployment fault.
+   */
+  z.object({
+    state: z.literal('backend_unresolved'),
+    target: z.string(),
+    error: z.string(),
+  }),
+  /**
+   * `execution.ssh.*` was edited after this process booted, so the backend the
+   * tools run on was built against a DIFFERENT target than config.yaml now
+   * names. The execution-backend registry memoises: the instance survives the
+   * edit, and nothing re-reads config until a restart.
+   *
+   * NEITHER host is contacted. Probing `activeTarget` would answer a question
+   * about a host the operator has just stopped pointing at; probing `target`
+   * would answer about a machine no tool will touch until a restart. Both are
+   * false reassurance, so the state IS the answer — and it is not a failure of
+   * either machine, which is why it carries no `error`.
+   */
+  z.object({
+    state: z.literal('stale_config'),
+    /** What `execution.ssh.*` names NOW. Not contacted. */
+    target: z.string(),
+    /**
+     * What the running backend was constructed with — and therefore what every
+     * `execution: ssh` personality's tools still execute on until a restart.
+     * The operationally important half.
+     */
+    activeTarget: z.string(),
+  }),
+]);
+
+const ExecutionProbeSshOutput = z.object({
+  /**
+   * Personality ids whose `execution` posture is `ssh` — the posture line under
+   * the header (`ssh — used by: remote-hands`). Present in EVERY state,
+   * including `not_configured`: a personality that declares a remote posture
+   * with no host configured is the one case an operator most needs to see.
+   */
+  usedBy: z.array(z.string()),
+  result: ExecutionProbeStateSchema,
+});
+
+export type ExecutionProbeResult = z.infer<typeof ExecutionProbeSshOutput>;
+export type ExecutionProbeState = z.infer<typeof ExecutionProbeStateSchema>;
+
+/** @experimental */
+const execution = {
+  probeSsh: oc.output(ExecutionProbeSshOutput),
+};
+
+// ---------------------------------------------------------------------------
 // Root contract — every namespace mounted under one symbol
 // ---------------------------------------------------------------------------
 
@@ -4824,6 +5003,7 @@ export const contract = {
   documents,
   recipes,
   backup,
+  execution,
 };
 
 export type Contract = typeof contract;

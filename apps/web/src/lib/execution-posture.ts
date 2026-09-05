@@ -59,6 +59,11 @@ export function postureBadge(posture: ExecutionPostureWire): PostureBadge {
  * (DESIGN.md App-UI rules). Derived from the posture the resolver produced.
  */
 export function postureWhy(posture: ExecutionPostureWire): string {
+  // The resolver's own refusal wording, verbatim. One canonical explanation:
+  // composing a second sentence about the same fact is how two surfaces end up
+  // disagreeing, and this one would otherwise keep saying tools "run on a
+  // remote ssh host" for a posture that refuses to run them at all.
+  if (posture.sshRefused) return posture.sshRefused.message;
   if (posture.dockerAbsent) {
     return 'This personality is configured to run its tools in Docker, but the Docker daemon is not reachable. Tools will not run until this is resolved.';
   }
@@ -69,7 +74,11 @@ export function postureWhy(posture: ExecutionPostureWire): string {
     case 'docker':
       return 'This personality has execution tools, so they run inside an isolated container with only its declared filesystem reach mounted.';
     case 'ssh':
-      return 'Execution tools run on a remote ssh host. The boundary is remote-host trust, not container mounts.';
+      // The target is already formatted by the resolver — printed as the
+      // operator configured it, never with a defaulted port added here.
+      return posture.sshTarget
+        ? `Execution tools run on ${posture.sshTarget}. The boundary is remote-host trust, not container mounts.`
+        : 'Execution tools run on a remote ssh host. The boundary is remote-host trust, not container mounts.';
     case 'local':
       return 'Execution tools run in this process on the host. There is no container boundary — filesystem and network limits are enforced in-app only.';
     case 'none':

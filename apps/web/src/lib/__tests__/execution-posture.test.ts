@@ -86,6 +86,28 @@ describe('postureWhy', () => {
       'container is the boundary',
     );
   });
+
+  it('names the ssh target the resolver formatted, adding no port of its own', () => {
+    expect(postureWhy(posture({ backend: 'ssh', sshTarget: 'deploy@build-01:22' }))).toContain(
+      'deploy@build-01:22',
+    );
+    // A host with no explicit port stays portless all the way to the screen.
+    expect(postureWhy(posture({ backend: 'ssh', sshTarget: 'build-01' }))).not.toContain(':22');
+  });
+
+  it("prefers the resolver's refusal wording over a second explanation of it", () => {
+    const message = 'ssh refused: constitution requires a sandbox';
+    const why = postureWhy(
+      posture({
+        backend: 'ssh',
+        sshTarget: 'deploy@build-01:22',
+        sshRefused: { reason: 'constitution-requires-sandbox', message },
+      }),
+    );
+    expect(why).toBe(message);
+    // And it must not still claim the tools run there.
+    expect(why).not.toContain('Execution tools run on');
+  });
 });
 
 describe('override control', () => {

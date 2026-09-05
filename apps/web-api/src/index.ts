@@ -77,6 +77,7 @@ import { DigestService } from './services/digest.service';
 import { createDiscoveredChatStore } from './services/discovered-chats';
 import { DocumentsService } from './services/documents.service';
 import { EvolverService } from './services/evolver.service';
+import { ExecutionService } from './services/execution.service';
 import { GoalsService } from './services/goals.service';
 import { KanbanService } from './services/kanban.service';
 import { KeysService } from './services/keys.service';
@@ -374,6 +375,19 @@ export interface CreateWebApiOptions {
   onTurnDone?: () => void;
   /** Tool registry for the tools.catalog RPC. */
   toolRegistry?: import('@ethosagent/types').ToolRegistry;
+  /**
+   * The LOOP's execution-backend registry (`infra.executionBackends` from
+   * `buildInfrastructure`). Backs Settings › Execution's `Test connection` and
+   * the admin panel's backend row.
+   *
+   * It must be the loop's own registry, not a fresh one: the registry memoises
+   * its instances, so `get('ssh')` on it IS the backend `compose-tools`
+   * resolved for the tools that run remotely. A probe against a second,
+   * identically configured backend would report on an object nothing executes
+   * on. Omitted → the probe answers `backend_unresolved` with the reason,
+   * which is the honest answer for a process that cannot reach one.
+   */
+  executionBackends?: import('@ethosagent/types').ExecutionBackendRegistry;
   /** Plugin loader for resolving plugin data-source paths (dashboard SQL queries). */
   pluginLoader?: import('@ethosagent/plugin-loader').PluginLoader;
   /** Path to the bundled system skills catalog directory. When set,
@@ -705,6 +719,9 @@ export function createWebApi(opts: CreateWebApiOptions): CreateWebApiResult {
     sessions: opts.sessionStore,
     storage,
     dataDir: opts.dataDir,
+    // `execution.ssh.*` for the character sheet's `## Execution` section — the
+    // sheet must name the remote target the compose path will actually use.
+    config: configRepo,
     // Reload this process's web-api registry from disk before each read so a
     // personality dropped/edited on disk (by another process, or the loop's
     // create path) is visible in the Personalities tab without a restart.
@@ -847,6 +864,14 @@ export function createWebApi(opts: CreateWebApiOptions): CreateWebApiResult {
     config: configRepo,
     secrets,
     ...(opts.cronScheduler ? { scheduler: opts.cronScheduler } : {}),
+  });
+  // Settings › Execution. Reads `execution.ssh.*` from the same config.yaml the
+  // rest of this app reads, and probes through the LOOP's backend registry when
+  // the composition root hands one in.
+  const executionService = new ExecutionService({
+    config: configRepo,
+    personalities: opts.personalities,
+    ...(opts.executionBackends ? { executionBackends: opts.executionBackends } : {}),
   });
   const toolSettingsService = new ToolSettingsService({
     config: configRepo,
@@ -1530,6 +1555,7 @@ export function createWebApi(opts: CreateWebApiOptions): CreateWebApiResult {
       namedSecrets: namedSecretsService,
       keys: keysService,
       backup: backupService,
+      execution: executionService,
       toolSettings: toolSettingsService,
       voice: voiceService,
       voiceLaneMode: voiceLaneModeService,

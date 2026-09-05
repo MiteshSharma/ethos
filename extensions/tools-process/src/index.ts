@@ -35,6 +35,15 @@ import { buildLogFiles, compilePatterns, watchLogs } from './watcher';
 // configurability; per-personality cap *values* are deliberately deferred.
 const DEFAULT_MAX_CONCURRENT = 8;
 const DEFAULT_WAIT_TIMEOUT_S = 30;
+
+/**
+ * Refusal text for the docker posture with no backend. A posture that refuses
+ * for a different reason (ssh, which does not route `process_*` in v1) passes
+ * its own message: this sentence names Docker and a sandbox, and neither word
+ * is true of a remote-execution refusal.
+ */
+const DEFAULT_HOST_EXEC_FORBIDDEN =
+  'Execution requires a Docker sandbox, but none is available and the constitution forbids running un-sandboxed on the host.';
 const WAIT_POLL_MS = 200;
 
 /**
@@ -125,6 +134,7 @@ function makeProcessStart(
   backend?: ExecutionBackend,
   personality?: PersonalityConfig,
   hostExecForbidden = false,
+  hostExecForbiddenMessage: string = DEFAULT_HOST_EXEC_FORBIDDEN,
 ): Tool {
   return {
     name: 'process_start',
@@ -160,16 +170,13 @@ function makeProcessStart(
 
       if (!command) return { ok: false, error: 'command is required', code: 'input_invalid' };
 
-      // Host execution forbidden: posture requires Docker but no backend is
-      // available AND the constitution forbids the host fallback. Refuse rather
-      // than silently spawn a detached host process (F1).
+      // Host execution forbidden: the posture requires a sandbox or a remote
+      // target that this tool is not routed to, and the host fallback is not
+      // permitted. Refuse rather than silently spawn a detached host process
+      // (F1) — under an ssh posture that would put a background process on the
+      // wrong machine entirely.
       if (!backend && hostExecForbidden) {
-        return {
-          ok: false,
-          error:
-            'Execution requires a Docker sandbox, but none is available and the constitution forbids running un-sandboxed on the host.',
-          code: 'not_available' as const,
-        };
+        return { ok: false, error: hostExecForbiddenMessage, code: 'not_available' as const };
       }
 
       const id = randomUUID();
@@ -621,8 +628,14 @@ export function createProcessTools(
     hookRegistry?: HookRegistry;
     backend?: ExecutionBackend;
     personality?: PersonalityConfig;
-    /** Refuse host spawn when the posture requires Docker but none is wired. */
+    /** Refuse host spawn when the posture requires a sandbox/remote but none is wired. */
     hostExecForbidden?: boolean;
+    /**
+     * Why the spawn is refused, in the posture's own words. Absent → the Docker
+     * sentence. The ssh posture passes its own: `process_*` is not routed over
+     * ssh in v1, which is a different fact from "no sandbox is available".
+     */
+    hostExecForbiddenMessage?: string;
   },
 ): Tool[] {
   // Guard the public option: a non-positive / non-integer capMax would either
@@ -644,6 +657,7 @@ export function createProcessTools(
       opts?.backend,
       opts?.personality,
       opts?.hostExecForbidden,
+      opts?.hostExecForbiddenMessage,
     ),
     makeProcessList(dataDir),
     makeProcessLogs(dataDir),

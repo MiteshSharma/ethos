@@ -29,6 +29,7 @@ import { digestRouter } from './digest';
 import { documentsRouter } from './documents';
 import { evalRouter } from './eval';
 import { evolverRouter } from './evolver';
+import { executionRouter } from './execution';
 import { goalsRouter } from './goals';
 import { kanbanRouter } from './kanban';
 import { keysRouter } from './keys';
@@ -116,6 +117,7 @@ export const apiRouter = {
   documents: documentsRouter,
   recipes: recipesRouter,
   backup: backupRouter,
+  execution: executionRouter,
 };
 
 export type ApiRouter = typeof apiRouter;

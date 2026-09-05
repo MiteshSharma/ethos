@@ -12,6 +12,7 @@ export function compose(
     backend?: ExecutionBackend;
     personality?: PersonalityConfig;
     hostExecForbidden?: boolean;
+    hostExecForbiddenMessage?: string;
   },
 ): CodeToolsCompose {
   return {
@@ -19,6 +20,7 @@ export function compose(
       backend: deps.backend,
       personality: deps.personality,
       hostExecForbidden: deps.hostExecForbidden,
+      hostExecForbiddenMessage: deps.hostExecForbiddenMessage,
     }),
   };
 }
