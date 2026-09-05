@@ -93,10 +93,15 @@ export async function runBackup(argv: string[]): Promise<void> {
   // into. `serve`/`gateway`/`status` are right to refuse to start on a broken
   // config; this is the get-my-data-out command, and a broken config is
   // precisely when someone needs it to work. So a config that will not parse
-  // degrades to the default directory and says so — it never refuses.
+  // degrades to the default directory and says so.
   //
-  // Deliberately narrow: only the config READ is caught. Everything below it
-  // still fails the way it always did.
+  // Deliberately narrow, and narrower than the intent above: only THIS read is
+  // caught. The command still refuses on a config that will not parse, because
+  // `getSecretsResolver()` below reaches `readRawConfig` a SECOND time —
+  // `initSecrets` in `apps/ethos/src/wiring.ts`, uncaught — and `readRawConfig`
+  // is not memoised, so the same parse error throws again there. Making
+  // degrade-and-continue actually hold means catching that call too; that is a
+  // behaviour change and is not made here.
   let config: EthosConfig | null = null;
   let configFallback: string | undefined;
   try {
@@ -154,6 +159,7 @@ export async function runBackup(argv: string[]): Promise<void> {
   }
 
   const command = bootstrapCommand(result.path, result.scopes);
+  const restore = restoreCommand(result.path);
 
   if (jsonMode) {
     writeJson({
@@ -164,9 +170,13 @@ export async function runBackup(argv: string[]): Promise<void> {
       bytes: result.bytes,
       createdAt: result.manifest.createdAt,
       unclassifiedDatabases: result.unclassifiedDatabases,
+      skippedFiles: result.skippedFiles,
       sensitive: result.scopes.includes('state'),
       ...(configFallback ? { configFallback } : {}),
-      ...(bootstrap ? { bootstrap: command } : {}),
+      // Both printed lines that embed the archive path, so a caller reading the
+      // JSON never has to re-quote it. The two constant lines (the bare
+      // installer and `ethos doctor`) carry no path and stay printed-only.
+      ...(bootstrap ? { bootstrapRestore: restore, bootstrap: command } : {}),
     });
     return;
   }
@@ -187,9 +197,24 @@ export async function runBackup(argv: string[]): Promise<void> {
   for (const db of result.unclassifiedDatabases) {
     console.log(`  ⚠ ${db} is a database no scope owns — it was NOT archived.`);
   }
+  // A file the writer could not encode is dropped rather than fatal (one bad
+  // name must not cost the whole archive), so this loop is the only thing
+  // standing between that drop and a silent one. `fileCount` above already
+  // excludes them, so the two lines cannot disagree about what is in there.
+  for (const skip of result.skippedFiles) {
+    console.log(`  ⚠ ${skip.path} was NOT archived — ${skip.reason}.`);
+  }
   if (bootstrap) {
     console.log('');
-    console.log('  To restore this backup on a new machine:');
+    console.log('  To restore this backup on a new machine, copy the archive there, then:');
+    console.log('');
+    console.log(`    ${restore}`);
+    console.log('    ethos doctor');
+    console.log('');
+    console.log('  That installs Ethos, verifies the archive, and imports it in one step.');
+    console.log('  A piped install cannot prompt for secrets — stdin is the installer itself —');
+    console.log('  so it prints the `ethos secrets set` lines to run afterwards. When you want');
+    console.log('  those prompts, or only some of the scopes, install and import separately:');
     console.log('');
     console.log('    curl -fsSL https://ethosagent.ai/install.sh | bash');
     console.log(`    ${command}`);
@@ -207,6 +232,15 @@ function defaultArchiveName(): string {
  * Wrap one argument in POSIX single quotes, ending and reopening the quote
  * around every embedded `'`. Inside single quotes a shell expands nothing, so
  * spaces, `;`, `&`, backticks and `$(…)` are all literal.
+ *
+ * The same four lines live in five other places —
+ * `packages/wiring/src/backup/secrets-manifest.ts`,
+ * `apps/ethos/src/commands/personality-export.ts`,
+ * `apps/ethos/src/lib/tui-capabilities.ts`, `extensions/cron/src/index.ts` and
+ * `apps/web`'s AddMcpModal — six copies in all. Copied rather than shared: each
+ * surface keeps its own module-private copy. The index is spelled out in full
+ * deliberately: an incomplete one is what makes the consolidation follow-up
+ * impossible to scope.
  */
 function shellQuote(arg: string): string {
   return `'${arg.replaceAll("'", `'\\''`)}'`;
@@ -225,6 +259,23 @@ function shellQuote(arg: string): string {
  */
 function bootstrapCommand(archivePath: string, scopes: readonly ScopeName[]): string {
   return `ethos import ${shellQuote(archivePath)} --scope ${scopes.join(',')} --secrets prompt`;
+}
+
+/**
+ * The same restore in one step, via `--restore` in `docs/static/install.sh`:
+ * install, `ethos import --dry-run` to verify the archive, then the real
+ * import. It is the normal case, but it cannot replace `bootstrapCommand` —
+ * the installer refuses `--restore` alongside `--setup`, takes a local path
+ * and not a URL, and under `curl … | bash` stdin is the script, so it never
+ * reaches `--secrets prompt`. It also imports the whole archive, with no
+ * `--scope`. The two-step form is what an operator falls back to for any of
+ * those, so both are printed.
+ *
+ * Quoted for the same reason `bootstrapCommand` is: the path is the operator's
+ * (`--out`) and this line is written to be pasted into a shell.
+ */
+function restoreCommand(archivePath: string): string {
+  return `curl -fsSL https://ethosagent.ai/install.sh | bash -s -- --restore ${shellQuote(archivePath)}`;
 }
 
 /**

@@ -4,7 +4,7 @@ description: "Error catalogue for Ethos — common failure modes by symptom, wit
 kind: reference
 audience: shared
 slug: troubleshooting
-updated: 2026-08-14
+updated: 2026-09-05
 ---
 
 When something goes wrong, the CLI prints a three-line block: a code, a one-line cause, and a one-line action. Search this page for the code or the symptom you saw. Each entry follows the same shape: **Cause**, **Fix**, **Prevent** (when applicable).
@@ -343,8 +343,8 @@ The full list of registered codes. Every code shipped in `@ethosagent/types` `Et
 | `PLUGIN_CONTRACT_INCOMPATIBLE` | Plugin declares an unsupported `pluginContractMajor`. | Upgrade the plugin or CLI per the migration guide. |
 | `PLUGIN_INSTALL_FAILED` | The install needs a recorded capability grant and stdin is not a TTY. | Install interactively, or pass `--yes` to record the grant. |
 | `TEAM_MANIFEST_INVALID` | `team.yaml` failed schema validation. | Fix the named field and re-run `ethos team start`. |
-| `IMPORT_BLOCKED` | A backup archive entry escapes the data dir or is not a regular file. | Inspect the archive — it may be corrupted or malicious. |
-| `IMPORT_NEWER_SCHEMA` | A SQLite store on disk was written by a newer Ethos than the one opening it. | Upgrade Ethos to a build that understands this schema, then retry. |
+| `IMPORT_BLOCKED` | A restore was refused: an archive entry escapes the data dir or is not a regular file, the archive failed its manifest checksum, or a database it would replace is open in another process. | Read the printed cause. For a checksum failure, use a different archive. For an in-use database, stop `ethos chat` / `serve` / `gateway` / the desktop app and retry. See [Back up and restore](using/how-to/back-up-and-restore.md). |
+| `IMPORT_NEWER_SCHEMA` | A SQLite store on disk, or a backup archive, was written by a newer Ethos than the one reading it. | Upgrade Ethos to a build that understands it, then retry. |
 | `MEMORY_CONFLICT` | A memory entry changed on disk between your read and your write. | Re-read the entry and retry the write. |
 | `UNAUTHORIZED` | A web API request lacks valid auth. | Sign in again from the web UI. |
 | `FORBIDDEN` | Authenticated, but the caller may not perform this action. | Use an account with the required role. |

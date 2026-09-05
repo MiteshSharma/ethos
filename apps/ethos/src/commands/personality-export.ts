@@ -251,10 +251,13 @@ function scanMcpForStrippedServers(personalityDir: string): string[] {
  * `- key:`, `- server:`, `package:` and `version:` lines beside them are NOT
  * quoted — they are data, not commands.
  *
- * The same four lines live in `packages/wiring/src/backup/secrets-manifest.ts`,
- * `apps/ethos/src/commands/backup.ts`, `extensions/cron/src/index.ts` and
- * `apps/web`'s AddMcpModal. Copied rather than imported: backup.ts keeps its
- * own module-private.
+ * The same four lines live in five other places —
+ * `packages/wiring/src/backup/secrets-manifest.ts`,
+ * `apps/ethos/src/commands/backup.ts`, `apps/ethos/src/lib/tui-capabilities.ts`,
+ * `extensions/cron/src/index.ts` and `apps/web`'s AddMcpModal — six copies in
+ * all. Copied rather than imported: each surface keeps its own module-private
+ * copy. The index is spelled out in full deliberately: an incomplete one is
+ * what makes the consolidation follow-up impossible to scope.
  */
 function shellQuote(arg: string): string {
   return `'${arg.replaceAll("'", `'\\''`)}'`;

@@ -10,6 +10,7 @@ import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Readable } from 'node:stream';
+import type { CronJob } from '@ethosagent/cron';
 import Database from '@ethosagent/sqlite';
 import { InMemorySecretsResolver } from '@ethosagent/storage-fs';
 import {
@@ -19,7 +20,7 @@ import {
   prepareSecrets,
 } from '@ethosagent/wiring';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import { getSecretsResolver } from '../../wiring';
+import { buildSystemTaskHandlers, getSecretsResolver } from '../../wiring';
 import {
   defaultBackupDir,
   doctorCommand,
@@ -122,6 +123,34 @@ async function backupTo(argv: string[]): Promise<string> {
   return archive;
 }
 
+/**
+ * Decode ONE POSIX single-quoted argument back to its literal text, refusing
+ * anything a shell would not read as a single word: a character outside the
+ * quotes, an unterminated quote, or junk between two quoted runs. A value that
+ * survives this round trip cannot have broken out of the quoting.
+ *
+ * Module-scoped because both paste lines this file guards — the bootstrap
+ * restore command and the personality doctor line — are quoted by the same
+ * `shellQuote`, and so are checked the same way.
+ */
+function decodeSingleQuoted(arg: string): string {
+  let text = '';
+  let i = 0;
+  while (i < arg.length) {
+    if (arg[i] !== "'") throw new Error(`unquoted text at ${i}: ${arg}`);
+    const close = arg.indexOf("'", i + 1);
+    if (close < 0) throw new Error(`unterminated quote: ${arg}`);
+    text += arg.slice(i + 1, close);
+    i = close + 1;
+    if (i < arg.length) {
+      if (arg.slice(i, i + 2) !== "\\'") throw new Error(`junk between quotes: ${arg}`);
+      text += "'";
+      i += 2;
+    }
+  }
+  return text;
+}
+
 describe('ethos backup — flags', () => {
   it('defaults to the backups directory next to the data dir', async () => {
     await seedDataDir(stateDir);
@@ -197,6 +226,46 @@ describe('ethos backup — flags', () => {
     );
   });
 
+  // `--restore` in docs/static/install.sh does install → verify → import in one
+  // step, so the CLI's own migration instruction has to name the flag that was
+  // built for it. It does NOT replace the explicit form: the installer refuses
+  // `--restore` with `--setup`, takes a local path only, imports every scope,
+  // and under `curl … | bash` stdin is the script, so it never reaches
+  // `--secrets prompt`. Both forms are printed, and both are pinned here.
+  it('--bootstrap leads with the one-step installer restore', async () => {
+    await seedDataDir(stateDir);
+    const archive = await backupTo(['--bootstrap']);
+    expect(joined()).toContain(
+      `curl -fsSL https://ethosagent.ai/install.sh | bash -s -- --restore '${archive}'`,
+    );
+  });
+
+  it('--bootstrap still prints the two-step form in full', async () => {
+    await seedDataDir(stateDir);
+    const archive = await backupTo(['--bootstrap']);
+    const text = joined();
+    // The bare installer — the trailing newline is what tells it apart from the
+    // `--restore` line, which continues with ` -s -- …` on the same line.
+    expect(text).toContain('curl -fsSL https://ethosagent.ai/install.sh | bash\n');
+    expect(text).toContain(`ethos import '${archive}' --scope identity,state --secrets prompt`);
+    expect(text).toContain('ethos doctor');
+    // And it says when the short path does not apply, so it is a fallback an
+    // operator can choose rather than a leftover.
+    expect(text).toContain('prompt for secrets');
+  });
+
+  it('--bootstrap --json carries the one-step line alongside the two-step one', async () => {
+    await seedDataDir(stateDir);
+    const archive = await backupTo(['--bootstrap', '--json']);
+    const json = lastJson();
+    expect(json.bootstrapRestore).toBe(
+      `curl -fsSL https://ethosagent.ai/install.sh | bash -s -- --restore '${archive}'`,
+    );
+    expect(json.bootstrap).toBe(
+      `ethos import '${archive}' --scope identity,state --secrets prompt`,
+    );
+  });
+
   // The bootstrap line is the one output an operator is told to PASTE into a
   // shell, on a machine that has nothing on it yet, and `--out` is theirs to
   // choose. Unquoted, a space breaks it and a metacharacter turns it into a
@@ -229,6 +298,25 @@ describe('ethos backup — flags', () => {
       // The escape is the POSIX one, and the path is never left bare.
       expect(line).toContain(`mitesh'\\''s out.tar.gz`);
       expect(line).not.toContain(`ethos import ${archive}`);
+    });
+
+    // The one-step line embeds the same operator-chosen path, so it is held to
+    // the same standard — and decoded back rather than compared against an
+    // expected string, so what is asserted is "a shell reads this as exactly
+    // one word", not "it is spelled how I guessed".
+    const RESTORE_PREFIX = 'curl -fsSL https://ethosagent.ai/install.sh | bash -s -- --restore ';
+
+    it.each([
+      ['a space', 'my backups.tar.gz'],
+      ['an embedded single quote', "mitesh's backup.tar.gz"],
+    ])('the one-step restore line survives %s', async (_label, name) => {
+      await seedDataDir(stateDir);
+      const archive = join(stateDir, name);
+      await runBackup(['--out', archive, '--bootstrap', '--json']);
+      const line = String(lastJson().bootstrapRestore);
+      expect(line.startsWith(RESTORE_PREFIX)).toBe(true);
+      expect(decodeSingleQuoted(line.slice(RESTORE_PREFIX.length))).toBe(archive);
+      expect(line).not.toBe(`${RESTORE_PREFIX}${archive}`);
     });
   });
 });
@@ -334,6 +422,86 @@ describe('ethos backup — backup.dir', () => {
     await seedDataDir(stateDir);
     await runBackup(['--json']);
     expect(String(lastJson().path).startsWith(join(stateDir, 'backups'))).toBe(true);
+  });
+});
+
+// A file the writer cannot encode is skipped rather than fatal — one bad name
+// must not cost the whole archive. That trade is only honest if the drop is
+// reported: an operator who is never told has a backup that is silently short.
+describe('ethos backup — a file that could not be archived', () => {
+  // A backslash is legal on POSIX and is a path separator to a Windows
+  // extractor, so the file cannot round-trip and the writer skips it.
+  const UNARCHIVABLE = 'skills/greet/back\\slash.md';
+
+  it('names the file and the reason, and does not count it as archived', async () => {
+    await seedDataDir(stateDir);
+    await writeFile(join(stateDir, UNARCHIVABLE), 'cannot round-trip\n');
+    await runBackup(['--json']);
+    const json = lastJson();
+    expect(json.ok).toBe(true);
+    expect(json.skippedFiles).toEqual([
+      {
+        path: UNARCHIVABLE,
+        reason:
+          'the name holds a backslash, which a restore must refuse as a Windows path separator',
+      },
+    ]);
+  });
+
+  it('warns about it on the human path', async () => {
+    await seedDataDir(stateDir);
+    await writeFile(join(stateDir, UNARCHIVABLE), 'cannot round-trip\n');
+    await runBackup([]);
+    expect(process.exitCode).toBeUndefined();
+    expect(joined()).toContain(`⚠ ${UNARCHIVABLE} was NOT archived`);
+    expect(joined()).toContain('which a restore must refuse as a Windows path separator');
+  });
+
+  it('claims nothing when every file was archived', async () => {
+    await seedDataDir(stateDir);
+    await runBackup(['--json']);
+    expect(lastJson().skippedFiles).toEqual([]);
+    expect(joined()).not.toContain('was NOT archived');
+  });
+
+  // The scheduled half, end to end through the reader that matters. This
+  // handler's returned string is persisted verbatim to
+  // `~/.ethos/cron/output/backup/<ts>.md`, and that file is the ONLY surface a
+  // scheduled run has: the seeded `backup` job has no `origin`, and nothing
+  // reads `lastError`. Asserting the shape in `packages/wiring` is not enough —
+  // it is this call that decides whether the skip ever leaves the process.
+  describe('the scheduled job', () => {
+    /** Everything the handler reads off config; `backup.dir` defaults beside the data dir. */
+    const CONFIG = {
+      provider: 'anthropic',
+      model: 'm',
+      apiKey: 'sk',
+      personality: 'demo',
+    } as const;
+    const JOB = { id: 'backup', name: 'Backup', systemTask: 'backup' } as unknown as CronJob;
+
+    it('carries the skip into the cron output body, not as a clean success', async () => {
+      await seedDataDir(stateDir);
+      await writeFile(join(stateDir, UNARCHIVABLE), 'cannot round-trip\n');
+      const handler = buildSystemTaskHandlers(CONFIG).backup;
+      if (!handler) throw new Error('no backup system-task handler');
+
+      const { output } = await handler(JOB);
+
+      expect(output).toContain('Backup INCOMPLETE — 1 file(s) could not be archived');
+      expect(output).toContain(`⚠ ${UNARCHIVABLE} — the name holds a backslash`);
+      expect(output).toContain('Backup written to ');
+    });
+
+    it('reads as an unqualified success when nothing was skipped', async () => {
+      await seedDataDir(stateDir);
+      const handler = buildSystemTaskHandlers(CONFIG).backup;
+      if (!handler) throw new Error('no backup system-task handler');
+
+      const { output } = await handler(JOB);
+
+      expect(output).toMatch(/^Backup written to .*scopes: identity\+state\)$/);
+    });
   });
 });
 
@@ -949,30 +1117,6 @@ describe('quoted fill_with hints survive the fill round trip', () => {
 // line stays a single safe word for any caller that reaches the print without
 // having come through that gate.
 describe('ethos personality import — the doctor paste line', () => {
-  /**
-   * Decode ONE POSIX single-quoted argument back to its literal text, refusing
-   * anything a shell would not read as a single word: a character outside the
-   * quotes, an unterminated quote, or junk between two quoted runs. An id that
-   * survives this round trip cannot have broken out of the quoting.
-   */
-  function decodeSingleQuoted(arg: string): string {
-    let text = '';
-    let i = 0;
-    while (i < arg.length) {
-      if (arg[i] !== "'") throw new Error(`unquoted text at ${i}: ${arg}`);
-      const close = arg.indexOf("'", i + 1);
-      if (close < 0) throw new Error(`unterminated quote: ${arg}`);
-      text += arg.slice(i + 1, close);
-      i = close + 1;
-      if (i < arg.length) {
-        if (arg.slice(i, i + 2) !== "\\'") throw new Error(`junk between quotes: ${arg}`);
-        text += "'";
-        i += 2;
-      }
-    }
-    return text;
-  }
-
   const PREFIX = 'ethos personality doctor ';
 
   it.each([

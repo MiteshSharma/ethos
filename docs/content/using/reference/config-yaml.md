@@ -4,7 +4,7 @@ description: "Every field in ~/.ethos/config.yaml — provider, model, channel t
 kind: reference
 audience: user
 slug: config-yaml
-updated: 2026-08-22
+updated: 2026-09-05
 ---
 
 `~/.ethos/config.yaml` is a flat `key: value` file. Dotted keys (e.g. `retention.messages`, `providers.0.provider`) are how nested structures appear on disk — there is no indentation-based nesting. The parser ignores quotes around values.
@@ -394,6 +394,34 @@ logs.rotation.maxBytes: 20971520
 logs.rotation.maxFiles: 10
 logs.rotation.enabled: true
 ```
+
+## backup.* {#backup}
+
+Scheduled local snapshots of `~/.ethos/`. On by default: a serving process (`ethos serve`, `ethos gateway start`, `ethos boot`) seeds a `backup` cron job at first start and writes an `identity,state` archive at 04:00 local every night, keeping the newest seven. Nothing here uploads anywhere — the archive stays on this machine.
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `backup.enabled` | boolean | `true` | Set to `false` to remove the scheduled job. Any value other than the literal `true` reads as `false`; the job is created, rescheduled, or removed to match on every serving-process start. |
+| `backup.cron` | cron expression | `0 4 * * *` | When the scheduled backup fires, in the host's local time. Editing it patches the existing job rather than creating a second one. |
+| `backup.scope` | comma-separated list | `identity,state` | Which scopes the scheduled run archives. Values: `identity` — config, `mcp.json`, `MEMORY.md`, `USER.md`, `cron/jobs.json`, `personalities/`; `state` — the durable databases plus `skills/`, `teams/`, `users/`, `digests/`, `cron/output/` and plugin pins; `telemetry` — `observability.db`, opt-in. An unknown name fails that backup run, naming it, and leaves the other system jobs alone. |
+| `backup.keep` | integer ≥ 1 | `7` | How many scheduled archives survive rotation, oldest deleted first. A non-integer or `0` is a config parse error. Rotation only ever deletes files named `ethos-scheduled-<timestamp>.tar.gz` — a manual `ethos backup` archive parked in the same directory is never swept up. |
+| `backup.dir` | path | `<ethosDir>/backups` | Where archives are written and rotated. A relative value resolves under the data directory, not the process working directory. |
+
+```yaml
+backup.enabled: true
+backup.cron: 0 4 * * *
+backup.scope: identity,state
+backup.keep: 7
+backup.dir: /mnt/snapshots/ethos
+```
+
+Notes:
+
+- `${ETHOS_HOME}` is not a token this file expands. The `<ethosDir>/backups` default is computed in code by `backupDirectory` in [`packages/wiring/src/backup-schedule.ts`](https://github.com/ethosagent/ethos/blob/main/packages/wiring/src/backup-schedule.ts); write a literal path if you want one.
+- The schedule only fires while a serving process is running. `ethos chat` alone runs no cron.
+- A `state` archive holds conversation history — sessions, session cards, memory. Treat the backup directory as sensitive as `~/.ethos/` itself.
+- Secrets are never archived. `secrets/`, `keys.json`, `web-token` and MCP OAuth token files are excluded; the archive lists what is missing so a restore can prompt for it.
+- See [Back up and restore an Ethos install](../how-to/back-up-and-restore.md) for these keys in practice, and [`ethos backup`](./cli.md#ethos-backup) for the manual command.
 
 ## security.trusted_github_orgs {#security-trusted-github-orgs}
 
@@ -914,11 +942,12 @@ Managed by `ethos set personality <id>` / `ethos set team <name>`. The runtime w
 
 `~/.ethos/config.yaml` is written by `ethos setup` and `ethos personality set`. The companion `~/.ethos/keys.json` (chmod 600) holds the rotation pool — manage it through `ethos keys`, not by hand.
 
-The directory can be relocated with the `ETHOS_DIR` env var.
+The directory can be relocated with the `ETHOS_STATE_DIR` env var, read by `ethosDir()` in [`packages/config/src/index.ts`](https://github.com/ethosagent/ethos/blob/main/packages/config/src/index.ts).
 
 ## See also {#see-also}
 
 - [CLI reference](./cli.md) — every `ethos` subcommand and the flags that override what config.yaml sets
+- [Back up and restore an Ethos install](../how-to/back-up-and-restore.md) — the `backup.*` keys in practice, plus the one-command move to a new machine
 - [Personality config reference](./personality-yaml.md) — the per-personality `config.yaml` and `toolset.yaml` (different file, different schema)
 - [How to configure providers](../how-to/configure-providers.md) — task-shaped recipe for switching between Anthropic, OpenAI, OpenRouter, and Ollama
 - [Run multiple Telegram bots from one process](../how-to/run-multi-bot-telegram.md) — `telegram.bots` list shape in practice
