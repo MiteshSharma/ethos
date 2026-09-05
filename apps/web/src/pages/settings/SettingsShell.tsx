@@ -208,6 +208,13 @@ export function SettingsShell() {
           maxPerDay: configQuery.data.memoryCapture.maxPerDay,
         },
         background: { ...configQuery.data.background },
+        backup: {
+          enabled: configQuery.data.backup.enabled,
+          cron: configQuery.data.backup.cron ?? '',
+          scope: configQuery.data.backup.scope,
+          keep: configQuery.data.backup.keep,
+          dir: configQuery.data.backup.dir ?? '',
+        },
         nightlyPass: { ...configQuery.data.nightlyPass },
         weeklyDigest: { ...configQuery.data.weeklyDigest },
         modelCatalog: {

@@ -91,8 +91,16 @@ describe('web-api layering (Phase 26 Done-when #24)', () => {
     // namespace file with 4-6 procedures + imports + types lands well under
     // 120. If a file blows past this, the implementer probably leaked
     // service-layer logic into the handler.
+    //
+    // `context.ts` is exempt from the LINE COUNT (only): it declares no
+    // handler at all — it is the shared `RpcContext` type plus the `os`
+    // builder, and it grows by exactly one field per service in the app. A cap
+    // there measures how many services exist, not whether a handler is fat,
+    // and would eventually fail on an unrelated service being added. It is
+    // still subject to every other check in this file.
     const fat: Array<{ file: string; lines: number }> = [];
     for (const file of listTs(RPC_DIR)) {
+      if (relative(RPC_DIR, file) === 'context.ts') continue;
       const lines = readFileSync(file, 'utf-8').split('\n').length;
       if (lines > 120) fat.push({ file: relative(SRC_ROOT, file), lines });
     }

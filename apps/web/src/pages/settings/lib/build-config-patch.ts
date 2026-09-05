@@ -419,6 +419,13 @@ export function buildConfigPatch(
       heartbeatMs: values.background.heartbeatMs ?? null,
       retentionDays: values.background.retentionDays ?? null,
     },
+    backup: {
+      enabled: values.backup.enabled,
+      cron: strOrNull(values.backup.cron),
+      scope: values.backup.scope,
+      keep: values.backup.keep ?? null,
+      dir: strOrNull(values.backup.dir),
+    },
     nightlyPass: {
       enabled: values.nightlyPass.enabled,
       cron: strOrNull(values.nightlyPass.cron),

@@ -279,6 +279,7 @@ describe('contract router', () => {
       'activity',
       'admin',
       'apiKeys',
+      'backup',
       'batch',
       'chat',
       'clarify',

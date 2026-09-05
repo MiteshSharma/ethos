@@ -334,6 +334,7 @@ function baseVoiceConfig(): ConfigGetData {
     webhooks: {},
     quickCommands: {},
     channelToolsets: {},
+    backup: { enabled: true, cron: null, scope: [], keep: null, dir: null },
     nightlyPass: { enabled: false, cron: '0 3 * * *' },
     weeklyDigest: { enabled: false, cron: '0 9 * * 1', recipients: [] },
     modelCatalog: { enabled: true, url: null, ttlHours: 24 },

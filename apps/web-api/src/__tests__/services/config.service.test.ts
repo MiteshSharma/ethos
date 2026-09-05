@@ -490,6 +490,11 @@ describe('ConfigService — settings passthrough groups', () => {
     expect(r.displayResumeHint).toBe(true);
     expect(r.displayResumeRecapTurns).toBe(3);
     expect(r.verbose).toBe(false);
+    // Raw, not resolved: the built-in cron/keep/scopes/dir come from
+    // `resolveBackupSettings` in `@ethosagent/wiring` and are reported by
+    // `backup.status`. `enabled` is the exception — a Switch has no third
+    // state, and an absent key means ON.
+    expect(r.backup).toEqual({ enabled: true, cron: null, scope: [], keep: null, dir: null });
     expect(r.nightlyPass).toEqual({ enabled: false, cron: '0 3 * * *' });
     expect(r.weeklyDigest).toEqual({ enabled: false, cron: '0 9 * * 1', recipients: [] });
     expect(r.modelCatalog).toEqual({ enabled: true, url: null, ttlHours: 24 });
@@ -1294,6 +1299,134 @@ describe('ConfigService — settings passthrough groups', () => {
     expect(r.auxCompression.model).toBe('claude-haiku-4-5');
     expect(r.auxCompression.apiKeyPreview).toBe('sk-…9999');
     expect(JSON.stringify(r)).not.toContain('compkey');
+  });
+
+  it('round-trips every backup.* field through config.yaml and back', async () => {
+    await writeBase();
+    await service.update({
+      backup: {
+        enabled: false,
+        cron: '30 2 * * *',
+        scope: ['identity'],
+        keep: 3,
+        dir: '/mnt/snapshots',
+      },
+    });
+
+    const written = await storage.read(join(DATA, 'config.yaml'));
+    expect(written).toContain('backup.enabled: false');
+    expect(written).toContain('backup.cron: "30 2 * * *"');
+    expect(written).toContain('backup.scope: identity');
+    expect(written).toContain('backup.keep: 3');
+    expect(written).toContain('backup.dir: /mnt/snapshots');
+
+    expect((await service.get()).backup).toEqual({
+      enabled: false,
+      cron: '30 2 * * *',
+      scope: ['identity'],
+      keep: 3,
+      dir: '/mnt/snapshots',
+    });
+
+    // The assertion that matters: the CLI loader builds the same `backup`
+    // block from what the web wrote. `@ethosagent/config` is the shape's one
+    // source of truth; this layer only transports it.
+    const prev = process.env.ETHOS_STATE_DIR;
+    process.env.ETHOS_STATE_DIR = DATA;
+    try {
+      const loaded = await loadConfigStrict(storage, secrets);
+      expect(loaded?.parseErrors).toEqual([]);
+      expect(loaded?.config.backup).toEqual({
+        enabled: false,
+        cron: '30 2 * * *',
+        scope: ['identity'],
+        keep: 3,
+        dir: '/mnt/snapshots',
+      });
+    } finally {
+      if (prev === undefined) delete process.env.ETHOS_STATE_DIR;
+      else process.env.ETHOS_STATE_DIR = prev;
+    }
+  });
+
+  it('clears a backup.* key rather than pinning a computed default', async () => {
+    await writeBase();
+    await service.update({ backup: { cron: '30 2 * * *', dir: '/mnt/snapshots', keep: 3 } });
+    await service.update({ backup: { cron: null, dir: null, keep: null, scope: [] } });
+
+    const written = await storage.read(join(DATA, 'config.yaml'));
+    expect(written).not.toContain('backup.cron');
+    expect(written).not.toContain('backup.dir');
+    expect(written).not.toContain('backup.keep');
+    const r = await service.get();
+    expect(r.backup).toEqual({ enabled: true, cron: null, scope: [], keep: null, dir: null });
+  });
+
+  it('refuses an out-of-range backup.keep before it can be persisted', async () => {
+    await writeBase();
+    // The bound mirrors `buildBackupConfig` in packages/config, which THROWS
+    // rather than dropping: a `backup.keep: 0` that reaches config.yaml makes
+    // it unloadable everywhere, so the refusal has to land before the write.
+    // A direct `config.update` caller has no `InputNumber min={1}` in front of
+    // it. Same error shape as the neighbouring numeric bounds.
+    await expect(service.update({ backup: { keep: 0 } })).rejects.toMatchObject({
+      code: 'CONFIG_INVALID',
+      cause: 'backup.keep must be an integer >= 1',
+    });
+    await expect(service.update({ backup: { keep: -1 } })).rejects.toMatchObject({
+      code: 'CONFIG_INVALID',
+    });
+    await expect(service.update({ backup: { keep: 1.5 } })).rejects.toMatchObject({
+      code: 'CONFIG_INVALID',
+    });
+    // Past the safe-integer range, which `Number.isSafeInteger` also rejects.
+    await expect(
+      service.update({ backup: { keep: Number.MAX_SAFE_INTEGER + 2 } }),
+    ).rejects.toMatchObject({ code: 'CONFIG_INVALID' });
+
+    // Nothing was persisted by the rejected updates, and a valid value passes.
+    expect(await storage.read(join(DATA, 'config.yaml'))).not.toContain('backup.keep');
+    await service.update({ backup: { keep: 1 } });
+    expect(await storage.read(join(DATA, 'config.yaml'))).toContain('backup.keep: 1');
+  });
+
+  it('leaves packages/config owning the rule for a hand-edited backup.keep', async () => {
+    // The web-layer bound is a mirror, not a replacement. A `backup.keep: 0`
+    // that never went through this layer is still refused by the loader, and
+    // that is the error the operator sees — this is the failure the mirror
+    // exists to keep the web layer from causing.
+    await writeBase(['backup.keep: 0']);
+    const prev = process.env.ETHOS_STATE_DIR;
+    process.env.ETHOS_STATE_DIR = DATA;
+    try {
+      await expect(loadConfigStrict(storage, secrets)).rejects.toThrow(
+        'Invalid backup.keep "0". Expected a positive integer.',
+      );
+    } finally {
+      if (prev === undefined) delete process.env.ETHOS_STATE_DIR;
+      else process.env.ETHOS_STATE_DIR = prev;
+    }
+  });
+
+  it('carries an unknown backup.scope name through — parseScopes judges it at run time', async () => {
+    await writeBase();
+    await service.update({ backup: { scope: ['identity', 'nonsense'] } });
+    expect(await storage.read(join(DATA, 'config.yaml'))).toContain(
+      'backup.scope: identity,nonsense',
+    );
+
+    // `packages/config` deliberately does NOT validate the roster (it cannot
+    // import `@ethosagent/wiring`), so the config still loads and the name is
+    // refused where the backup runs.
+    const prev = process.env.ETHOS_STATE_DIR;
+    process.env.ETHOS_STATE_DIR = DATA;
+    try {
+      const loaded = await loadConfigStrict(storage, secrets);
+      expect(loaded?.config.backup?.scope).toEqual(['identity', 'nonsense']);
+    } finally {
+      if (prev === undefined) delete process.env.ETHOS_STATE_DIR;
+      else process.env.ETHOS_STATE_DIR = prev;
+    }
   });
 
   it('rejects invalid values with CONFIG_INVALID', async () => {

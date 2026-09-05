@@ -1200,6 +1200,44 @@ export const SETTINGS_INDEX: readonly SettingEntry[] = [
         'Action button (codex:startAuth IPC); credentials land in the Codex auth store.',
     },
   ]),
+  // Backup (plan/phases/agent-state-backup.md §5). The three ACTIONS are
+  // `stateBacked` — none is a `Form.Item`, because none writes a config key:
+  // they call `rpc.backup.*` or navigate to a raw streaming route. The
+  // schedule fields below are ordinary page-Save rows: `config.get`/
+  // `config.update` carry `backup.*`, so the toggle and the cron field write
+  // what they say they write.
+  ...group('backup', 'status', [
+    {
+      key: null,
+      label: 'Create backup',
+      saves: 'self',
+      stateBacked: true,
+      keyUnresolved: 'Action button (rpc.backup.create); writes an archive, not a config key.',
+    },
+  ]),
+  ...group('backup', 'archives', [
+    {
+      key: null,
+      label: 'Download archive',
+      saves: 'self',
+      stateBacked: true,
+      keyUnresolved: 'Cookie-authenticated streaming route (GET /backup/download).',
+    },
+    {
+      key: null,
+      label: 'Restore identity from archive',
+      saves: 'self',
+      stateBacked: true,
+      keyUnresolved: 'Action button (rpc.backup.restoreIdentity); rewrites files, not a key.',
+    },
+  ]),
+  ...group('backup', 'schedule', [
+    { key: 'backup.enabled', formName: 'backup.enabled', label: 'Scheduled backups' },
+    { key: 'backup.cron', formName: 'backup.cron', label: 'Backup schedule' },
+    { key: 'backup.scope', formName: 'backup.scope', label: 'Backup scopes' },
+    { key: 'backup.keep', formName: 'backup.keep', label: 'Archives kept' },
+    { key: 'backup.dir', formName: 'backup.dir', label: 'Backup directory', advanced: true },
+  ]),
 ];
 
 /**

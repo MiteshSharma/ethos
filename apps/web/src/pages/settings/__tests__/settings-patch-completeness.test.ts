@@ -165,6 +165,7 @@ function store(): FormShape {
     retentionVacuumAfterPrune: false,
     retentionMinVacuumIntervalDays: null,
     // Automation
+    backup: { enabled: true, cron: '', scope: [], keep: null, dir: '' },
     nightlyPass: { enabled: false, cron: '' },
     weeklyDigest: { enabled: false, cron: '', recipients: [] },
     cronMaxParallelJobs: null,
@@ -228,6 +229,21 @@ describe('buildConfigPatch', () => {
     // The categories still in the store are untouched by the omission.
     expect(patch.memoryNotices).toBe(true);
     expect(patch.voiceChime).toBe(true);
+  });
+
+  // The narrowing T5 closed. The absent-field guard keeps a patch key only
+  // while `key in values` — so `backup` survives exactly because `FormShape`
+  // carries it and `SettingsShell` seeds it from `config.get`. A
+  // `backup.enabled` switch added without those two would have been deleted
+  // here and written nothing at all.
+  it('emits the backup schedule, blanks and all', () => {
+    expect(build(store()).backup).toEqual({
+      enabled: true,
+      cron: null,
+      scope: [],
+      keep: null,
+      dir: null,
+    });
   });
 
   it('keeps the rows-derived keys, which have no same-named form field', () => {

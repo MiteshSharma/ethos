@@ -15,7 +15,10 @@ import { describe, expect, it } from 'vitest';
 // NOT under `settings/panes/`; it is rendered by `panes/desktop.tsx` but its
 // controls still live at `pages/DesktopSettings.tsx` post-Phase-1, so it gets
 // its own describe block against its own path. Phase 8 adds the remaining
-// two Channels-group panes, `automation.tsx` and `jobs.tsx`.
+// two Channels-group panes, `automation.tsx` and `jobs.tsx`. The Backup pane
+// (plan/phases/agent-state-backup.md §5) pushes itself on for the same reason:
+// its rows are `.activity-row`s and its schedule is a readout, so a `Card`
+// appearing there would be the regression this list exists to catch.
 //
 // Source-text technique, same as `settings-form-placement.test.ts` (T1) —
 // `apps/web` has no jsdom and this change deliberately does not add one.
@@ -37,6 +40,7 @@ const FILES = [
   'voice.tsx',
   'automation.tsx',
   'jobs.tsx',
+  'backup.tsx',
 ];
 
 describe('no <Card> in the converted panes', () => {

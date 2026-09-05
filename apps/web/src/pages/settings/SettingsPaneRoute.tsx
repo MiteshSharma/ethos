@@ -9,6 +9,7 @@ import { isDesktop } from '../../lib/desktop';
 import { resolveSettingsRoute, settingsRoutePath } from './lib/resolve-settings-route';
 import { visibleCategories } from './lib/taxonomy';
 import { AutomationPane } from './panes/automation';
+import { BackupPane } from './panes/backup';
 import { ChatPane } from './panes/chat';
 import { DataPane } from './panes/data';
 import { DesktopPane } from './panes/desktop';
@@ -30,6 +31,7 @@ const PANES: Record<string, () => React.JSX.Element | null> = {
   automation: AutomationPane,
   jobs: JobsPane,
   data: DataPane,
+  backup: BackupPane,
   security: SecurityPane,
   keys: KeysPane,
   developer: DeveloperPane,

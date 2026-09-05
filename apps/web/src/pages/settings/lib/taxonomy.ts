@@ -191,6 +191,19 @@ export const SETTINGS_CATEGORIES: readonly SettingsCategory[] = [
     ],
   },
   {
+    // Local archives of `~/.ethos`, and the identity-only restore
+    // (plan/phases/agent-state-backup.md §5, D6). Machine group: what this
+    // machine holds and how it is copied off, not what the agent is.
+    slug: 'backup',
+    label: 'Backup',
+    group: 'Machine',
+    sections: [
+      section('status', 'status'),
+      section('archives', 'archives'),
+      section('schedule', 'schedule'),
+    ],
+  },
+  {
     slug: 'desktop',
     label: 'Desktop',
     group: 'Machine',

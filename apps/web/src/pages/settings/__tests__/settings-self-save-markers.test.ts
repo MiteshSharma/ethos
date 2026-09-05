@@ -2,15 +2,17 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { KEY_CATEGORY_IDS } from '@ethosagent/web-contracts';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { Form } from 'antd';
+import { App as AntApp, Form } from 'antd';
 import { type ComponentType, createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { MemoryRouter, Outlet, Route, Routes } from 'react-router-dom';
 import { describe, expect, it } from 'vitest';
+import { backupKeys } from '../../../features/settings/api/backup';
 import { vaultKeyKeys } from '../../../features/settings/api/keys';
 import { WakePanel } from '../../../features/voice/WakePanel';
 import { SETTINGS_INDEX } from '../lib/settings-index';
 import type { SettingsPaneContext } from '../pane-context';
+import { BackupPane } from '../panes/backup';
 import { GeneralPane } from '../panes/general';
 import { KeysPane } from '../panes/keys';
 import { SecurityPane } from '../panes/security';
@@ -173,6 +175,48 @@ function blobEntryView(category: string) {
   };
 }
 
+/**
+ * The Backup pane renders nothing until `rpc.backup.status()` resolves — its
+ * rows ARE the server's answer — so the status is seeded, the same way the
+ * Keys pane's categories are. `AntApp` because the restore confirm is
+ * `modal.confirm` from `App.useApp()`, and a bare `<Form component={false}>`
+ * because the schedule rows are page-Save fields.
+ */
+function backupPaneMarkup(): string {
+  const queryClient = new QueryClient();
+  queryClient.setQueryData(backupKeys.status(), {
+    directory: '/home/u/.ethos/backups',
+    serverStartedAt: '2026-09-05T09:00:00.000Z',
+    running: false,
+    downloadAvailable: true,
+    schedule: {
+      enabled: true,
+      cron: '0 4 * * *',
+      scopes: ['identity', 'state'],
+      keep: 7,
+      nextRunAt: '2026-09-06T04:00:00.000Z',
+      lastRunAt: null,
+      lastError: null,
+    },
+    lastBackup: null,
+    archives: [],
+    stores: [],
+  });
+  return renderToStaticMarkup(
+    createElement(
+      QueryClientProvider,
+      { client: queryClient },
+      createElement(
+        AntApp,
+        null,
+        // The schedule section is page-Save `Form.Item`s now, so the pane needs
+        // the enclosing form `SettingsShell` gives it through the outlet.
+        createElement(Form, { component: false as const }, createElement(BackupPane)),
+      ),
+    ),
+  );
+}
+
 function wakePanelMarkup(): string {
   const queryClient = new QueryClient();
   return renderToStaticMarkup(
@@ -203,6 +247,8 @@ const SELF_SAVE_PAIRS = Array.from(
 describe('SETTINGS_INDEX self-saving sections match what this test covers', () => {
   it('is exactly the known (category, section) pairs', () => {
     expect(SELF_SAVE_PAIRS).toEqual([
+      'backup/archives',
+      'backup/status',
       'desktop/connection',
       'desktop/keychain-and-auth',
       'desktop/retention',
@@ -241,6 +287,14 @@ describe('every self-saving section renders SelfSaveMarker', () => {
     const html = keysPaneMarkup();
 
     it.each([...KEY_CATEGORY_IDS])('%s', (id) => {
+      expect(sectionBlock(html, id)).toContain(MARKER_TEXT);
+    });
+  });
+
+  describe('backup — BackupPane, checked per section', () => {
+    const html = backupPaneMarkup();
+
+    it.each(['status', 'archives'])('%s', (id) => {
       expect(sectionBlock(html, id)).toContain(MARKER_TEXT);
     });
   });

@@ -163,6 +163,9 @@ export interface FormShape extends VoiceTelephonyFormValues {
     heartbeatMs: number | null;
     retentionDays: number | null;
   };
+  /** `backup.*` — scheduled local snapshots. Blank / empty = the built-in
+   *  default applies; `dir` blank = `<ethosDir>/backups`, computed in code. */
+  backup: { enabled: boolean; cron: string; scope: string[]; keep: number | null; dir: string };
   nightlyPass: { enabled: boolean; cron: string };
   weeklyDigest: { enabled: boolean; cron: string; recipients: string[] };
   modelCatalog: { enabled: boolean; url: string; ttlHours: number | null };

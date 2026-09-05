@@ -59,12 +59,14 @@ import { EvolverRepository } from './repositories/evolver.repository';
 import { PlatformsRepository } from './repositories/platforms.repository';
 import { WebTokenRepository } from './repositories/web-token.repository';
 import { createRoutes } from './routes';
+import { backupRoutes } from './routes/backup';
 import { documentsRoutes } from './routes/documents';
 import { personalityAvatarRoutes } from './routes/personality-avatar';
 import type { RouteModule } from './routes/route-module';
 import { ApiKeysService } from './services/api-keys.service';
 import { createWebApprovalHook, type DangerPredicate } from './services/approval-hook';
 import { type ApprovalObservability, ApprovalsService } from './services/approvals.service';
+import { BackupService } from './services/backup.service';
 import { CallsService } from './services/calls.service';
 import { ConfigService, readLegacyBrowserBargeInTuning } from './services/config.service';
 import { CronService } from './services/cron.service';
@@ -751,6 +753,20 @@ export function createWebApi(opts: CreateWebApiOptions): CreateWebApiResult {
   const namedSecretsService = new NamedSecretsService({ secrets });
   // Keys pane — the whole vault, masked, partitioned by the static catalog.
   const keysService = new KeysService({ secrets, namedSecrets: namedSecretsService });
+  // Settings › Backup. Reads `backup.*` from config.yaml and the `backup`
+  // system cron job for the next scheduled run; creates archives with the
+  // ASYNC snapshot under the shared `backups/.lock`, and restores `identity`
+  // only (plan agent-state-backup D2/D6).
+  const backupService = new BackupService({
+    dataDir: opts.dataDir,
+    storage,
+    // The SAME `<dataDir>/config.yaml` reader the rest of this app uses — the
+    // service must not read `backup.*` through the process-global `ethosDir()`
+    // while archiving and restoring under `opts.dataDir`.
+    config: configRepo,
+    secrets,
+    ...(opts.cronScheduler ? { scheduler: opts.cronScheduler } : {}),
+  });
   const toolSettingsService = new ToolSettingsService({
     config: configRepo,
     personalities: personalitiesService,
@@ -1387,6 +1403,7 @@ export function createWebApi(opts: CreateWebApiOptions): CreateWebApiResult {
       documents: documentsService,
       namedSecrets: namedSecretsService,
       keys: keysService,
+      backup: backupService,
       toolSettings: toolSettingsService,
       voice: voiceService,
       voiceLaneMode: voiceLaneModeService,
@@ -1429,6 +1446,16 @@ export function createWebApi(opts: CreateWebApiOptions): CreateWebApiResult {
           'Streams a file out of a personality workdir, and accepts a raw-body upload ' +
           'into one. Cookie-only: an `<a download>` navigation carries `ethos_auth`, ' +
           'but a Bearer header cannot be attached to one.',
+      },
+      {
+        basePath: '/backup',
+        router: backupRoutes({ backup: backupService }),
+        auth: 'cookie',
+        description:
+          'Streams one `~/.ethos` backup archive out of the backup directory. Cookie-only, ' +
+          'same posture as `/documents`: an `<a download>` navigation carries `ethos_auth`, ' +
+          'but a Bearer header cannot be attached to one — so desktop remote mode cannot ' +
+          'use it, and `backup.status` says so via `downloadAvailable`.',
       },
       {
         basePath: '/api/personalities',

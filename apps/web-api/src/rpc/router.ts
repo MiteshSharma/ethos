@@ -16,6 +16,7 @@ import { a2aRouter } from './a2a';
 import { activityRouter } from './activity';
 import { adminRouter } from './admin';
 import { apiKeysRouter } from './api-keys';
+import { backupRouter } from './backup';
 import { batchRouter } from './batch';
 import { clarifyRouter } from './clarify';
 import { configRouter } from './config';
@@ -110,6 +111,7 @@ export const apiRouter = {
   toolSettings: toolSettingsRouter,
   documents: documentsRouter,
   recipes: recipesRouter,
+  backup: backupRouter,
 };
 
 export type ApiRouter = typeof apiRouter;

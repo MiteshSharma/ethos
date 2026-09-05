@@ -812,6 +812,7 @@ const SETTINGS_PATCH_KEYS = [
   'voiceRealtimeProviders',
   'voiceChannelTtsOut',
   'wakeRoutes',
+  'backup',
   'nightlyPass',
   'weeklyDigest',
   'modelCatalog',
@@ -956,6 +957,16 @@ function validateSettingsPatch(patch: ConfigUpdateInput): void {
     checkInt('logsRotation.maxBytes', patch.logsRotation.maxBytes, 1);
     checkInt('logsRotation.maxFiles', patch.logsRotation.maxFiles, 1);
   }
+  // MIRROR of `buildBackupConfig` in packages/config — the source of truth for
+  // this rule; change both together. Mirrored even though that source already
+  // owns it, because it THROWS rather than dropping: a persisted `backup.keep`
+  // below 1 makes config.yaml unloadable EVERYWHERE, bricking the CLI, not just
+  // this pane. `checkInt`'s integer + `>= 1` + MAX_SAFE_INTEGER ceiling is
+  // exactly its `/^\d+$/` whole-string test plus `Number.isSafeInteger(keep)`.
+  // The other four `backup.*` fields carry no bound here on purpose — `scope`'s
+  // roster lives in `@ethosagent/wiring` (a copy is the D1 drift), and `cron` /
+  // `dir` / `enabled` have no bound in packages/config to mirror.
+  if (patch.backup) checkInt('backup.keep', patch.backup.keep, 1);
   // Bounds below mirror the `build*` helpers in packages/config, which DROP an
   // out-of-range value rather than clamping it — a silently ignored save is
   // worse at an RPC boundary than a refusal, so these reject instead.
@@ -1372,6 +1383,16 @@ export interface ConfigGetResult {
   /** `voice.filler.*` — the tool-call filler/tick keep-alive. Global, not per-surface. */
   voiceFiller: VoiceFillerGetResult;
   voiceBots: VoiceBotGetResult[];
+  /** `backup.*` exactly as config.yaml carries it — null / `[]` mean unset,
+   *  never "off". The resolved values (and the computed `dir` default) come
+   *  from `resolveBackupSettings` via `backup.status`, not from here. */
+  backup: {
+    enabled: boolean;
+    cron: string | null;
+    scope: string[];
+    keep: number | null;
+    dir: string | null;
+  };
   nightlyPass: { enabled: boolean; cron: string };
   weeklyDigest: { enabled: boolean; cron: string; recipients: string[] };
   modelCatalog: { enabled: boolean; url: string | null; ttlHours: number };
@@ -1619,6 +1640,13 @@ export interface ConfigUpdateInput {
     string,
     { phrase: string; personality: string; privileged?: boolean; enabled?: boolean }
   >;
+  backup?: {
+    enabled?: boolean | null;
+    cron?: string | null;
+    scope?: string[] | null;
+    keep?: number | null;
+    dir?: string | null;
+  };
   nightlyPass?: { enabled?: boolean | null; cron?: string | null };
   weeklyDigest?: { enabled?: boolean | null; cron?: string | null; recipients?: string[] | null };
   modelCatalog?: { enabled?: boolean | null; url?: string | null; ttlHours?: number | null };
@@ -1893,6 +1921,16 @@ export class ConfigService {
       voiceTtsProviders: await parseVoiceTtsProviders(p, (v) => this.keyPreview(v)),
       voiceSttProviders: await parseVoiceSttProviders(p, (v) => this.keyPreview(v)),
       voiceRealtimeProviders: await parseVoiceRealtimeProviders(p, (v) => this.keyPreview(v)),
+      backup: {
+        // The one default resolved here, because a Switch has no third state:
+        // `backupEnabled()` in `@ethosagent/wiring` reads an absent key as ON.
+        // The other four stay raw — their defaults are computed, not literal.
+        enabled: passBool(p, 'backup.enabled', true),
+        cron: passStr(p, 'backup.cron'),
+        scope: splitList(p['backup.scope']),
+        keep: passNumOrNull(p, 'backup.keep'),
+        dir: passStr(p, 'backup.dir'),
+      },
       nightlyPass: {
         enabled: passBool(p, 'nightlyPass.enabled', false),
         cron: p['nightlyPass.cron'] || '0 3 * * *',
@@ -2181,6 +2219,13 @@ export class ConfigService {
       set('background.stale_ms', patch.background.staleMs);
       set('background.heartbeat_ms', patch.background.heartbeatMs);
       set('background.retention_days', patch.background.retentionDays);
+    }
+    if (patch.backup) {
+      set('backup.enabled', patch.backup.enabled);
+      set('backup.cron', patch.backup.cron);
+      setList('backup.scope', patch.backup.scope);
+      set('backup.keep', patch.backup.keep);
+      set('backup.dir', patch.backup.dir);
     }
     if (patch.nightlyPass) {
       set('nightlyPass.enabled', patch.nightlyPass.enabled);

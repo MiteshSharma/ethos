@@ -8,6 +8,7 @@ import type { DebugService } from '../features/debug/service';
 import type { SessionsService } from '../features/sessions/service';
 import type { ApiKeysService } from '../services/api-keys.service';
 import type { ApprovalsService } from '../services/approvals.service';
+import type { BackupService } from '../services/backup.service';
 import type { CallsService } from '../services/calls.service';
 import type { ConfigService } from '../services/config.service';
 import type { CronService } from '../services/cron.service';
@@ -79,6 +80,8 @@ export interface RpcContext {
   keys: KeysService;
   /** Generic per-personality tool settings (Phase 2). */
   toolSettings: ToolSettingsService;
+  /** Local `~/.ethos` archives: status, create, identity-only restore. */
+  backup: BackupService;
   toolRegistry?: ToolRegistry;
   dashboards?: DashboardsService;
   pluginLoader?: PluginLoader;
