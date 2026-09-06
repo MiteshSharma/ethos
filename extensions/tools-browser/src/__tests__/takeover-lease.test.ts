@@ -15,6 +15,10 @@
 //     page calls.
 //   - Drop `if (s.takeover) continue;` from `closeSession` and both
 //     "cannot close a session the human is holding" tests fail.
+//   - Drop the `leaseHeldByOthers` check from `closeSession` and "cannot close
+//     a session a sibling agent operation is holding" fails; drop the
+//     `ownLease` argument instead and "a failing navigation still closes the
+//     browser it just failed on" fails.
 //   - Drop the `state.exclusive` check in `acquireAgentLease` and "the lease
 //     alone refuses" fails.
 //   - Drop `lease.release()` from the takeover's `finally` and "releases
@@ -373,6 +377,78 @@ describe('an agent operation already in flight when a takeover begins', () => {
 
     settle().resolve({ requestId: 'r1', answer: 'done', source: 'user' });
     await takingOver;
+  });
+});
+
+describe('closeSession and the SHARED lease', () => {
+  // `closeSession` honoured `session.takeover` but not the lease, while
+  // `sweepIdleSessions` — the other reaper, four lines away — checked both and
+  // said why. Its callers are async cleanup paths, so one browser tool failing
+  // could destroy the browser a SIBLING tool was mid-navigation on. Not a
+  // takeover bypass (the flag is set synchronously); the same invariant, half
+  // applied.
+
+  it('cannot close a session a sibling agent operation is holding', async () => {
+    const { session, closed } = seed('shared', fakePage([], Promise.resolve(null)));
+    // `browser_click`, say, is inside `page.click` on this session.
+    const sibling = acquireAgentLease('shared', session);
+    expect(sibling).not.toBeNull();
+
+    // ...and `browse_url` fails on the same session and tidies up after itself.
+    await closeSession('shared');
+
+    expect(closed()).toBe(false);
+    expect(sessions.get(makeMapKey('shared', {}))).toBe(session);
+
+    // The skip DEFERS, it does not exempt: once the sibling releases, the same
+    // call closes it.
+    sibling?.();
+    await closeSession('shared');
+    expect(closed()).toBe(true);
+  });
+
+  it('closes a session nobody is holding', async () => {
+    // The control. Without it every assertion above is satisfied by a
+    // `closeSession` that has stopped closing anything.
+    const { closed } = seed('free', fakePage([], Promise.resolve(null)));
+
+    await closeSession('free');
+
+    expect(closed()).toBe(true);
+    expect(activeLeaseCount('free')).toBe(0);
+  });
+
+  it('lets a caller close the browser it is itself holding', async () => {
+    // Cleanup runs INSIDE the caller's own lease on purpose (releasing first
+    // would let a takeover's exclusive lease land mid-teardown), so without
+    // `ownLease` the check above would turn every cleanup path into a no-op.
+    const { session, closed } = seed('own', fakePage([], Promise.resolve(null)));
+    const own = acquireAgentLease('own', session);
+
+    await closeSession('own', own);
+
+    expect(closed()).toBe(true);
+    own?.();
+  });
+
+  it('a failing navigation still closes the browser it just failed on', async () => {
+    // The same thing through the real caller, so the test above cannot pass
+    // while production forgets to pass its lease.
+    const timeline: string[] = [];
+    const navigation = deferred<null>();
+    const { closed } = seed('failing-alone', fakePage(timeline, navigation.promise));
+    const tools = toolMap(makeBridge(timeline).bridge);
+
+    const navigating = tool(tools, 'browse_url').execute(
+      { url: URL_UNDER_TEST },
+      toolCtx('failing-alone'),
+    );
+    await vi.waitFor(() => expect(timeline).toEqual(['goto']));
+    navigation.fail(new Error('net::ERR_CONNECTION_RESET'));
+
+    expect((await navigating).ok).toBe(false);
+    expect(closed()).toBe(true);
+    expect(activeLeaseCount('failing-alone')).toBe(0);
   });
 });
 

@@ -110,8 +110,32 @@ export interface TakeoverSessionRegistry {
   onSettled?(listener: (sessionId: string, requestId: string) => void): () => void;
 }
 
-/** Resolves the clarify the agent is parked on. Bound to `ClarifyBridge.respond`. */
-export type TakeoverHandback = (requestId: string) => Promise<void>;
+/**
+ * What a hand-back attempt DID — the evidence `closed: handed_back` is sent on.
+ *
+ * A discriminated result rather than `Promise<void>` because "resolved without
+ * throwing" is not evidence of anything here. `ClarifyBridge.respond()` returns
+ * `void` and swallows every request it cannot resolve — an id it has never
+ * heard of, a row a peer process already settled, a takeover its answer gate
+ * refuses — so the four causes this lane's own error message names all reach
+ * the caller looking exactly like success. Four times now this feature has
+ * reported a hand-back nothing performed; a shape with no "it worked" value to
+ * default to is what stops a fifth.
+ *
+ * `reason` is a sentence for the viewer, not a code: it is interpolated into
+ * `handback_failed` and read by the person who pressed the button.
+ */
+export type TakeoverHandbackResult = { resolved: true } | { resolved: false; reason: string };
+
+/**
+ * Resolve the clarify the agent is parked on, and REPORT WHETHER IT DID.
+ *
+ * Bound to `ClarifyBridge.respond` — but never to it directly, precisely
+ * because that method cannot answer the question this type asks. See
+ * `respondAndConfirm` in `../clarify-resolution`, which is what supplies the
+ * evidence in production.
+ */
+export type TakeoverHandback = (requestId: string) => Promise<TakeoverHandbackResult>;
 
 export interface TakeoverSocketOptions {
   /**
@@ -133,9 +157,9 @@ export interface TakeoverSocketOptions {
    * path from an absent capability to a success frame.
    *
    * A deployment that genuinely cannot hand back (web-api built without a
-   * `ClarifyBridge`) supplies one that REJECTS. The viewer then gets
-   * `handback_failed` with the reason and the takeover stays live, which is
-   * loud exactly where the absent callback was silent.
+   * `ClarifyBridge`) supplies one that reports `resolved: false`. The viewer
+   * then gets `handback_failed` with the reason and the takeover stays live,
+   * which is loud exactly where the absent callback was silent.
    */
   handback: TakeoverHandback;
   /** Credential check for the upgrade request. Rejected → 401, no socket. */
@@ -491,23 +515,34 @@ export function createTakeoverSocket(opts: TakeoverSocketOptions): TakeoverSocke
     });
 
     /**
-     * Resolve the clarify, then say so — in that order.
+     * Resolve the clarify, then say so — in that order, and only on evidence.
      *
      * `handed_back` is a claim about the AGENT, not about this socket: it says
      * the request the agent is parked on has been answered and the browser is
      * its own again. A missing, expired, cancelled or already-settled request
-     * makes `respond` fail, and reporting that as a hand-back tells the viewer
-     * they are done while the agent stays parked or settles some other way.
-     * So a failure keeps the takeover LIVE — screencast restarted, lane open —
-     * and says what went wrong, leaving the retry to the human, here or on the
+     * does NOT make `ClarifyBridge.respond` throw — it returns `void` and
+     * swallows all four — so the guarantee this comment used to assert was
+     * enforced by nothing, and reporting those as a hand-back told the viewer
+     * they were done while the agent stayed parked or settled some other way.
+     *
+     * What enforces it now is the RESULT TYPE: `opts.handback` returns
+     * `TakeoverHandbackResult`, and the `handed_back` frame below sits behind
+     * `result.resolved`. There is no branch that skips the call and falls
+     * through to it, no absent-callback branch (`handback` is required), and
+     * no value the call can return that means "it worked" by default. A
+     * failure keeps the takeover LIVE — screencast restarted, lane open — and
+     * says what went wrong, leaving the retry to the human, here or on the
      * chat card. The tool holds the same line: it reports `handed_back` from
      * `response.source === 'user'`, never from "nothing threw".
      *
-     * The `handed_back` frame below is reachable from exactly ONE statement:
-     * the one after `opts.handback` resolved. There is no branch that skips
-     * the call and falls through to it — that branch is what told an operator
-     * control was returned while nothing had resolved the clarify — and
-     * `handback` being a required option is what keeps it from coming back.
+     * This also covers the two awaits below, which is why nothing re-reads
+     * `stillBound` between them: a takeover that settles during
+     * `Page.stopScreencast` (a 15-minute timeout expiring, an aborted turn,
+     * the chat card) leaves `respond` nothing to resolve, so the evidence is
+     * absent and the lane refuses rather than announcing a hand-back somebody
+     * else's settlement performed. `refuse` then decides between "still yours,
+     * try again" and `session_gone` by asking `stillBound` once, at the only
+     * moment the answer matters.
      */
     const handBack = async (live: Lane): Promise<void> => {
       if (live.settling) return;
@@ -516,11 +551,24 @@ export function createTakeoverSocket(opts: TakeoverSocketOptions): TakeoverSocke
       // clarify settles, and a screencast still running into a socket that is
       // about to close is frames nobody draws.
       await live.cdp?.send('Page.stopScreencast').catch(() => undefined);
-      // Every way this can fail lands here: the takeover is STILL LIVE, so the
-      // screencast stopped above is started again — or the human retries
-      // against a frozen picture — and the lane stays open for that retry.
+      // Every way this can fail lands here, and there are two of them.
+      //
+      // The takeover is still live → it is STILL THIS OPERATOR'S: the
+      // screencast stopped above is started again and the lane stays open for
+      // the retry the message invites.
+      //
+      // The takeover is NOT still live → something else settled it while this
+      // hand-back was in flight (the settle push is muted for a settling lane,
+      // `:onSettled`, so this is the only place that learns). Restarting the
+      // screencast would stream a page the agent has resumed driving to a
+      // person invited to click on it, and "try again" would be advice with
+      // nothing left to try. The lane ends as `session_gone` instead.
       const refuse = async (detail: string): Promise<void> => {
         live.settling = false;
+        if (!stillBound(live)) {
+          endLane(live, 'session_gone');
+          return;
+        }
         if (live.cdp) await startScreencast(live.cdp).catch(() => undefined);
         send(live.socket, {
           t: 'error',
@@ -533,12 +581,20 @@ export function createTakeoverSocket(opts: TakeoverSocketOptions): TakeoverSocke
         await refuse('this lane is not bound to a takeover request');
         return;
       }
+      let result: TakeoverHandbackResult;
       try {
-        await opts.handback(requestId);
+        result = await opts.handback(requestId);
       } catch (err) {
         const detail = err instanceof Error ? err.message : String(err);
         opts.logger?.warn?.('browser takeover hand-back failed', { error: detail });
         await refuse(detail);
+        return;
+      }
+      if (!result.resolved) {
+        opts.logger?.warn?.('browser takeover hand-back resolved nothing', {
+          reason: result.reason,
+        });
+        await refuse(result.reason);
         return;
       }
       live.stop?.();

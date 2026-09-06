@@ -53,6 +53,16 @@ export interface TakeoverConnection {
   frameSrc: string | null;
   /** The page URL, following the lane's `url` frames. */
   url: string;
+  /**
+   * The last `handback` frame this lane sent came back refused, and no newer
+   * one has gone out.
+   *
+   * A LANE fact, so the lane owns it: the server answers a `handback` frame
+   * with either `closed: handed_back` or `error: handback_failed`, and only
+   * this hook sees either. It is cleared by `send`ing another `handback`,
+   * which is the only thing that can make it stale.
+   */
+  handbackRefused: boolean;
   /** Send one input frame. No-op while the socket is not open. */
   send: (frame: BrowserTakeoverClientFrame) => void;
 }
@@ -80,6 +90,7 @@ export function useTakeoverSocket(opts: TakeoverSocketOptions): TakeoverConnecti
   const [notice, setNotice] = useState<string | null>(null);
   const [frameSrc, setFrameSrc] = useState<string | null>(null);
   const [url, setUrl] = useState(initialUrl);
+  const [handbackRefused, setHandbackRefused] = useState(false);
   const socketRef = useRef<TakeoverWebSocket | null>(null);
 
   useEffect(() => {
@@ -144,6 +155,18 @@ export function useTakeoverSocket(opts: TakeoverSocketOptions): TakeoverConnecti
         }
         return;
       }
+      // A refused hand-back is the ONE error the lane sends without closing:
+      // the server restarted the screencast and said "the browser is still
+      // yours — try again". Painting `unavailable` over that stopped the retry
+      // it invites — `TakeoverStage` gates every click and keystroke on
+      // `live`, and only a `ready` frame restores it, which the server has no
+      // reason to send again. So the status is left exactly as it was and the
+      // refusal travels as its own flag.
+      if (frame.code === 'handback_failed') {
+        setNotice(frame.message);
+        setHandbackRefused(true);
+        return;
+      }
       setStatus('unavailable');
       setNotice(frame.message);
     };
@@ -173,10 +196,16 @@ export function useTakeoverSocket(opts: TakeoverSocketOptions): TakeoverConnecti
   const send = useCallback((frame: BrowserTakeoverClientFrame) => {
     const socket = socketRef.current;
     if (!socket || socket.readyState !== socket.OPEN) return;
+    // A new attempt is outstanding, so the previous refusal — and the sentence
+    // explaining it — are no longer what is true.
+    if (frame.t === 'handback') {
+      setHandbackRefused(false);
+      setNotice(null);
+    }
     socket.send(encodeBrowserTakeoverFrame(frame));
   }, []);
 
-  return { status, notice, frameSrc, url, send };
+  return { status, notice, frameSrc, url, handbackRefused, send };
 }
 
 /** The browser hands a Blob, an ArrayBuffer or a view, depending on the agent. */

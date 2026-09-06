@@ -495,7 +495,7 @@ export function createBrowserNavigateTool(
         if (!release) return takeoverRefusalResult();
 
         if (ctx.abortSignal.aborted) {
-          await closeSession(ctx.sessionId);
+          await closeSession(ctx.sessionId, release);
           return { ok: false, error: 'Aborted', code: 'execution_failed' };
         }
 
@@ -535,7 +535,7 @@ export function createBrowserNavigateTool(
         const noticeBlock = notices.length > 0 ? `${notices.join('\n')}\n\n` : '';
         return { ok: true, value: noticeBlock + header + text + refSummary };
       } catch (err) {
-        await closeSession(ctx.sessionId);
+        await closeSession(ctx.sessionId, release);
         return {
           ok: false,
           error: err instanceof Error ? err.message : String(err),

@@ -46,19 +46,28 @@ export function TakeoverMode({ request, startedAt, onBackToChat }: TakeoverModeP
     enabled: true,
   });
 
-  // The lane stopped being the way out while it was carrying a hand-back — it
-  // dropped, or the server refused with `handback_failed`. Either way nothing
-  // resolved the clarify, so the browser is still the operator's and the
-  // fallback button is how they give it back. Leaving it disabled strands them
+  // A lane hand-back ended without landing. Two shapes, and they differ in
+  // what the operator is left looking at:
+  //
+  //   the lane DROPPED (`unavailable`) — no picture, no lane, and no sentence
+  //     from the server, so this component supplies one.
+  //   the server REFUSED (`handbackRefused`) — the takeover is still live, the
+  //     screencast was restarted, and `lane.notice` already carries the
+  //     server's own reason. The picture stays up and the retry works in place.
+  //
+  // Either way nothing resolved the clarify, so the browser is still the
+  // operator's and the button must come back: leaving it disabled strands them
   // in a mode whose only exit is discovering that leaving it reveals another
   // button. `handed_back` does not come through here: it lands as `'ended'`.
   useEffect(() => {
-    if (handingBack !== 'lane' || lane.status !== 'unavailable') return;
+    if (handingBack !== 'lane') return;
+    if (lane.status !== 'unavailable' && !lane.handbackRefused) return;
     setHandingBack(null);
+    if (lane.handbackRefused) return;
     setHandbackNotice(
       'The live view went away before the hand-back landed — the browser is still yours. Press Hand back again.',
     );
-  }, [handingBack, lane.status]);
+  }, [handingBack, lane.status, lane.handbackRefused]);
 
   const handBack = async (): Promise<void> => {
     setHandbackNotice(null);

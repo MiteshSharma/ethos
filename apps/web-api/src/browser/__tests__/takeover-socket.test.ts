@@ -18,6 +18,7 @@ import {
   MAX_TAKEOVER_FRAME_BASE64_CHARS,
   MAX_TAKEOVER_PAGE_DIMENSION,
   type TakeoverCdpSession,
+  type TakeoverHandback,
   type TakeoverSocket,
   type TakeoverSocketOptions,
   type TakeoverTarget,
@@ -37,8 +38,15 @@ class FakeCdp implements TakeoverCdpSession {
   private listeners = new Map<string, Array<(payload: unknown) => void>>();
   /** Set to make `send` reject — the screencast-start failure path. */
   failOn: string | null = null;
+  /**
+   * Fires INSIDE `send`, before it resolves. The only way to drive the race a
+   * hand-back has to survive: the takeover settling somewhere else while this
+   * lane is awaiting CDP.
+   */
+  onSend: ((method: string) => void) | null = null;
 
   send(method: string, params?: Record<string, unknown>): Promise<unknown> {
+    this.onSend?.(method);
     if (this.failOn === method) return Promise.reject(new Error(`no ${method}`));
     this.sent.push(params === undefined ? { method } : { method, params });
     return Promise.resolve({});
@@ -123,7 +131,7 @@ describe('browser takeover socket', () => {
   let target: TakeoverTarget;
   let pageUrl: string;
   let closed: boolean;
-  let handback: ReturnType<typeof vi.fn<(requestId: string) => Promise<void>>>;
+  let handback: ReturnType<typeof vi.fn<TakeoverHandback>>;
   let find: (sessionId: string) => TakeoverTarget | null;
   /** The tool-side settle notification, driven by hand from the tests. */
   let settleListeners: Array<(sessionId: string, requestId: string) => void>;
@@ -141,7 +149,7 @@ describe('browser takeover socket', () => {
       takeover: { requestId: 'req-1' },
     };
     find = (sessionId) => (sessionId === 'sess-1' ? target : null);
-    handback = vi.fn((_requestId: string) => Promise.resolve());
+    handback = vi.fn((_requestId: string) => Promise.resolve({ resolved: true as const }));
     server = createServer((_req, res) => res.end('ok'));
     settleListeners = [];
     lane = createTakeoverSocket({
@@ -481,6 +489,70 @@ describe('browser takeover socket', () => {
     expect(handback).toHaveBeenCalledTimes(2);
   });
 
+  it('reports handback_failed when the hand-back RESOLVED NOTHING and did not throw', async () => {
+    // The fourth instance of this feature's oldest bug, and the one a caller
+    // cannot see: `ClarifyBridge.respond()` returns `void` and swallows a
+    // missing, expired, cancelled or already-settled request, so an awaited
+    // call that resolves is not evidence that anything happened. The lane's
+    // own error message names those four causes; before the result type they
+    // all arrived here as `closed: handed_back`.
+    handback.mockResolvedValueOnce({
+      resolved: false,
+      reason: 'that request is no longer open',
+    });
+    const client = await ready();
+    client.send({ t: 'handback' });
+    await until(() => client.frames.some((f) => f.t === 'error'), 'handback_failed');
+    const frame = client.frames.find((f) => f.t === 'error');
+    expect(frame?.t === 'error' && frame.code).toBe('handback_failed');
+    expect(frame?.t === 'error' && frame.message).toContain('no longer open');
+    // The lie this test exists to prevent.
+    expect(client.frames.some((f) => f.t === 'closed')).toBe(false);
+    // The takeover is untouched, so the browser is still the human's — and the
+    // picture they are still looking at is running again.
+    expect(target.takeover).toEqual({ requestId: 'req-1' });
+    expect(lane.laneCount).toBe(1);
+    expect(cdp.sent.filter((call) => call.method === 'Page.startScreencast')).toHaveLength(2);
+
+    // ...and the retry lands.
+    client.send({ t: 'handback' });
+    await until(() => client.frames.some((f) => f.t === 'closed'), 'closed frame');
+    const closed = client.frames.find((f) => f.t === 'closed');
+    expect(closed?.t === 'closed' && closed.reason).toBe('handed_back');
+  });
+
+  it('does not report handed_back when the clarify settles during the CDP await', async () => {
+    // The sequence: the human presses Hand back, and while `Page.stopScreencast`
+    // is in flight the takeover settles somewhere else — a 15-minute timeout, an
+    // aborted turn, the chat card. The settle push is deliberately MUTED for a
+    // lane that is settling, so nothing closes this one, and `respond` then has
+    // nothing left to resolve. The agent recorded `cancel`; telling this viewer
+    // `handed_back` would be the same lie from a different direction.
+    const client = await ready();
+    cdp.onSend = (method) => {
+      if (method !== 'Page.stopScreencast') return;
+      cdp.onSend = null;
+      target.takeover = undefined;
+      for (const listener of settleListeners) listener('sess-1', 'req-1');
+    };
+    handback.mockResolvedValueOnce({
+      resolved: false,
+      reason: 'that request is no longer open',
+    });
+
+    client.send({ t: 'handback' });
+    await until(() => client.frames.some((f) => f.t === 'closed'), 'closed frame');
+    const reasons = client.frames.filter((f) => f.t === 'closed').map((f) => f.reason);
+    expect(reasons).toEqual(['session_gone']);
+    // Not `handback_failed` either: "the browser is still yours — try again" is
+    // advice with nothing left to try, and restarting the screencast would
+    // stream a page the agent has resumed driving to a person invited to click
+    // on it. Exactly one `startScreencast`, the one `hello` made.
+    expect(client.frames.some((f) => f.t === 'error')).toBe(false);
+    expect(cdp.sent.filter((call) => call.method === 'Page.startScreencast')).toHaveLength(1);
+    await until(() => lane.laneCount === 0, 'lane teardown');
+  });
+
   it('cannot report handed_back when the socket has no hand-back capability', async () => {
     // `handback` is a REQUIRED option precisely so this socket cannot be built
     // by accident — the cast is what the optional field it used to be produced
@@ -522,7 +594,7 @@ describe('browser takeover socket', () => {
     handback.mockImplementationOnce((requestId: string) => {
       target.takeover = undefined;
       for (const listener of settleListeners) listener('sess-1', requestId);
-      return Promise.resolve();
+      return Promise.resolve({ resolved: true as const });
     });
     const client = await ready();
     client.send({ t: 'handback' });
@@ -533,7 +605,7 @@ describe('browser takeover socket', () => {
 
   it('refuses every lane when no session registry is wired at all', async () => {
     const bare = createTakeoverSocket({
-      handback: () => Promise.resolve(),
+      handback: () => Promise.resolve({ resolved: true as const }),
       authenticate: () => Promise.resolve(true),
     });
     const bareServer = createServer((_req, res) => res.end('ok'));

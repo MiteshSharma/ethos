@@ -142,11 +142,11 @@ function createBrowseUrlTool(
         // If the caller aborts mid-navigation, close the session so the
         // headless Chromium instance doesn't leak.
         if (ctx.abortSignal.aborted) {
-          await closeSession(ctx.sessionId);
+          await closeSession(ctx.sessionId, release);
           return { ok: false, error: 'Aborted', code: 'execution_failed' };
         }
         const abortHandler = () => {
-          closeSession(ctx.sessionId);
+          closeSession(ctx.sessionId, release);
         };
         ctx.abortSignal.addEventListener('abort', abortHandler, { once: true });
 
@@ -191,7 +191,7 @@ function createBrowseUrlTool(
           ctx.abortSignal.removeEventListener('abort', abortHandler);
         }
       } catch (err) {
-        await closeSession(ctx.sessionId);
+        await closeSession(ctx.sessionId, release);
         return {
           ok: false,
           error: err instanceof Error ? err.message : String(err),

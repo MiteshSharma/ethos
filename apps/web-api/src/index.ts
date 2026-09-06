@@ -41,6 +41,7 @@ import {
   type TakeoverSessionRegistry,
   type TakeoverSocket,
 } from './browser/takeover-socket';
+import { CLARIFY_UNRESOLVED_REASON, respondAndConfirm } from './clarify-resolution';
 import { formatRunHandBack } from './features/chat/handback';
 import { resolveJobSessionId } from './features/chat/job-session';
 import { ChatRepository } from './features/chat/repository';
@@ -1438,17 +1439,32 @@ export function createWebApi(opts: CreateWebApiOptions): CreateWebApiResult {
   const takeoverSocket = createTakeoverSocket({
     ...(opts.browserTakeoverSessions ? { sessions: opts.browserTakeoverSessions } : {}),
     // Not conditional on the bridge, because the lane's `handback` is not
-    // optional: `closed: handed_back` is only ever sent after this resolves,
-    // and a process that cannot resolve says so with `handback_failed` rather
-    // than reporting a hand-back nothing performed. A deployment with no
-    // `ClarifyBridge` has no clarify to park on either, so this rejection is
-    // unreachable in practice — it exists so the impossible case is loud.
+    // optional: `closed: handed_back` is only ever sent after this reports
+    // `resolved: true`, and a process that cannot resolve says so with
+    // `handback_failed` rather than reporting a hand-back nothing performed. A
+    // deployment with no `ClarifyBridge` has no clarify to park on either, so
+    // that branch is unreachable in practice — it exists so the impossible
+    // case is loud.
+    //
+    // `respondAndConfirm`, not `clarifyBridge.respond`: the bridge returns
+    // `void` and swallows an id it cannot resolve, so awaiting it proves only
+    // that nothing threw. See `./clarify-resolution`.
     handback: async (requestId: string) => {
       if (!clarifyBridge) {
-        throw new Error('this Ethos process has no clarify bridge to resolve the takeover');
+        return {
+          resolved: false as const,
+          reason: 'this Ethos process has no clarify bridge to resolve the takeover',
+        };
       }
       clarifyBridge.recordPresence('web');
-      await clarifyBridge.respond({ requestId, answer: 'handed back', source: 'user' });
+      const resolved = await respondAndConfirm(clarifyBridge, {
+        requestId,
+        answer: 'handed back',
+        source: 'user',
+      });
+      return resolved
+        ? { resolved: true as const }
+        : { resolved: false as const, reason: CLARIFY_UNRESOLVED_REASON };
     },
     authenticate: async (req) => {
       const cookie = readCookie(req.headers.cookie, AUTH_COOKIE);

@@ -294,11 +294,20 @@ const TIMED_OUT = Symbol('lock-timeout');
 export const TAKEOVER_DRAIN_TIMEOUT_MS = 60_000;
 
 interface LeaseState {
-  /** Agent operations currently holding the shared side. */
-  shared: number;
+  /**
+   * Agent operations currently holding the shared side — the RELEASE function
+   * of each, not a count.
+   *
+   * A set rather than a number because `closeSession` has to tell one holder
+   * from another: its callers are cleanup paths that run while their OWN lease
+   * is still held (deliberately — see the note above each `catch`), so
+   * "somebody holds this session" is not the question it needs answered.
+   * "Somebody OTHER THAN ME holds it" is, and only identity answers that.
+   */
+  shared: Set<() => void>;
   /** A takeover holds — or is draining toward — the exclusive side. */
   exclusive: boolean;
-  /** Resolvers waiting for `shared` to reach zero. */
+  /** Resolvers waiting for `shared` to empty. */
   drained: Array<() => void>;
 }
 
@@ -307,14 +316,14 @@ const leases = new Map<string, LeaseState>();
 function leaseState(sessionId: string): LeaseState {
   const existing = leases.get(sessionId);
   if (existing) return existing;
-  const created: LeaseState = { shared: 0, exclusive: false, drained: [] };
+  const created: LeaseState = { shared: new Set(), exclusive: false, drained: [] };
   leases.set(sessionId, created);
   return created;
 }
 
 /** Drop a lease nobody holds or wants, so the map does not grow per session. */
 function dropIdleLease(sessionId: string, state: LeaseState): void {
-  if (state.shared === 0 && !state.exclusive && state.drained.length === 0) {
+  if (state.shared.size === 0 && !state.exclusive && state.drained.length === 0) {
     leases.delete(sessionId);
   }
 }
@@ -337,15 +346,46 @@ export function acquireAgentLease(sessionId: string, session: BrowserSession): (
     dropIdleLease(sessionId, state);
     return null;
   }
-  state.shared += 1;
   let released = false;
-  return () => {
+  const release = () => {
     if (released) return;
     released = true;
-    state.shared -= 1;
-    if (state.shared === 0) for (const resolve of state.drained.splice(0)) resolve();
+    state.shared.delete(release);
+    if (state.shared.size === 0) for (const resolve of state.drained.splice(0)) resolve();
     dropIdleLease(sessionId, state);
   };
+  state.shared.add(release);
+  return release;
+}
+
+/**
+ * Is this session held by an agent operation OTHER than `own`?
+ *
+ * The predicate `closeSession` needs and `session.takeover` cannot give it.
+ * The flag says a HUMAN is driving; this says a SIBLING TOOL is — a click
+ * mid-navigation, a screenshot mid-snapshot — and closing the browser under
+ * one of those is the same invariant broken by a different holder.
+ *
+ * `own` is the caller's own lease, which is still held on purpose while its
+ * cleanup runs (releasing first would let a takeover's exclusive lease land
+ * mid-teardown — see the note above each `catch`). Passing it is what keeps a
+ * failed navigation able to close the browser it just failed on; omitting it
+ * is safe in the other direction, the session is merely left for the idle
+ * sweeper.
+ *
+ * `exclusive` counts as held with no exception for `own`: nothing that takes
+ * the shared lease can also hold the exclusive one, and a takeover claims it
+ * SYNCHRONOUSLY before `session.takeover` is set — so this covers the window
+ * where a human is arriving but the flag has not landed yet.
+ */
+export function leaseHeldByOthers(sessionId: string, own?: (() => void) | null): boolean {
+  const state = leases.get(sessionId);
+  if (!state) return false;
+  if (state.exclusive) return true;
+  for (const holder of state.shared) {
+    if (holder !== own) return true;
+  }
+  return false;
 }
 
 /**
@@ -376,7 +416,7 @@ export function claimTakeoverLease(
     state.exclusive = false;
     dropIdleLease(sessionId, state);
   };
-  if (state.shared === 0) return { release, drain: null };
+  if (state.shared.size === 0) return { release, drain: null };
 
   let settle: () => void = () => {};
   const drained = new Promise<void>((resolve) => {
@@ -958,7 +998,7 @@ export async function relaunchSessionWithRoute(
 }
 
 /**
- * Close every session for `sessionId` — EXCEPT one a human is holding (B1).
+ * Close every session for `sessionId` — EXCEPT one somebody else is using (B1).
  *
  * This is the dangerous half of the takeover story. Every caller of this
  * function is a cleanup path: `browse_url`'s abort listener, which fires
@@ -969,22 +1009,44 @@ export async function relaunchSessionWithRoute(
  * "the browser cannot close underneath the human" broken by the agent's own
  * tidying up.
  *
- * The check is here rather than at the call sites for exactly that reason: the
- * call sites cannot know, because the decision is made after they scheduled the
- * call. Skipping is the same trade `sweepIdleSessions` and
- * `getOrCreateSession`'s policy-change teardown already make — refusing to
- * clean up beats closing a window someone is typing into. The skipped session
- * is not leaked: once the takeover clears the flag, the idle sweeper collects
- * it on the ordinary schedule.
+ * TWO holders can be underneath, and both are checked here — the same pair
+ * `sweepIdleSessions` checks, for the same reason:
+ *
+ *   `session.takeover`  — a HUMAN is driving. Set synchronously, so a lane
+ *                         that opened before the lock is not the risk.
+ *   `leaseHeldByOthers` — a SIBLING TOOL is driving: a click mid-navigation,
+ *                         a screenshot mid-snapshot. `browse_url` failing does
+ *                         not make `browser_click`'s page disposable, and the
+ *                         two tools reach this function from opposite ends of
+ *                         one session.
+ *
+ * `ownLease` is the caller's OWN lease, and passing it is what keeps this a
+ * skip rather than a refusal to clean up after itself: cleanup runs inside the
+ * lease on purpose (releasing first would let a takeover's exclusive lease land
+ * mid-teardown), so without it every caller would recognise itself as the
+ * sibling it must not close under. Omitting it fails safe — the session is left
+ * for the idle sweeper, not closed under anyone.
+ *
+ * The check is here rather than at the call sites because the call sites cannot
+ * know: the decision is made after they scheduled the call. Skipping is the
+ * same trade `sweepIdleSessions` and `getOrCreateSession`'s policy-change
+ * teardown already make — refusing to clean up beats closing a window someone
+ * is typing into. The skipped session is not leaked: once the takeover clears
+ * the flag and the last lease releases, the idle sweeper collects it on the
+ * ordinary schedule.
  *
  * `closeAllSessions` / `cleanupOnExit` deliberately do NOT skip: the process is
  * going away, and the same abort that triggers them cancels the clarify the
  * takeover is parked on.
  */
-export async function closeSession(sessionId: string): Promise<void> {
+export async function closeSession(
+  sessionId: string,
+  ownLease?: (() => void) | null,
+): Promise<void> {
   for (const [k, s] of sessions.entries()) {
     if (k.startsWith(`${sessionId}::`) || k === sessionId) {
       if (s.takeover) continue;
+      if (leaseHeldByOthers(sessionIdOf(k), ownLease)) continue;
       sessions.delete(k);
       await s.close();
     }

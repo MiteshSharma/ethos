@@ -1,3 +1,5 @@
+import { ORPCError } from '@orpc/server';
+import { CLARIFY_UNRESOLVED_REASON, respondAndConfirm } from '../clarify-resolution';
 import { os } from './context';
 
 // Thin RPC shell for the clarify namespace. Resolves a pending clarify
@@ -18,15 +20,40 @@ import { os } from './context';
 const TERMINAL_STATUSES: ReadonlySet<string> = new Set(['done', 'failed', 'aborted']);
 
 export const clarifyRouter = {
+  /**
+   * Answer one pending clarify. `{ ok: true }` means the row was RESOLVED —
+   * nothing weaker, and `respondAndConfirm` is what enforces it.
+   *
+   * Both ways this can resolve nothing used to report success: optional
+   * chaining returned `{ ok: true }` with no bridge at all, and
+   * `ClarifyBridge.respond()` swallows a request it cannot resolve. This is
+   * the takeover's FALLBACK hand-back (`TakeoverMode.handBack`), so either one
+   * told an operator the browser was back with the agent while it stayed
+   * parked. Failure THROWS because the contract's output is `z.literal(true)`
+   * — no other channel exists — and both callers already render the message.
+   */
   respond: os.clarify.respond.handler(async ({ input, context }) => {
+    const bridge = context.clarifyBridge;
+    if (!bridge) {
+      throw new ORPCError('CLARIFY_UNAVAILABLE', {
+        status: 503,
+        message: 'This Ethos process has no clarify bridge — the answer went nowhere.',
+      });
+    }
     // D7 — a human acted on this surface; a background job's next question
     // may route here instead of always falling back to its origin lane.
-    context.clarifyBridge?.recordPresence('web');
-    await context.clarifyBridge?.respond({
+    bridge.recordPresence('web');
+    const resolved = await respondAndConfirm(bridge, {
       requestId: input.requestId,
       answer: input.answer,
       source: input.source,
     });
+    if (!resolved) {
+      throw new ORPCError('CLARIFY_NOT_RESOLVED', {
+        status: 409,
+        message: `That answer did not land: ${CLARIFY_UNRESOLVED_REASON}.`,
+      });
+    }
     return { ok: true as const };
   }),
 

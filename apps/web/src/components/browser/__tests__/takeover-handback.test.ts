@@ -12,7 +12,9 @@
 
 import type { ClarifyRequestEvent } from '@ethosagent/web-contracts';
 import {
+  type BrowserTakeoverClientFrame,
   type BrowserTakeoverServerFrame,
+  decodeBrowserTakeoverClientFrame,
   encodeBrowserTakeoverFrame,
 } from '@ethosagent/web-contracts';
 import { act, createElement } from 'react';
@@ -73,6 +75,14 @@ const REQUEST: ClarifyRequestEvent = {
 
 let container: HTMLDivElement;
 let root: Root;
+
+/** What this client actually sent, through the real codec. */
+function sentFrames(ws: FakeSocket): BrowserTakeoverClientFrame[] {
+  return ws.sent.flatMap((bytes) => {
+    const decoded = decodeBrowserTakeoverClientFrame(bytes);
+    return decoded ? [decoded.header] : [];
+  });
+}
 
 function handBackButton(): HTMLButtonElement {
   const button = container.querySelector<HTMLButtonElement>('.takeover-stage-handback');
@@ -197,6 +207,50 @@ describe('hand-back when the lane goes away underneath it', () => {
     await act(async () => handBackButton().click());
     expect(handBackButton().disabled).toBe(true);
     await act(async () => settle());
+  });
+
+  it('keeps the picture live and the retry working after handback_failed', async () => {
+    // The server refuses a hand-back WITHOUT closing the lane: it restarts the
+    // screencast and says "the browser is still yours — try again". The client
+    // used to answer that by painting `unavailable` over a live picture, and
+    // `TakeoverStage` gates every click and keystroke on `live` — so the retry
+    // the sentence invites was the one thing the mode had just made impossible.
+    const ws = await live();
+    await act(async () => {
+      ws.deliver({ t: 'frame', seq: 1, width: 1280, height: 800 });
+    });
+    expect(container.querySelector('.takeover-stage-view')).not.toBeNull();
+
+    await act(async () => handBackButton().click());
+    await act(async () => {
+      ws.deliver({
+        t: 'error',
+        code: 'handback_failed',
+        message: 'The hand-back did not go through: that request is no longer open.',
+      });
+    });
+
+    // Still driving, still looking at the page, and told why.
+    expect(container.textContent).toContain('● you are driving');
+    expect(container.textContent).not.toContain('no live view');
+    expect(container.querySelector('.takeover-stage-view')).not.toBeNull();
+    expect(container.textContent).toContain('no longer open');
+    expect(handBackButton().disabled).toBe(false);
+
+    // Input still reaches the page...
+    await act(async () => {
+      const view = container.querySelector('.takeover-stage-view') as HTMLElement;
+      view.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 0 }));
+    });
+    expect(sentFrames(ws).some((f) => f.t === 'mouse')).toBe(true);
+
+    // ...and the retry goes back down the LANE, not to the fallback RPC.
+    await act(async () => handBackButton().click());
+    expect(sentFrames(ws).filter((f) => f.t === 'handback')).toHaveLength(2);
+    expect(respondFn).not.toHaveBeenCalled();
+    // The stale refusal is gone the moment a new attempt is outstanding.
+    expect(container.textContent).not.toContain('no longer open');
+    expect(handBackButton().disabled).toBe(true);
   });
 
   it('stays disabled after a hand-back the lane actually completed', async () => {
