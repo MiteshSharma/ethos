@@ -73,8 +73,9 @@ describe('KEY_CATALOG', () => {
     expect(xai[0]?.id).toBe('tools.xai');
     expect(xai[0]?.category).toBe('tools');
     expect(xai[0]?.label).toBe('xAI (Grok + X search)');
-    // Not a NamedSecretsService provider (that vault is exa/tavily/brave only),
-    // so the row stays directly editable here.
+    // `xai` IS a NamedSecretsService provider now (x_search binds one), but
+    // the Models pane also writes this exact ref for the Grok LLM provider —
+    // so the row stays directly editable here rather than reflect-only.
     expect(xai[0]?.reflectsNamedSecret).toBeUndefined();
   });
 

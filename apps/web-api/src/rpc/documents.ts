@@ -5,15 +5,17 @@ import { os } from './context';
 // `routes/documents.ts`.
 
 export const documentsRouter = {
-  root: os.documents.root.handler(({ input, context }) =>
-    context.documents.root(input.personalityId),
-  ),
+  root: os.documents.root.handler(({ input, context }) => context.documents.root(input)),
 
   list: os.documents.list.handler(({ input, context }) => context.documents.list(input)),
 
   delete: os.documents.delete.handler(({ input, context }) => context.documents.delete(input)),
 
   createFolder: os.documents.createFolder.handler(({ input, context }) =>
-    context.documents.createFolder(input.personalityId, input.root, input.path),
+    context.documents.createFolder(
+      { personalityId: input.personalityId, team: input.team },
+      input.root,
+      input.path,
+    ),
   ),
 };

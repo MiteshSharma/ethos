@@ -143,6 +143,29 @@ describe('ToolSettingsService', () => {
     expect(toolsYaml).not.toContain('RAW-SECRET-VALUE');
   });
 
+  it('x_search binding round-trips beside web_search in both stores', async () => {
+    const values: ToolSettingsValues = {
+      web_search: { provider: 'exa', secret: 'exa-main' },
+      x_search: { secret: 'xai-main' },
+    };
+    await service.setForPersonality('scout', values);
+    expect(await storage.read('/data/config.yaml')).toContain(
+      'toolSettings.scout.x_search.secret: xai-main',
+    );
+    expect((await service.getForPersonality('scout')).values).toEqual(values);
+
+    await service.setForPersonality('mine', values);
+    const toolsYaml = (await storage.read('/data/personalities/mine/tools.yaml')) ?? '';
+    expect(toolsYaml).toContain('x_search: { secret: xai-main }');
+    expect((await service.getForPersonality('mine')).values).toEqual(values);
+  });
+
+  it('drops an unsafe x_search secret name instead of persisting it', async () => {
+    await service.setForPersonality('mine', { x_search: { secret: '../openai/apiKey' } });
+    expect(await storage.exists('/data/personalities/mine/tools.yaml')).toBe(false);
+    expect((await service.getForPersonality('mine')).values).toEqual({});
+  });
+
   it('rejects a reserved / unsafe personality id used as a config slot key', async () => {
     // A built-in id flows straight into `toolSettings[<id>]` as a computed key.
     // `__proto__` and friends must never become serialized own-keys (a

@@ -173,6 +173,41 @@ describe('FilePersonalityRegistry', () => {
       });
     });
 
+    it('parses an x_search binding beside web_search, and alone', async () => {
+      const both = join(testDir, 'both');
+      await mkdir(both);
+      await writeFile(join(both, 'config.yaml'), 'name: Both\n');
+      await writeFile(join(both, 'SOUL.md'), '# Both');
+      await writeFile(
+        join(both, 'tools.yaml'),
+        'web_search: { provider: exa, secret: exa-main }\nx_search: { secret: xai-main }\n',
+      );
+      const alone = join(testDir, 'alone');
+      await mkdir(alone);
+      await writeFile(join(alone, 'config.yaml'), 'name: Alone\n');
+      await writeFile(join(alone, 'SOUL.md'), '# Alone');
+      await writeFile(join(alone, 'tools.yaml'), 'x_search:\n  secret: xai-block\n');
+
+      const registry = new FilePersonalityRegistry(new FsStorage());
+      await registry.loadFromDirectory(testDir);
+      expect(registry.getToolsConfig('both')).toEqual({
+        web_search: { provider: 'exa', secret: 'exa-main' },
+        x_search: { secret: 'xai-main' },
+      });
+      expect(registry.getToolsConfig('alone')).toEqual({ x_search: { secret: 'xai-block' } });
+    });
+
+    it('drops an x_search binding whose secret name is unsafe', async () => {
+      const dir = join(testDir, 'evilx');
+      await mkdir(dir);
+      await writeFile(join(dir, 'config.yaml'), 'name: EvilX\n');
+      await writeFile(join(dir, 'SOUL.md'), '# EvilX');
+      await writeFile(join(dir, 'tools.yaml'), 'x_search: { secret: ../openai/apiKey }\n');
+      const registry = new FilePersonalityRegistry(new FsStorage());
+      await registry.loadFromDirectory(testDir);
+      expect(registry.getToolsConfig('evilx')).toBeUndefined();
+    });
+
     it('getToolsConfig is undefined for a personality with no tools.yaml', async () => {
       const personalityDir = join(testDir, 'nofile');
       await mkdir(personalityDir);

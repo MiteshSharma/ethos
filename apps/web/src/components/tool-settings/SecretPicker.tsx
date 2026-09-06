@@ -1,4 +1,9 @@
 import {
+  NAMED_SECRET_PROVIDER_KINDS,
+  type NamedSecretProvider,
+  NamedSecretProviderSchema,
+} from '@ethosagent/web-contracts';
+import {
   App as AntApp,
   Button,
   Divider,
@@ -19,15 +24,40 @@ import { useNamedSecretsList } from '../../features/settings/api/queries';
 // "Add secret" shortcut writes a new secret into the vault without leaving the
 // form.
 //
-// v1: named secrets are web_search provider keys, so the add form offers the
-// three search providers. When `providerFilter` is set, the add form locks to
-// that provider so the created name aligns with the tool's chosen provider.
+// The add form offers every provider the vault accepts, grouped by kind. When
+// `providerFilter` names one of them the form locks to it; otherwise, when the
+// picker's `secretKind` maps to exactly one provider (x_search → xai), it locks
+// to that one, so the created secret always lands where the tool will look.
 
-const WEB_SEARCH_PROVIDERS = ['exa', 'tavily', 'brave'] as const;
-type WebSearchProvider = (typeof WEB_SEARCH_PROVIDERS)[number];
+/** Display labels, grouped the way the add form's Select shows them. */
+const PROVIDER_GROUPS: Array<{ label: string; providers: Array<[NamedSecretProvider, string]> }> = [
+  {
+    label: 'Web search',
+    providers: [
+      ['exa', 'Exa'],
+      ['tavily', 'Tavily'],
+      ['brave', 'Brave Search'],
+    ],
+  },
+  {
+    label: 'X',
+    providers: [
+      ['xai', 'xAI (Grok, X search)'],
+      ['x', 'X API (bearer token)'],
+    ],
+  },
+];
 
-function isWebSearchProvider(v: string | undefined): v is WebSearchProvider {
-  return v === 'exa' || v === 'tavily' || v === 'brave';
+function asNamedSecretProvider(v: string | undefined): NamedSecretProvider | undefined {
+  const parsed = NamedSecretProviderSchema.safeParse(v);
+  return parsed.success ? parsed.data : undefined;
+}
+
+/** The providers whose secrets a picker of `secretKind` offers. */
+function providersOfKind(secretKind: string): NamedSecretProvider[] {
+  return NamedSecretProviderSchema.options.filter(
+    (p) => NAMED_SECRET_PROVIDER_KINDS[p] === secretKind,
+  );
 }
 
 export interface SecretPickerProps {
@@ -50,6 +80,8 @@ export function SecretPicker({
 }: SecretPickerProps) {
   const secretsQuery = useNamedSecretsList();
   const [addOpen, setAddOpen] = useState(false);
+  const filterProvider = asNamedSecretProvider(providerFilter);
+  const kindProviders = providersOfKind(secretKind);
 
   const secrets = (secretsQuery.data?.secrets ?? []).filter(
     (s) => s.kind === secretKind && (!providerFilter || s.provider === providerFilter),
@@ -105,8 +137,10 @@ export function SecretPicker({
       />
       {addOpen ? (
         <AddSecretModal
-          initialProvider={isWebSearchProvider(providerFilter) ? providerFilter : undefined}
-          lockProvider={isWebSearchProvider(providerFilter)}
+          initialProvider={
+            filterProvider ?? (kindProviders.length === 1 ? kindProviders[0] : undefined)
+          }
+          lockProvider={filterProvider !== undefined || kindProviders.length === 1}
           onClose={() => setAddOpen(false)}
           onCreated={(name) => {
             setAddOpen(false);
@@ -119,7 +153,7 @@ export function SecretPicker({
 }
 
 interface AddSecretForm {
-  provider: WebSearchProvider;
+  provider: NamedSecretProvider;
   name: string;
   value: string;
 }
@@ -130,7 +164,7 @@ export function AddSecretModal({
   onClose,
   onCreated,
 }: {
-  initialProvider?: WebSearchProvider;
+  initialProvider?: NamedSecretProvider;
   lockProvider: boolean;
   onClose: () => void;
   onCreated: (name: string) => void;
@@ -178,7 +212,11 @@ export function AddSecretModal({
         <Form.Item name="provider" label="Provider" rules={[{ required: true }]}>
           <Select
             disabled={lockProvider}
-            options={WEB_SEARCH_PROVIDERS.map((p) => ({ value: p, label: p }))}
+            options={PROVIDER_GROUPS.map((g) => ({
+              label: g.label,
+              title: g.label,
+              options: g.providers.map(([value, label]) => ({ value, label })),
+            }))}
           />
         </Form.Item>
         <Form.Item

@@ -23,6 +23,7 @@ const teamsGet = vi.fn();
 const teamsLedger = vi.fn();
 const kanbanGetBoard = vi.fn();
 const kanbanListAgents = vi.fn();
+const documentsList = vi.fn();
 
 vi.mock('../../../rpc', () => ({
   rpc: {
@@ -34,6 +35,7 @@ vi.mock('../../../rpc', () => ({
       getBoard: (...args: unknown[]) => kanbanGetBoard(...args),
       listAgents: (...args: unknown[]) => kanbanListAgents(...args),
     },
+    documents: { list: (...args: unknown[]) => documentsList(...args) },
   },
 }));
 
@@ -52,6 +54,13 @@ beforeEach(() => {
   teamsLedger.mockResolvedValue({ items: LEDGER });
   kanbanGetBoard.mockResolvedValue({ board: boardSnapshot() });
   kanbanListAgents.mockResolvedValue({ agents: [] });
+  documentsList.mockResolvedValue({
+    entries: [
+      { name: 'brand', path: 'brand', isDir: true, isSymlink: false },
+      { name: 'state', path: 'state', isDir: true, isSymlink: false },
+      { name: 'outcomes.md', path: 'outcomes.md', isDir: false, isSymlink: false },
+    ],
+  });
 });
 
 afterEach(async () => {
@@ -108,6 +117,24 @@ describe('TeamOverview', () => {
     const chips = [...c.querySelectorAll('.team-chip')];
     expect(chips.map((a) => a.textContent)).toEqual(['onboarding', 'decisions']);
     expect(chips[0]?.getAttribute('href')).toBe('/t/marketing/memory?topic=onboarding');
+  });
+
+  it('links to the Documents pane with the top-level entry count, and without one when the team has no directory', async () => {
+    let c = await mount();
+    expect(documentsList).toHaveBeenCalledWith({ team: 'marketing', root: '0' });
+    const secs = [...c.querySelectorAll('.team-sec')];
+    const docs = secs.find((el) => el.textContent?.startsWith('Documents'));
+    expect(text(docs ?? null)).toBe('Documents 3 top-level entriesOpen →');
+    expect(docs?.querySelector('a')?.getAttribute('href')).toBe('/t/marketing/documents');
+    await mounted?.unmount();
+    mounted = null;
+
+    documentsList.mockRejectedValue(new Error('Team "marketing" has no work directory yet.'));
+    c = await mount();
+    const bare = [...c.querySelectorAll('.team-sec')].find((el) =>
+      el.textContent?.startsWith('Documents'),
+    );
+    expect(text(bare ?? null)).toBe('Documents Open →');
   });
 
   it('groups the board attention-first, skipping empty groups, with the reason line', async () => {

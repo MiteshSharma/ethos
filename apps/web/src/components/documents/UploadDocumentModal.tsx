@@ -7,6 +7,7 @@ import {
 } from '../../features/documents/api/mutations';
 import { useDocumentsList } from '../../features/documents/api/queries';
 import {
+  type DocumentsScope,
   type DocumentUploadFailure,
   documentFolderOptions,
   joinDocumentPath,
@@ -32,7 +33,7 @@ import { NewFolderPrompt } from './NewFolderPrompt';
 // same upload with `overwrite=true` — rather than a silent clobber.
 
 interface Props {
-  personalityId: string;
+  scope: DocumentsScope;
   root: string;
   /** The selected root's short label, for the destination picker's root row. */
   rootLabel: string;
@@ -41,13 +42,7 @@ interface Props {
   onClose: () => void;
 }
 
-export function UploadDocumentModal({
-  personalityId,
-  root,
-  rootLabel,
-  initialPath,
-  onClose,
-}: Props) {
+export function UploadDocumentModal({ scope, root, rootLabel, initialPath, onClose }: Props) {
   const [file, setFile] = useState<File | null>(null);
   const [filename, setFilename] = useState('');
   const [dest, setDest] = useState(initialPath);
@@ -57,9 +52,9 @@ export function UploadDocumentModal({
   const [folderName, setFolderName] = useState('');
   const [folderError, setFolderError] = useState<string | null>(null);
 
-  const listQuery = useDocumentsList(personalityId, root, dest);
-  const createFolder = useCreateFolder(personalityId, root);
-  const upload = useUploadDocument(personalityId, root);
+  const listQuery = useDocumentsList(scope, root, dest);
+  const createFolder = useCreateFolder(scope, root);
+  const upload = useUploadDocument(scope, root);
 
   const options = documentFolderOptions(dest, listQuery.data?.entries ?? [], rootLabel);
   const name = filename.trim() || file?.name || '';

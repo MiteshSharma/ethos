@@ -103,12 +103,12 @@ export function tokenBudgetRule(opts: TokenBudgetOptions = {}): WatcherRule {
 // ---------------------------------------------------------------------------
 
 export interface CompoundingErrorOptions {
-  /** Consecutive failures from the same tool before pausing. Default 3. */
+  /** Consecutive failures from the same tool before pausing. Default 5. */
   threshold?: number;
 }
 
 export function compoundingErrorRule(opts: CompoundingErrorOptions = {}): WatcherRule {
-  const threshold = opts.threshold ?? 3;
+  const threshold = opts.threshold ?? 5;
   return {
     id: 'compounding-error',
     evaluate(event, state) {

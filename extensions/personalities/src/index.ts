@@ -274,13 +274,21 @@ function parseToolsetYaml(src: string): string[] {
 // ---------------------------------------------------------------------------
 // tools.yaml — per-personality tool config (source of truth). A sibling
 // artifact to config.yaml / toolset.yaml / mcp.yaml, NOT a field on the frozen
-// PersonalityConfig schema. Only `web_search` is modeled in v1. A binding
-// carries a secret NAME only — never a value (§V S9) — so the directory stays
-// shareable and committable.
+// PersonalityConfig schema. A binding carries a secret NAME only — never a
+// value (§V S9) — so the directory stays shareable and committable.
 // ---------------------------------------------------------------------------
 
 export interface PersonalityToolsConfig {
   web_search?: { provider?: 'exa' | 'tavily' | 'brave'; secret?: string };
+  /** One provider (xAI) — the name resolves to `providers/xai/<name>`. */
+  x_search?: { secret?: string };
+}
+
+const TOOLS_YAML_KEYS = ['web_search', 'x_search'] as const;
+type ToolsYamlKey = (typeof TOOLS_YAML_KEYS)[number];
+
+function isToolsYamlKey(k: string): k is ToolsYamlKey {
+  return (TOOLS_YAML_KEYS as readonly string[]).includes(k);
 }
 
 function parseInlineToolMap(s: string): Record<string, string> {
@@ -305,6 +313,7 @@ function parseInlineToolMap(s: string): Record<string, string> {
  * flow-map form and the equivalent block form:
  *
  *   web_search: { provider: exa, secret: exa-main }
+ *   x_search: { secret: xai-main }
  *   # or
  *   web_search:
  *     provider: exa
@@ -315,9 +324,10 @@ export function parseToolsYaml(src: string): PersonalityToolsConfig {
   const lines = src.split('\n');
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i] ?? '';
-    const m = line.match(/^web_search:\s*(.*)$/);
-    if (!m) continue;
-    const rest = (m[1] ?? '').trim();
+    const m = line.match(/^(\w+):\s*(.*)$/);
+    const tool = m?.[1];
+    if (!m || !tool || !isToolsYamlKey(tool)) continue;
+    const rest = (m[2] ?? '').trim();
     let entry: Record<string, string> = {};
     if (rest.startsWith('{')) {
       entry = parseInlineToolMap(rest);
@@ -345,6 +355,10 @@ export function parseToolsYaml(src: string): PersonalityToolsConfig {
     // provider without its intended key must not silently fall back to a
     // different (default) key.
     if (entry.secret && !isValidSecretName(entry.secret)) continue;
+    if (tool === 'x_search') {
+      if (entry.secret) out.x_search = { secret: entry.secret };
+      continue;
+    }
     const ws: NonNullable<PersonalityToolsConfig['web_search']> = {};
     if (entry.provider === 'exa' || entry.provider === 'tavily' || entry.provider === 'brave') {
       ws.provider = entry.provider;
@@ -358,16 +372,19 @@ export function parseToolsYaml(src: string): PersonalityToolsConfig {
 /**
  * Render a `PersonalityToolsConfig` back to the inline flow-map form
  * `parseToolsYaml` reads. Only fields that are set are emitted; a config with
- * no meaningful `web_search` binding renders to `''` (caller removes the file).
+ * no meaningful binding renders to `''` (caller removes the file).
  */
 export function renderToolsYaml(config: PersonalityToolsConfig): string {
+  const lines: string[] = [];
   const ws = config.web_search;
-  if (!ws) return '';
-  const parts: string[] = [];
-  if (ws.provider) parts.push(`provider: ${ws.provider}`);
-  if (ws.secret) parts.push(`secret: ${ws.secret}`);
-  if (parts.length === 0) return '';
-  return `web_search: { ${parts.join(', ')} }\n`;
+  if (ws) {
+    const parts: string[] = [];
+    if (ws.provider) parts.push(`provider: ${ws.provider}`);
+    if (ws.secret) parts.push(`secret: ${ws.secret}`);
+    if (parts.length > 0) lines.push(`web_search: { ${parts.join(', ')} }`);
+  }
+  if (config.x_search?.secret) lines.push(`x_search: { secret: ${config.x_search.secret} }`);
+  return lines.length === 0 ? '' : `${lines.join('\n')}\n`;
 }
 
 // ---------------------------------------------------------------------------
@@ -1783,7 +1800,7 @@ export class FilePersonalityRegistry implements PersonalityRegistry {
     let toolsConfig: PersonalityToolsConfig | undefined;
     if (toolsSrc) {
       const parsed = parseToolsYaml(toolsSrc);
-      if (parsed.web_search) toolsConfig = parsed;
+      if (parsed.web_search || parsed.x_search) toolsConfig = parsed;
     }
     return { config, mcpPolicy, mcpWarnings, toolsConfig };
   }

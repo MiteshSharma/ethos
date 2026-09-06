@@ -1,9 +1,10 @@
-import { lstat } from 'node:fs/promises';
+import { lstat, stat } from 'node:fs/promises';
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import { deriveDocumentsRoots } from '@ethosagent/core';
 import type { FilePersonalityRegistry } from '@ethosagent/personalities';
 import { defaultAlwaysDeny, ScopedStorage } from '@ethosagent/storage-fs';
 import { BoundaryError, EthosError, type PersonalityConfig, type Storage } from '@ethosagent/types';
+import { assertSafeTeamName } from './kanban.service';
 
 // Documents service — the operator's only channel to the files the agent
 // writes on a headless box.
@@ -17,6 +18,15 @@ import { BoundaryError, EthosError, type PersonalityConfig, type Storage } from 
 // check here: `ScopedStorage.check()` calls `resolve()` before the prefix
 // test, so `..` segments and absolute paths both land outside the allowlist
 // and are rejected.
+//
+// A TEAM is the other thing a Documents call can address (`scope.team`
+// instead of `scope.personalityId`). Its one root is the team's work
+// directory, `<teamsDir>/<team>/` — the tree the members write into
+// (brand/, opportunities/, state/, memory/, …). No `fs_reach` allowlist is
+// consulted for it: the team directory IS the boundary, wrapped in the same
+// `ScopedStorage` + symlink walk as a personality root. A team whose directory
+// does not exist yet has no roots, exactly as an undeclared personality
+// workdir has none.
 //
 // A personality with NO declared `fs_reach.workdir` has NO roots at all —
 // Documents is unconfigured for it. There is deliberately no fallback to
@@ -57,12 +67,24 @@ export interface DocumentDownload {
   size: number;
 }
 
+/**
+ * What a Documents call addresses: a personality's declared roots, or a team's
+ * work directory. Neither set means the configured default personality; both
+ * set is refused.
+ */
+export interface DocumentsScope {
+  personalityId?: string | undefined;
+  team?: string | undefined;
+}
+
 export interface DocumentsServiceOptions {
   personalities: FilePersonalityRegistry;
   /** `~/.ethos` — the `${ETHOS_HOME}` every declared root substitutes against. */
   dataDir: string;
   /** Inner Storage the per-request `ScopedStorage` decorates. */
   storage: Storage;
+  /** Where team work directories live. Defaults to `<dataDir>/teams`. */
+  teamsDir?: string;
   /**
    * Reload the personality registry from disk before a read, so a personality
    * whose `fs_reach.workdir` was just edited is honoured without a restart.
@@ -87,23 +109,25 @@ export class DocumentsService {
    * root that must already exist, so "zero roots" is a valid answer rather
    * than an error.
    */
-  async root(
-    personalityId?: string,
-  ): Promise<{ roots: Array<{ id: string; path: string }>; personalityId: string }> {
-    const personality = await this.getPersonality(personalityId);
-    const roots = this.declaredRoots(personality).map((r, index) => ({
-      id: String(index),
-      path: r.workdir,
-    }));
-    return { roots, personalityId: personality.id };
+  async root(scope: DocumentsScope = {}): Promise<{
+    roots: Array<{ id: string; path: string }>;
+    personalityId?: string;
+    team?: string;
+  }> {
+    const resolved = await this.rootsFor(scope);
+    const roots = resolved.roots.map((workdir, index) => ({ id: String(index), path: workdir }));
+    return resolved.kind === 'team'
+      ? { roots, team: resolved.team }
+      : { roots, personalityId: resolved.personalityId };
   }
 
-  async list(input: {
-    personalityId?: string;
-    root: string;
-    path?: string;
-  }): Promise<{ entries: DocumentEntry[] }> {
-    const { workdir, scoped } = await this.resolve(input.personalityId, input.root);
+  async list(
+    input: DocumentsScope & {
+      root: string;
+      path?: string;
+    },
+  ): Promise<{ entries: DocumentEntry[] }> {
+    const { workdir, scoped } = await this.resolve(input, input.root);
     const dir = await this.reachable(scoped, workdir, input.path);
 
     // `listEntries` yields [] for a missing directory, which is the right
@@ -132,12 +156,13 @@ export class DocumentsService {
    * class note; a browser delete button that silently removes a subtree is the
    * surprising behaviour, and there is no trash tier to undo it from.
    */
-  async delete(input: {
-    personalityId?: string;
-    root: string;
-    path: string;
-  }): Promise<{ ok: true }> {
-    const { workdir, scoped } = await this.resolve(input.personalityId, input.root);
+  async delete(
+    input: DocumentsScope & {
+      root: string;
+      path: string;
+    },
+  ): Promise<{ ok: true }> {
+    const { workdir, scoped } = await this.resolve(input, input.root);
     const target = await this.reachable(scoped, workdir, input.path);
     if (target === resolve(workdir)) {
       throw new EthosError({
@@ -166,12 +191,13 @@ export class DocumentsService {
    * NOT read here — the route streams them, so a large artifact never lands in
    * the server's heap.
    */
-  async resolveDownload(input: {
-    personalityId?: string;
-    root: string;
-    path: string;
-  }): Promise<DocumentDownload> {
-    const { workdir, scoped } = await this.resolve(input.personalityId, input.root);
+  async resolveDownload(
+    input: DocumentsScope & {
+      root: string;
+      path: string;
+    },
+  ): Promise<DocumentDownload> {
+    const { workdir, scoped } = await this.resolve(input, input.root);
     const target = await this.reachable(scoped, workdir, input.path);
 
     const st = await lstat(target).catch(() => null);
@@ -196,12 +222,8 @@ export class DocumentsService {
    * directory. This keeps folder creation predictable: no silent creation of
    * a multi-level hierarchy from a typo'd path.
    */
-  async createFolder(
-    personalityId: string | undefined,
-    root: string,
-    path: string,
-  ): Promise<DocumentEntry> {
-    const { workdir, scoped } = await this.resolve(personalityId, root);
+  async createFolder(scope: DocumentsScope, root: string, path: string): Promise<DocumentEntry> {
+    const { workdir, scoped } = await this.resolve(scope, root);
     const target = await this.reachable(scoped, workdir, path);
 
     const existing = await lstat(target).catch(() => null);
@@ -232,13 +254,13 @@ export class DocumentsService {
    * interrupted write never leaves a partial file at the destination.
    */
   async write(
-    personalityId: string | undefined,
+    scope: DocumentsScope,
     root: string,
     path: string,
     body: ReadableStream<Uint8Array> | Buffer,
     opts: { overwrite: boolean },
   ): Promise<DocumentEntry> {
-    const { workdir, scoped } = await this.resolve(personalityId, root);
+    const { workdir, scoped } = await this.resolve(scope, root);
     const target = await this.reachable(scoped, workdir, path);
 
     await this.requireParentDir(target);
@@ -266,47 +288,100 @@ export class DocumentsService {
   }
 
   /**
-   * Resolve the personality, then the caller-selected root's absolute
-   * directory and the `ScopedStorage` that confines every subsequent
-   * operation to it.
+   * Resolve the scope, then the caller-selected root's absolute directory and
+   * the `ScopedStorage` that confines every subsequent operation to it.
    *
-   * Throws `WORKDIR_NOT_CONFIGURED` when the personality has no declared
-   * roots at all, and `INVALID_INPUT` when `root` does not name one of its
-   * declared roots (a stale id from before the personality's config changed,
-   * or a client bug). See `root()` for the id scheme (stringified index).
+   * Throws `WORKDIR_NOT_CONFIGURED` when the scope has no roots at all (an
+   * undeclared personality workdir, or a team directory that does not exist
+   * yet), and `INVALID_INPUT` when `root` does not name one of them (a stale
+   * id from before the personality's config changed, or a client bug). See
+   * `root()` for the id scheme (stringified index).
    */
   private async resolve(
-    personalityId: string | undefined,
+    scope: DocumentsScope,
     root: string,
-  ): Promise<{ personality: PersonalityConfig; workdir: string; scoped: ScopedStorage }> {
-    const personality = await this.getPersonality(personalityId);
-    const roots = this.declaredRoots(personality);
-    if (roots.length === 0) {
-      throw new EthosError({
-        code: 'WORKDIR_NOT_CONFIGURED',
-        cause: `Personality "${personality.id}" has no declared \`fs_reach.workdir\`.`,
-        action: "Set `fs_reach.workdir` in this personality's config.yaml.",
-      });
+  ): Promise<{ workdir: string; scoped: ScopedStorage }> {
+    const resolved = await this.rootsFor(scope);
+    if (resolved.roots.length === 0) {
+      throw resolved.kind === 'team'
+        ? new EthosError({
+            code: 'WORKDIR_NOT_CONFIGURED',
+            cause: `Team "${resolved.team}" has no work directory yet.`,
+            action: 'It is created the first time the team runs.',
+          })
+        : new EthosError({
+            code: 'WORKDIR_NOT_CONFIGURED',
+            cause: `Personality "${resolved.personalityId}" has no declared \`fs_reach.workdir\`.`,
+            action: "Set `fs_reach.workdir` in this personality's config.yaml.",
+          });
     }
 
     const index = Number.parseInt(root, 10);
-    const match = Number.isInteger(index) ? roots[index] : undefined;
-    if (!match) {
+    const workdir = Number.isInteger(index) ? resolved.roots[index] : undefined;
+    if (!workdir) {
       throw new EthosError({
         code: 'INVALID_INPUT',
-        cause: `Unknown Documents root "${root}" for personality "${personality.id}".`,
+        cause: `Unknown Documents root "${root}" for ${resolved.subject}.`,
         action: 'Call documents.root to list the declared roots and pick a valid id.',
       });
     }
 
     return {
-      personality,
-      workdir: match.workdir,
+      workdir,
       scoped: new ScopedStorage(this.opts.storage, {
-        read: [match.workdir],
-        write: [match.workdir],
+        read: [workdir],
+        write: [workdir],
         alwaysDeny: defaultAlwaysDeny(),
       }),
+    };
+  }
+
+  /**
+   * The absolute root directories a scope addresses, in `root` id order, plus
+   * what to call the scope in an error message. A personality's are its
+   * declared `fs_reach.workdir` entries; a team's is its single work
+   * directory when that exists on disk, else none.
+   */
+  private async rootsFor(
+    scope: DocumentsScope,
+  ): Promise<
+    | { kind: 'personality'; personalityId: string; roots: string[]; subject: string }
+    | { kind: 'team'; team: string; roots: string[]; subject: string }
+  > {
+    if (scope.team !== undefined) {
+      if (scope.personalityId !== undefined) {
+        throw new EthosError({
+          code: 'INVALID_INPUT',
+          cause: 'A Documents call addresses a personality or a team, not both.',
+          action: 'Pass either `personalityId` or `team`.',
+        });
+      }
+      const team = scope.team;
+      try {
+        assertSafeTeamName(team);
+      } catch {
+        throw new EthosError({
+          code: 'INVALID_INPUT',
+          cause: 'That is not a valid team name.',
+          action: 'Pick a team from the Teams tab.',
+        });
+      }
+      const dir = join(this.opts.teamsDir ?? join(this.opts.dataDir, 'teams'), team);
+      const st = await stat(dir).catch(() => null);
+      return {
+        kind: 'team',
+        team,
+        roots: st?.isDirectory() ? [dir] : [],
+        subject: `team "${team}"`,
+      };
+    }
+
+    const personality = await this.getPersonality(scope.personalityId);
+    return {
+      kind: 'personality',
+      personalityId: personality.id,
+      roots: this.declaredRoots(personality).map((r) => r.workdir),
+      subject: `personality "${personality.id}"`,
     };
   }
 
@@ -405,7 +480,7 @@ export class DocumentsService {
 function notFound(): EthosError {
   return new EthosError({
     code: 'FILE_NOT_FOUND',
-    cause: 'No such file in this workdir.',
+    cause: 'No such file under this Documents root.',
     action: 'Refresh the listing — it may have been moved or deleted.',
   });
 }
@@ -423,7 +498,7 @@ async function guardBoundary<T>(op: () => Promise<T>): Promise<T> {
     if (err instanceof BoundaryError) {
       throw new EthosError({
         code: 'FORBIDDEN',
-        cause: 'That path is outside this personality’s workdir.',
+        cause: 'That path is outside the Documents root.',
         action: 'Paths are relative to the Documents root.',
       });
     }

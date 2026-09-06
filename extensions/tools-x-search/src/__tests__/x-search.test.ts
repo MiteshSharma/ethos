@@ -122,6 +122,96 @@ describe('x_search — no key configured', () => {
   });
 });
 
+describe('x_search — named-secret binding', () => {
+  function makeRecordingSecrets(value = 'bound-key') {
+    const refs: string[] = [];
+    return {
+      refs,
+      get: async (ref: string) => {
+        refs.push(ref);
+        return value;
+      },
+    };
+  }
+  const withPersonality = (
+    scopedFetch: ScopedFetchLike,
+    secrets: typeof mockSecrets,
+    pid: string,
+  ) =>
+    ({ ...ctxWith(scopedFetch, secrets), personalityId: pid }) as typeof ctx & {
+      personalityId: string;
+    };
+
+  it('a bound secret NAME resolves providers/xai/<name>, never a value', async () => {
+    const rec = makeRecordingFetch({ output: [], citations: [] });
+    const secrets = makeRecordingSecrets('super-secret');
+    const tool = createXSearchTool({
+      resolvePersonalitySetting: (pid) => (pid === 'scout' ? { secret: 'xai-main' } : undefined),
+    });
+    const result = await tool.execute(
+      { query: 'q' },
+      withPersonality(rec.scopedFetch, secrets, 'scout'),
+    );
+    expect(result.ok).toBe(true);
+    expect(secrets.refs).toEqual(['providers/xai/xai-main']);
+    expect(new Headers(rec.calls[0]?.init?.headers).get('Authorization')).toBe(
+      'Bearer super-secret',
+    );
+  });
+
+  it('personality tools.yaml wins over global toolSettings[pid] and _default', async () => {
+    const rec = makeRecordingFetch({ output: [], citations: [] });
+    const secrets = makeRecordingSecrets();
+    const tool = createXSearchTool({
+      resolvePersonalitySetting: () => ({ secret: 'from-file' }),
+      toolSettings: {
+        scout: { x_search: { secret: 'from-slot' } },
+        _default: { x_search: { secret: 'from-default' } },
+      },
+    });
+    await tool.execute({ query: 'q' }, withPersonality(rec.scopedFetch, secrets, 'scout'));
+    expect(secrets.refs).toEqual(['providers/xai/from-file']);
+  });
+
+  it('falls through to toolSettings[pid], then _default', async () => {
+    const rec = makeRecordingFetch({ output: [], citations: [] });
+    const secrets = makeRecordingSecrets();
+    const tool = createXSearchTool({
+      resolvePersonalitySetting: () => undefined,
+      toolSettings: {
+        scout: { x_search: { secret: 'from-slot' } },
+        _default: { x_search: { secret: 'from-default' } },
+      },
+    });
+    await tool.execute({ query: 'q' }, withPersonality(rec.scopedFetch, secrets, 'scout'));
+    await tool.execute({ query: 'q' }, withPersonality(rec.scopedFetch, secrets, 'other'));
+    expect(secrets.refs).toEqual(['providers/xai/from-slot', 'providers/xai/from-default']);
+  });
+
+  it('no binding anywhere → the default providers/xai/apiKey', async () => {
+    const rec = makeRecordingFetch({ output: [], citations: [] });
+    const secrets = makeRecordingSecrets();
+    await createXSearchTool().execute({ query: 'q' }, ctxWith(rec.scopedFetch, secrets));
+    expect(secrets.refs).toEqual(['providers/xai/apiKey']);
+  });
+
+  it('a bound name that resolves to nothing names the exact dialog to fix it', async () => {
+    const rec = makeRecordingFetch({});
+    const tool = createXSearchTool({ resolvePersonalitySetting: () => ({ secret: 'missing' }) });
+    const result = await tool.execute(
+      { query: 'q' },
+      withPersonality(rec.scopedFetch, { get: async () => '' }, 'scout'),
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.code).toBe('not_available');
+      expect(result.error).toContain('Settings → Security → Named Secrets (provider xAI)');
+      expect(result.error).toContain('XAI_API_KEY');
+    }
+    expect(rec.calls).toHaveLength(0);
+  });
+});
+
 describe('x_search — API call shape', () => {
   it('POSTs to the Responses API with model, input, and the x_search tool entry', async () => {
     const rec = makeRecordingFetch({
@@ -272,8 +362,8 @@ describe('x_search — capability declarations', () => {
     expect(xSearchTool.capabilities.network?.allowedHosts).toEqual(['api.x.ai']);
   });
 
-  it('declares capabilities.secrets = [providers/xai/apiKey]', () => {
-    expect(xSearchTool.capabilities.secrets).toEqual(['providers/xai/apiKey']);
+  it('declares a prefix grant over providers/xai/* so any bound name stays inside it', () => {
+    expect(xSearchTool.capabilities.secrets).toEqual(['providers/xai/*']);
   });
 
   it('declares toolset "web"', () => {
@@ -292,7 +382,9 @@ describe('x_search settingsSchema', () => {
     expect(schema.fields).toHaveLength(1);
     const field = schema.fields[0];
     if (field?.kind !== 'secret-binding') throw new Error('expected a secret-binding field');
-    expect(field.key).toBe('apiKey');
+    // Keyed `secret` like web_search's binding — the tool-settings wire shape
+    // (`values.x_search.secret`) and tools.yaml both read that key.
+    expect(field.key).toBe('secret');
     expect(field.secretKind).toBe('x-search');
   });
 });

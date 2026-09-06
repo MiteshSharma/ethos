@@ -88,7 +88,10 @@ describe('parseConfigYaml — whatsapp.<n>.<field>', () => {
       personality: 'researcher',
       toolSettings: {
         _default: { web_search: { provider: 'tavily', secret: 'tavily-main' } },
-        scout: { web_search: { provider: 'brave', secret: 'brave-main' } },
+        scout: {
+          web_search: { provider: 'brave', secret: 'brave-main' },
+          x_search: { secret: 'xai-main' },
+        },
       },
     };
     await writeConfig(storage, original, new InMemorySecretsResolver());
@@ -98,6 +101,7 @@ describe('parseConfigYaml — whatsapp.<n>.<field>', () => {
     expect(raw).toContain('toolSettings._default.web_search.secret: tavily-main');
     expect(raw).toContain('toolSettings.scout.web_search.provider: brave');
     expect(raw).toContain('toolSettings.scout.web_search.secret: brave-main');
+    expect(raw).toContain('toolSettings.scout.x_search.secret: xai-main');
 
     const roundTripped = await readRawConfig(storage);
     expect(roundTripped?.toolSettings).toEqual(original.toolSettings);

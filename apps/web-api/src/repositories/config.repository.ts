@@ -77,10 +77,13 @@ export interface RawConfig {
    * Global FALLBACK layer for per-personality tool config, keyed by personality
    * ID (or `_default`). The personality's own `tools.yaml` is the source of
    * truth; this fills the gap for read-only built-ins. Only secret NAMES live
-   * here — never values (§V S9). `web_search` is the sole consumer in v1;
-   * mirrors the flat-key format packages/config writes/parses.
+   * here — never values (§V S9). Mirrors the flat-key format
+   * packages/config writes/parses.
    */
-  toolSettings: Record<string, { web_search?: { provider?: string; secret?: string } }>;
+  toolSettings: Record<
+    string,
+    { web_search?: { provider?: string; secret?: string }; x_search?: { secret?: string } }
+  >;
   /** Ordered provider chain for ChainedProvider failover. */
   providers: RawProviderEntry[];
   /** Every other top-level key the file contained (telegramToken etc.).
@@ -198,6 +201,18 @@ export class ConfigRepository {
           slot.web_search = ws;
           if (field === 'provider') ws.provider = value;
           else ws.secret = value;
+        }
+        continue;
+      }
+      // `toolSettings.<personality|_default>.x_search.secret: <name>`
+      const xs = line.match(/^toolSettings\.([^.]+)\.x_search\.secret:\s*(.+)$/);
+      if (xs) {
+        const pid = xs[1]?.trim();
+        const value = xs[2] !== undefined ? stripQuotes(xs[2].trim()) : '';
+        if (pid && value) {
+          const slot = config.toolSettings[pid] ?? {};
+          config.toolSettings[pid] = slot;
+          slot.x_search = { secret: value };
         }
         continue;
       }
@@ -461,6 +476,10 @@ export class ConfigRepository {
       }
       if (ws?.secret) {
         lines.push(`toolSettings.${yamlScalar(pid)}.web_search.secret: ${yamlScalar(ws.secret)}`);
+      }
+      const xs = settings.x_search;
+      if (xs?.secret) {
+        lines.push(`toolSettings.${yamlScalar(pid)}.x_search.secret: ${yamlScalar(xs.secret)}`);
       }
     }
     for (let i = 0; i < config.providers.length; i++) {

@@ -72,6 +72,7 @@ export type TeamPaneKey =
   | 'overview'
   | 'board'
   | 'structure'
+  | 'documents'
   | 'memory'
   | 'activity'
   | 'channels'
@@ -87,6 +88,7 @@ export const TEAM_PANES: ReadonlyArray<{ key: TeamPaneKey; label: string }> = [
   { key: 'overview', label: 'Overview' },
   { key: 'board', label: 'Board' },
   { key: 'structure', label: 'Structure' },
+  { key: 'documents', label: 'Documents' },
   { key: 'memory', label: 'Memory' },
   { key: 'activity', label: 'Activity' },
   { key: 'channels', label: 'Channels' },

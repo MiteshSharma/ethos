@@ -16,23 +16,16 @@ const X_API_URL = 'https://api.x.ai/v1/responses';
 const X_API_HOST = 'api.x.ai';
 
 /**
- * Default secretRef. v1 always resolves this single default-named secret —
- * it does NOT thread a personality-chosen named-secret binding through to
- * `execute()` the way `web_search`'s `resolvePersonalitySetting`/`toolSettings`
- * options do (extensions/tools-web/src/index.ts). The `settingsSchema` below
- * still declares a `secret-binding` field so the personality-settings UI can
- * render a picker for it (the form is schema-driven, not tool-specific code),
- * but wiring an arbitrary chosen secret NAME through to a resolved ref is out
- * of scope here — the plan's own wiring recommendation (§3) is the
- * `createFileTools()`-style zero-option one-liner, and `web_search`'s
- * multi-provider indirection has no analog with a single provider. Add that
- * threading later, following `web_search`'s exact pattern, if a personality
- * ever needs an xAI key for `x_search` distinct from other xAI-backed tools.
+ * Default secretRef — what `execute()` resolves when no personality binding
+ * names a secret. A binding (see `XSearchSetting`) resolves
+ * `providers/xai/<name>` instead, following `web_search`'s 4-step resolution
+ * (extensions/tools-web/src/index.ts).
  */
 const DEFAULT_SECRET_REF = 'providers/xai/apiKey';
+const SECRET_PREFIX = 'providers/xai/';
 
 const NO_KEY_MESSAGE =
-  'No xAI key configured — add one in Settings > Named Secrets (or set the XAI_API_KEY env var), then bind it to x_search in the personality tool settings.';
+  "No xAI key configured — add an xAI key in Settings → Security → Named Secrets (provider xAI), then bind it to x_search in the personality's tool settings, or set XAI_API_KEY.";
 
 /**
  * Default Grok model. Confirmed against xAI's own docs (docs.x.ai/developers/tools/x-search
@@ -153,13 +146,39 @@ function normalizeCitations(raw: unknown): Citation[] {
 // Tool
 // ---------------------------------------------------------------------------
 
+/**
+ * A resolved per-personality x_search binding. `secret` is a NAME only (e.g.
+ * `xai-main`) — never a value — that resolves to `providers/xai/<name>` in the
+ * vault. Absent → `providers/xai/apiKey`.
+ */
+export interface XSearchSetting {
+  secret?: string;
+}
+
 export interface CreateXSearchToolOptions {
   /** Overrides DEFAULT_MODEL / XAI_X_SEARCH_MODEL. See DEFAULT_MODEL's comment. */
   model?: string;
+  /** Personality-owned binding (source of truth), resolved by personalityId. */
+  resolvePersonalitySetting?: (personalityId: string) => XSearchSetting | undefined;
+  /** Global FALLBACK map keyed by personalityId or `_default`. */
+  toolSettings?: Record<string, { x_search?: XSearchSetting } | undefined>;
 }
 
 export function createXSearchTool(opts: CreateXSearchToolOptions = {}): Tool {
   const model = opts.model ?? process.env.XAI_X_SEARCH_MODEL ?? DEFAULT_MODEL;
+  const { resolvePersonalitySetting, toolSettings } = opts;
+
+  // Same resolution order as web_search: personality tools.yaml → global
+  // toolSettings[pid] → global toolSettings._default → the default-named key.
+  function selectSecretRef(ctx: ToolContext): string {
+    const pid = ctx.personalityId;
+    const setting =
+      (pid ? resolvePersonalitySetting?.(pid) : undefined) ??
+      (pid ? toolSettings?.[pid]?.x_search : undefined) ??
+      toolSettings?._default?.x_search;
+    const name = setting?.secret?.trim();
+    return name ? `${SECRET_PREFIX}${name}` : DEFAULT_SECRET_REF;
+  }
 
   return {
     name: 'x_search',
@@ -169,14 +188,18 @@ export function createXSearchTool(opts: CreateXSearchToolOptions = {}): Tool {
     maxResultChars: 15_000,
     capabilities: {
       network: { allowedHosts: [X_API_HOST] },
-      secrets: [DEFAULT_SECRET_REF],
+      // Prefix grant over the xAI namespace: any personality binding is
+      // `providers/xai/<name>`, so it always falls inside this static allowlist.
+      secrets: [`${SECRET_PREFIX}*`],
     },
     outputIsUntrusted: true,
+    // Per-personality config contract. The settings UI renders a secret picker
+    // over `x-search` named secrets; only the secret NAME is ever stored.
     settingsSchema: {
       fields: [
         {
           kind: 'secret-binding',
-          key: 'apiKey',
+          key: 'secret',
           label: 'xAI API key (X search)',
           secretKind: 'x-search',
         },
@@ -281,7 +304,7 @@ export function createXSearchTool(opts: CreateXSearchToolOptions = {}): Tool {
       }
 
       try {
-        const apiKey = await secrets.get(DEFAULT_SECRET_REF);
+        const apiKey = await secrets.get(selectSecretRef(ctx));
         if (!apiKey) {
           return { ok: false, error: NO_KEY_MESSAGE, code: 'not_available' as const };
         }

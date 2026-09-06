@@ -1762,13 +1762,30 @@ const RecipeFsReachSchema = z.object({
 });
 
 /**
- * The providers a web-search credential may be written under. Defined here
- * rather than in `router.ts` because two namespaces need it: `namedSecrets`,
- * which owns the write, and `recipes.preflight`, whose credential rows name the
- * provider that write would target.
+ * The providers a named secret may be written under. Defined here rather than
+ * in `router.ts` because two namespaces need it: `namedSecrets`, which owns the
+ * write, and `recipes.preflight`, whose credential rows name the provider that
+ * write would target.
+ *
+ * `exa` / `tavily` / `brave` are `web_search` keys; `xai` is the xAI key
+ * `x_search` binds; `x` is an X API bearer token for the native X search
+ * backend (planned).
  */
-export const NamedSecretProviderSchema = z.enum(['exa', 'tavily', 'brave']);
+export const NamedSecretProviderSchema = z.enum(['exa', 'tavily', 'brave', 'xai', 'x']);
 export type NamedSecretProvider = z.infer<typeof NamedSecretProviderSchema>;
+
+/** The category a `secret-binding` field's `secretKind` selects on. */
+export const NamedSecretKindSchema = z.enum(['web-search', 'x-search', 'x-api']);
+export type NamedSecretKind = z.infer<typeof NamedSecretKindSchema>;
+
+/** provider → kind. The one mapping the vault service and the SecretPicker share. */
+export const NAMED_SECRET_PROVIDER_KINDS: Record<NamedSecretProvider, NamedSecretKind> = {
+  exa: 'web-search',
+  tavily: 'web-search',
+  brave: 'web-search',
+  xai: 'x-search',
+  x: 'x-api',
+};
 
 /** Mirrors the bundle's `safety.network` — declared reach, not a new capability. */
 const RecipeNetworkPolicySchema = z.object({

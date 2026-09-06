@@ -1,15 +1,16 @@
 import { createReadStream } from 'node:fs';
 import { Readable } from 'node:stream';
 import { EthosError } from '@ethosagent/types';
-import { Hono } from 'hono';
+import { type Context, Hono } from 'hono';
 import { readBodyWithCap } from '../lib/read-body-with-cap';
-import type { DocumentsService } from '../services/documents.service';
+import type { DocumentsScope, DocumentsService } from '../services/documents.service';
 import { mimeForPath } from './mime';
 
-// The two routes that move file BYTES in or out of a personality's Documents
-// roots: `GET /documents/download` and `POST /documents/upload`. Everything
-// else about Documents (root discovery, listing, delete, folder creation) is
-// oRPC — bytes are the reason these two are raw HTTP.
+// The two routes that move file BYTES in or out of a personality's (or, with
+// `?team=`, a team's) Documents roots: `GET /documents/download` and
+// `POST /documents/upload`. Everything else about Documents (root discovery,
+// listing, delete, folder creation) is oRPC — bytes are the reason these two
+// are raw HTTP.
 //
 // Mounted as a `RouteModule` with `auth: 'cookie'`. That posture is the point:
 // the httpOnly `ethos_auth` cookie (`path: '/'`, `SameSite=Strict`) rides along
@@ -45,13 +46,7 @@ export function documentsRoutes(opts: DocumentsRoutesOptions): Hono {
   app.get('/download', async (c) => {
     const root = requiredQuery(c.req.query('root'), 'root');
     const path = requiredQuery(c.req.query('path'), 'path');
-    const personalityId = c.req.query('personality');
-
-    const file = await opts.documents.resolveDownload({
-      root,
-      path,
-      ...(personalityId ? { personalityId } : {}),
-    });
+    const file = await opts.documents.resolveDownload({ root, path, ...scopeQuery(c) });
 
     // `Readable.toWeb` is typed against `node:stream/web`'s ReadableStream,
     // while `BodyInit` is typed against the global (undici) one. They are the
@@ -71,7 +66,7 @@ export function documentsRoutes(opts: DocumentsRoutesOptions): Hono {
     });
   });
 
-  // `POST /documents/upload?personality=&root=&path=&overwrite=` with the file
+  // `POST /documents/upload?personality=|team=&root=&path=&overwrite=` with the file
   // as the RAW body — no multipart, matching the avatar route (there is no
   // multipart parser anywhere in this app, and one file per request needs none).
   //
@@ -84,7 +79,6 @@ export function documentsRoutes(opts: DocumentsRoutesOptions): Hono {
   app.post('/upload', async (c) => {
     const root = requiredQuery(c.req.query('root'), 'root');
     const path = requiredQuery(c.req.query('path'), 'path');
-    const personalityId = c.req.query('personality');
     const overwrite = c.req.query('overwrite') === 'true';
 
     const bytes = await readBodyWithCap(c, DOCUMENTS_UPLOAD_MAX_BYTES, {
@@ -107,11 +101,19 @@ export function documentsRoutes(opts: DocumentsRoutesOptions): Hono {
     // rather than copying them — at a 100MB cap the copy is the difference
     // between one and two full-size allocations per upload.
     const body = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-    const entry = await opts.documents.write(personalityId, root, path, body, { overwrite });
+    const entry = await opts.documents.write(scopeQuery(c), root, path, body, { overwrite });
     return c.json({ entry });
   });
 
   return app;
+}
+
+/**
+ * `?personality=` or `?team=` — which Documents scope the bytes belong to.
+ * Neither means the default personality; both is refused by the service.
+ */
+function scopeQuery(c: Context): DocumentsScope {
+  return { personalityId: c.req.query('personality'), team: c.req.query('team') };
 }
 
 /** Both routes take their target the same way; both refuse the same way. */

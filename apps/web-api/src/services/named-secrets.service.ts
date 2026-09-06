@@ -1,20 +1,48 @@
 import { EthosError, isValidSecretName, type SecretsResolver } from '@ethosagent/types';
+import {
+  NAMED_SECRET_PROVIDER_KINDS,
+  type NamedSecretKind,
+  type NamedSecretProvider,
+} from '@ethosagent/web-contracts';
 
 // Global named-secrets vault manager (Phase 2, web-search-provider-selection).
 //
 // A named secret is stored at `providers/<provider>/<name>` in the secrets
-// vault — the same namespace `web_search`'s capability prefix grant
-// (`providers/{exa,tavily,brave}/*`) allows. A personality only ever stores
-// the secret NAME (a reference); the VALUE lives here and NEVER round-trips
-// back to the client — reads are masked previews only.
+// vault — the same namespace a consuming tool's capability prefix grant
+// (`providers/{exa,tavily,brave}/*` for `web_search`, `providers/xai/*` for
+// `x_search`) allows. A personality only ever stores the secret NAME (a
+// reference); the VALUE lives here and NEVER round-trips back to the client —
+// reads are masked previews only.
 //
-// v1 scopes named secrets to the three web_search provider namespaces (the sole
-// consumer). Everything is provider-scoped: kind `web-search` ⟺ provider ∈
-// {exa, tavily, brave}.
+// Everything is provider-scoped: a provider maps to exactly one `kind`, which
+// is what a tool's `secret-binding` field filters the picker by.
 
-/** Provider namespaces a `web-search` named secret may live under. */
-const WEB_SEARCH_PROVIDERS = ['exa', 'tavily', 'brave'] as const;
-export type NamedSecretProvider = (typeof WEB_SEARCH_PROVIDERS)[number];
+export type { NamedSecretProvider } from '@ethosagent/web-contracts';
+
+export interface NamedSecretProviderEntry {
+  provider: NamedSecretProvider;
+  kind: NamedSecretKind;
+  label: string;
+  /** Where the operator goes to obtain this credential. */
+  getKeyUrl: string;
+}
+
+/** Every provider namespace a named secret may live under. `kind` comes from
+ *  the contract's `NAMED_SECRET_PROVIDER_KINDS` so the picker and the vault
+ *  can never disagree about which kind a provider is. */
+export const NAMED_SECRET_PROVIDERS: readonly NamedSecretProviderEntry[] = (
+  [
+    { provider: 'exa', label: 'Exa', getKeyUrl: 'https://exa.ai/' },
+    { provider: 'tavily', label: 'Tavily', getKeyUrl: 'https://tavily.com/' },
+    { provider: 'brave', label: 'Brave Search', getKeyUrl: 'https://brave.com/search/api/' },
+    { provider: 'xai', label: 'xAI (Grok, X search)', getKeyUrl: 'https://console.x.ai/' },
+    {
+      provider: 'x',
+      label: 'X API (bearer token)',
+      getKeyUrl: 'https://developer.x.com/en/portal/dashboard',
+    },
+  ] satisfies Omit<NamedSecretProviderEntry, 'kind'>[]
+).map((e) => ({ ...e, kind: NAMED_SECRET_PROVIDER_KINDS[e.provider] }));
 
 /** Upper bound on a stored secret value. Real provider API keys are well under
  *  1 KiB; the cap is a DoS guard so a client cannot fill the vault dir. */
@@ -25,8 +53,8 @@ export interface NamedSecretView {
   name: string;
   /** Masked preview — e.g. `sk-…abc1`. Never the raw value. */
   preview: string;
-  /** Category the SecretPicker filters by. Always `'web-search'` in v1. */
-  kind: 'web-search';
+  /** Category the SecretPicker filters by — see `NAMED_SECRET_PROVIDER_KINDS`. */
+  kind: NamedSecretKind;
 }
 
 export interface NamedSecretsServiceOptions {
@@ -36,11 +64,11 @@ export interface NamedSecretsServiceOptions {
 export class NamedSecretsService {
   constructor(private readonly opts: NamedSecretsServiceOptions) {}
 
-  /** List every named secret across the web_search provider namespaces, with
-   *  MASKED previews only. The raw value never crosses this boundary. */
+  /** List every named secret across all provider namespaces, with MASKED
+   *  previews only. The raw value never crosses this boundary. */
   async list(): Promise<{ secrets: NamedSecretView[] }> {
     const out: NamedSecretView[] = [];
-    for (const provider of WEB_SEARCH_PROVIDERS) {
+    for (const { provider, kind } of NAMED_SECRET_PROVIDERS) {
       const prefix = `providers/${provider}/`;
       const refs = await this.opts.secrets.list(prefix);
       for (const ref of refs) {
@@ -48,7 +76,7 @@ export class NamedSecretsService {
         // Only flat `<name>` entries — no nested paths under a provider.
         if (!name || name.includes('/')) continue;
         const value = await this.opts.secrets.get(ref);
-        out.push({ provider, name, preview: redactSecret(value), kind: 'web-search' });
+        out.push({ provider, name, preview: redactSecret(value), kind });
       }
     }
     out.sort((a, b) => a.provider.localeCompare(b.provider) || a.name.localeCompare(b.name));
@@ -84,15 +112,18 @@ export class NamedSecretsService {
 
   /** Optional probe — resolves the stored value and makes one lightweight
    *  authenticated request to the provider so the user can confirm the key
-   *  works. The raw key travels provider-ward only, never back to the client. */
+   *  works. The raw key travels provider-ward only, never back to the client.
+   *  A provider with no free probe (`x` — every search call is billable) is
+   *  reported as `tested: false`: the secret exists, its validity is unknown. */
   async testKey(input: {
     provider: string;
     name: string;
-  }): Promise<{ ok: boolean; error?: string }> {
+  }): Promise<{ ok: boolean; error?: string; tested?: boolean }> {
     const provider = this.assertProvider(input.provider);
     const name = this.assertName(input.name);
     const value = await this.opts.secrets.get(`providers/${provider}/${name}`);
     if (!value) return { ok: false, error: 'Secret not found.' };
+    if (provider === 'x') return { ok: true, tested: false };
     try {
       return await probeProvider(provider, value);
     } catch (err) {
@@ -108,12 +139,11 @@ export class NamedSecretsService {
   }
 
   private assertProvider(provider: string): NamedSecretProvider {
-    if ((WEB_SEARCH_PROVIDERS as readonly string[]).includes(provider)) {
-      return provider as NamedSecretProvider;
-    }
+    const entry = NAMED_SECRET_PROVIDERS.find((p) => p.provider === provider);
+    if (entry) return entry.provider;
     throw invalid(
       `Unknown provider "${provider}".`,
-      `Use one of: ${WEB_SEARCH_PROVIDERS.join(', ')}.`,
+      `Use one of: ${NAMED_SECRET_PROVIDERS.map((p) => p.provider).join(', ')}.`,
     );
   }
 
@@ -147,12 +177,19 @@ export function redactSecret(value: string | null | undefined): string {
 // ---------------------------------------------------------------------------
 
 async function probeProvider(
-  provider: NamedSecretProvider,
+  provider: Exclude<NamedSecretProvider, 'x'>,
   key: string,
 ): Promise<{ ok: boolean; error?: string }> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 8000);
   try {
+    if (provider === 'xai') {
+      const res = await fetch('https://api.x.ai/v1/models', {
+        headers: { Accept: 'application/json', Authorization: `Bearer ${key}` },
+        signal: controller.signal,
+      });
+      return interpret(res.status);
+    }
     if (provider === 'exa') {
       const res = await fetch('https://api.exa.ai/search', {
         method: 'POST',

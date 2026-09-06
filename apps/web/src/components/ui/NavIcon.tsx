@@ -9,6 +9,7 @@ export type NavIconKey =
   | 'overview'
   | 'board'
   | 'structure'
+  | 'documents'
   | 'memory'
   | 'activity'
   | 'channels'
@@ -20,6 +21,7 @@ const PATHS: Record<NavIconKey, string> = {
   board: 'M2 2h3v12H2zM6.5 2h3v8h-3zM11 2h3v10h-3z',
   structure:
     'M10 3a2 2 0 1 1-4 0 2 2 0 0 1 4 0zM5 12a2 2 0 1 1-4 0 2 2 0 0 1 4 0zM15 12a2 2 0 1 1-4 0 2 2 0 0 1 4 0zM8 5v3M8 8l-4 2M8 8l4 2',
+  documents: 'M4 1.5h5.5L13 5v9.5H4zM9.5 1.5V5H13M6.5 8.5h3M6.5 11h3',
   memory:
     'M5 2c-2 0-3 1.5-3 3 0 1-1 2 0 3.5S3 12 5 12h1V2zM11 2c2 0 3 1.5 3 3 0 1 1 2 0 3.5S13 12 11 12h-1V2z',
   activity: 'M2 8h12M2 4h8M2 12h8',

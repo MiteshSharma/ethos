@@ -1106,7 +1106,15 @@ export async function composeAllTools(
   // -------------------------------------------------------------------------
 
   for (const tool of createFileTools()) tools.register(tool);
-  tools.register(createXSearchTool());
+  tools.register(
+    createXSearchTool({
+      // Personality tools.yaml is the source of truth; config.toolSettings is
+      // the global fallback layer — the same two layers web_search resolves.
+      resolvePersonalitySetting: (personalityId) =>
+        personalities.getToolsConfig(personalityId)?.x_search,
+      ...(config.toolSettings ? { toolSettings: config.toolSettings } : {}),
+    }),
+  );
   tools.register(createRedditSearchTool());
   tools.register(createRedditThreadTool());
   for (const tool of createTerminalTools({ route: execRoute })) tools.register(tool);

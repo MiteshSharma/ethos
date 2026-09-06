@@ -1,6 +1,7 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { App as AntApp } from 'antd';
 import {
+  type DocumentsScope,
   type DocumentUploadFailure,
   documentUploadFailure,
   documentUploadHref,
@@ -24,14 +25,14 @@ export class DocumentUploadError extends Error {
  * Hard delete of one file. There is no trash tier — the operator has no shell
  * on the box to undo it — so the caller must confirm before firing.
  */
-export function useDocumentDelete(personalityId: string, root: string) {
+export function useDocumentDelete(scope: DocumentsScope, root: string) {
   const qc = useQueryClient();
   const { notification } = AntApp.useApp();
 
   return useMutation({
-    mutationFn: (path: string) => rpc.documents.delete({ personalityId, root, path }),
+    mutationFn: (path: string) => rpc.documents.delete({ ...scope, root, path }),
     onSuccess: (_result, path) => {
-      qc.invalidateQueries({ queryKey: documentKeys.rootLists(personalityId, root) });
+      qc.invalidateQueries({ queryKey: documentKeys.rootLists(scope, root) });
       notification.success({ message: `Deleted ${path}`, placement: 'topRight' });
     },
     onError: (err) =>
@@ -50,13 +51,13 @@ export function useDocumentDelete(personalityId: string, root: string) {
  * destination). Failures are returned to the caller rather than toasted, so a
  * name collision lands as an inline error next to the input that caused it.
  */
-export function useCreateFolder(personalityId: string, root: string) {
+export function useCreateFolder(scope: DocumentsScope, root: string) {
   const qc = useQueryClient();
 
   return useMutation({
-    mutationFn: (path: string) => rpc.documents.createFolder({ personalityId, root, path }),
+    mutationFn: (path: string) => rpc.documents.createFolder({ ...scope, root, path }),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: documentKeys.rootLists(personalityId, root) });
+      qc.invalidateQueries({ queryKey: documentKeys.rootLists(scope, root) });
     },
   });
 }
@@ -78,14 +79,14 @@ export interface UploadDocumentInput {
  * (replace the existing file), so this throws a `DocumentUploadError` carrying
  * the classified failure and lets the modal branch on `kind`.
  */
-export function useUploadDocument(personalityId: string, root: string) {
+export function useUploadDocument(scope: DocumentsScope, root: string) {
   const qc = useQueryClient();
   const { notification } = AntApp.useApp();
 
   return useMutation({
     mutationFn: async ({ file, path, overwrite }: UploadDocumentInput) => {
       const res = await fetch(
-        documentUploadHref(personalityId, root, path, { overwrite: overwrite === true }),
+        documentUploadHref(scope, root, path, { overwrite: overwrite === true }),
         {
           method: 'POST',
           // Echoed back by the route for logging only — there is no MIME
@@ -102,7 +103,7 @@ export function useUploadDocument(personalityId: string, root: string) {
       return res;
     },
     onSuccess: (_res, { path }) => {
-      qc.invalidateQueries({ queryKey: documentKeys.rootLists(personalityId, root) });
+      qc.invalidateQueries({ queryKey: documentKeys.rootLists(scope, root) });
       // The upload can land in a folder the page is not currently browsing, so
       // the listing refresh alone is invisible feedback. Name the path.
       notification.success({ message: `Uploaded ${path}`, placement: 'topRight' });

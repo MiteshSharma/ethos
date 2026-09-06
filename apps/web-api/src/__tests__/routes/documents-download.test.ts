@@ -35,6 +35,8 @@ describe('GET /documents/download', () => {
     await mkdir(outside, { recursive: true });
     await writeFile(join(outside, 'secret.txt'), 'do not leak');
     await writeFile(join(workdir, 'notes.md'), '# hello\n');
+    await mkdir(join(dataDir, 'teams', 'marketing'), { recursive: true });
+    await writeFile(join(dataDir, 'teams', 'marketing', 'outcomes.md'), 'ours');
     await writeFile(join(workdir, 'rapport financier — été.txt'), 'accents');
     await symlink(join(outside, 'secret.txt'), join(workdir, 'link.txt'));
 
@@ -86,6 +88,19 @@ describe('GET /documents/download', () => {
     expect(res.headers.get('content-length')).toBe('8');
     expect(res.headers.get('content-disposition')).toBe("attachment; filename*=UTF-8''notes.md");
     expect(await res.text()).toBe('# hello\n');
+  });
+
+  it('streams a team file with `team=`, and refuses escaping the team directory', async () => {
+    const res = await get('team=marketing&root=0&path=outcomes.md');
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe('ours');
+
+    const escaped = await get(
+      `team=marketing&root=0&path=${encodeURIComponent('../../workspace/writer/notes.md')}`,
+    );
+    expect(escaped.status).toBe(403);
+    const unsafe = await get('team=..&root=0&path=outcomes.md');
+    expect(unsafe.status).toBe(400);
   });
 
   it('encodes a non-ASCII filename', async () => {

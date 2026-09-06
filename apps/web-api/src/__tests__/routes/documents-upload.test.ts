@@ -1,6 +1,6 @@
 // biome-ignore-all lint/suspicious/noTemplateCurlyInString: `${ETHOS_HOME}` /
 // `${self}` are literal fs_reach substitution tokens, not JS template strings.
-import { mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SQLiteSessionStore } from '@ethosagent/session-sqlite';
@@ -41,6 +41,7 @@ describe('POST /documents/upload', () => {
     await mkdir(join(workdir, 'reports'), { recursive: true });
     await writeFile(join(workdir, 'notes.md'), 'original');
     await symlink(outside, join(workdir, 'escape'));
+    await mkdir(join(dataDir, 'teams', 'marketing'), { recursive: true });
 
     store = new SQLiteSessionStore(':memory:');
     app = createWebApi({
@@ -107,6 +108,19 @@ describe('POST /documents/upload', () => {
       size: 9,
     });
     expect(await readFile(join(workdir, 'reports', 'q3.txt'), 'utf-8')).toBe('quarterly');
+  });
+
+  it('writes into a team work directory with `team=`, and never outside it', async () => {
+    const res = await upload('team=marketing&root=0&path=brief.md', 'ours');
+    expect(res.status).toBe(200);
+    expect(await readFile(join(dataDir, 'teams', 'marketing', 'brief.md'), 'utf-8')).toBe('ours');
+
+    const escaped = await upload(
+      `team=marketing&root=0&path=${encodeURIComponent('../../workspace/writer/planted.md')}`,
+      'theirs',
+    );
+    expect(escaped.status).toBe(403);
+    await expect(stat(join(workdir, 'planted.md'))).rejects.toThrow();
   });
 
   it('accepts any content type — there is no MIME allowlist here', async () => {

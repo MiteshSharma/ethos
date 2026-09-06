@@ -3,6 +3,7 @@ import { Input, Modal } from 'antd';
 import { type ReactNode, useMemo, useState } from 'react';
 import { Link, useLocation, useNavigate, useSearchParams } from 'react-router-dom';
 import { useConfig } from '../features/config/api/queries';
+import { useDocumentsList } from '../features/documents/api/queries';
 import { kanbanKeys } from '../features/kanban/api/keys';
 import {
   usePersonalityList,
@@ -113,6 +114,14 @@ export function ScopeNav({ needsYouCount = 0 }: { needsYouCount?: number }) {
     boardQuery.data?.board.tasks.filter(
       (t) => t.status === 'needs_revision' || t.status === 'blocked',
     ).length ?? 0;
+  // The Documents row's count: top-level entries of the team's work directory.
+  // A team's one root is always id `0`, so this is a single listing call, and
+  // a team with no directory yet answers WORKDIR_NOT_CONFIGURED — no retry,
+  // the row just carries no count.
+  const teamDocsQuery = useDocumentsList({ team: teamId ?? '' }, '0', '', {
+    enabled: teamAltitude,
+    retry: false,
+  });
   const memberIds = useMemo(
     () => (team ? new Set(team.members.map((m) => m.personalityId)) : undefined),
     [team],
@@ -249,7 +258,12 @@ export function ScopeNav({ needsYouCount = 0 }: { needsYouCount?: number }) {
                 glyph={pane.key}
                 label={pane.label}
                 pathname={pathname}
-                hint={teamPaneHint(pane.key, team, teamDetail.data?.memoryTopics.length)}
+                hint={teamPaneHint(
+                  pane.key,
+                  team,
+                  teamDetail.data?.memoryTopics.length,
+                  teamDocsQuery.data?.entries.length,
+                )}
                 badge={pane.key === 'board' ? boardNeedsYou : undefined}
                 trailing={
                   pane.key === 'chat' && team?.coordinator ? (
@@ -440,16 +454,19 @@ export function ScopeNav({ needsYouCount = 0 }: { needsYouCount?: number }) {
 }
 
 /** The right-aligned count on a team row (§3): Structure = members,
- *  Memory = topics, Channels = bound channels. Others carry none. */
+ *  Memory = topics, Documents = top-level entries, Channels = bound
+ *  channels. Others carry none. */
 function teamPaneHint(
   key: TeamPaneKey,
   team: { members: unknown[]; channels: unknown[] } | null,
   topicCount: number | undefined,
+  documentCount: number | undefined,
 ): string | null {
   if (!team) return null;
   if (key === 'structure') return String(team.members.length);
   if (key === 'channels') return String(team.channels.length);
   if (key === 'memory') return topicCount === undefined ? null : String(topicCount);
+  if (key === 'documents') return documentCount === undefined ? null : String(documentCount);
   return null;
 }
 

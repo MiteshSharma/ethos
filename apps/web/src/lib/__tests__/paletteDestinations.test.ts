@@ -177,6 +177,7 @@ describe('scopeEntries', () => {
       'marketing › Overview',
       'marketing › Board',
       'marketing › Structure',
+      'marketing › Documents',
       'marketing › Memory',
       'marketing › Activity',
       'marketing › Channels',

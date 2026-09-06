@@ -33,6 +33,8 @@ describe('documents RPC', () => {
     await mkdir(secondRoot, { recursive: true });
     await writeFile(join(workdir, 'notes.md'), 'hi');
     await writeFile(join(secondRoot, 'old.md'), 'older');
+    await mkdir(join(dataDir, 'teams', 'marketing', 'brand'), { recursive: true });
+    await writeFile(join(dataDir, 'teams', 'marketing', 'outcomes.md'), '# Outcomes');
 
     store = new SQLiteSessionStore(':memory:');
     app = createWebApi({
@@ -91,6 +93,37 @@ describe('documents RPC', () => {
       ],
       personalityId: 'writer',
     });
+  });
+
+  it('root and list address a team work directory with `team`', async () => {
+    const res = await call('root', { team: 'marketing' });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { json: unknown };
+    expect(body.json).toEqual({
+      roots: [{ id: '0', path: join(dataDir, 'teams', 'marketing') }],
+      team: 'marketing',
+    });
+
+    const listed = await call('list', { team: 'marketing', root: '0' });
+    expect(listed.status).toBe(200);
+    const listBody = (await listed.json()) as { json: { entries: Array<{ name: string }> } };
+    expect(listBody.json.entries.map((e) => e.name).sort()).toEqual(['brand', 'outcomes.md']);
+
+    const missing = await call('root', { team: 'ghost' });
+    expect(((await missing.json()) as { json: unknown }).json).toEqual({
+      roots: [],
+      team: 'ghost',
+    });
+  });
+
+  it('refuses an unsafe team name and a traversal out of the team directory', async () => {
+    const unsafe = await call('root', { team: '../writer' });
+    expect(unsafe.status).toBe(400);
+    expect(((await unsafe.json()) as { json: { code: string } }).json.code).toBe('INVALID_INPUT');
+
+    const escaped = await call('list', { team: 'marketing', root: '0', path: '../../workspace' });
+    expect(escaped.status).toBe(403);
+    expect(((await escaped.json()) as { json: { code: string } }).json.code).toBe('FORBIDDEN');
   });
 
   it('root returns no roots at all for an unconfigured personality', async () => {

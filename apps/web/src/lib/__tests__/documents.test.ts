@@ -6,6 +6,7 @@ import {
   documentFolderOptions,
   documentRootOptions,
   documentRowActions,
+  documentsScopeKey,
   documentUploadFailure,
   documentUploadHref,
   joinDocumentPath,
@@ -81,14 +82,14 @@ describe('documentRowActions', () => {
 
 describe('documentDownloadHref', () => {
   it('is relative so the SameSite=Strict auth cookie rides along', () => {
-    const href = documentDownloadHref('researcher', '0', 'report.md');
+    const href = documentDownloadHref({ personalityId: 'researcher' }, '0', 'report.md');
     expect(href.startsWith('/documents/download?')).toBe(true);
     expect(href).not.toMatch(/^https?:\/\//);
   });
 
   it('carries the personality, the root and the relative path', () => {
     const params = new URLSearchParams(
-      documentDownloadHref('engineer', '1', 'reports/q3.md').split('?')[1],
+      documentDownloadHref({ personalityId: 'engineer' }, '1', 'reports/q3.md').split('?')[1],
     );
     expect(params.get('personality')).toBe('engineer');
     expect(params.get('root')).toBe('1');
@@ -101,36 +102,52 @@ describe('documentDownloadHref', () => {
     // download button), not a compile error, which is why it is asserted here.
     for (const rootId of ['0', '1', '2']) {
       const params = new URLSearchParams(
-        documentDownloadHref('engineer', rootId, 'a.md').split('?')[1],
+        documentDownloadHref({ personalityId: 'engineer' }, rootId, 'a.md').split('?')[1],
       );
       expect(params.get('root')).toBe(rootId);
     }
   });
 
   it('encodes spaces as %20, not +, so the filename survives the round trip', () => {
-    const href = documentDownloadHref('coach', '0', 'my notes.md');
+    const href = documentDownloadHref({ personalityId: 'coach' }, '0', 'my notes.md');
     expect(href).toContain('path=my%20notes.md');
     expect(href).not.toContain('+');
   });
 
   it('percent-encodes a non-ASCII filename as UTF-8, and decodes back to it', () => {
     const name = 'rapport financier — été.txt';
-    const href = documentDownloadHref('coach', '0', name);
+    const href = documentDownloadHref({ personalityId: 'coach' }, '0', name);
     expect(href).toContain('path=rapport%20financier%20%E2%80%94%20%C3%A9t%C3%A9.txt');
     expect(new URLSearchParams(href.split('?')[1]).get('path')).toBe(name);
   });
 
   it('escapes a path that tries to smuggle another query parameter', () => {
-    const href = documentDownloadHref('operator', '0', 'a&personality=root.md');
+    const href = documentDownloadHref({ personalityId: 'operator' }, '0', 'a&personality=root.md');
     const params = new URLSearchParams(href.split('?')[1]);
     expect(params.get('personality')).toBe('operator');
     expect(params.get('path')).toBe('a&personality=root.md');
   });
 });
 
+describe('documents scope', () => {
+  it('addresses a team with team= instead of personality=', () => {
+    expect(documentDownloadHref({ team: 'marketing' }, '0', 'brand/voice.md')).toBe(
+      '/documents/download?team=marketing&root=0&path=brand%2Fvoice.md',
+    );
+    expect(documentUploadHref({ team: 'marketing' }, '0', 'a.md', { overwrite: true })).toBe(
+      '/documents/upload?team=marketing&root=0&path=a.md&overwrite=true',
+    );
+  });
+
+  it('keys a team and a personality with the same id apart', () => {
+    expect(documentsScopeKey({ team: 'marketing' })).toEqual(['team', 'marketing']);
+    expect(documentsScopeKey({ personalityId: 'marketing' })).toEqual(['personality', 'marketing']);
+  });
+});
+
 describe('documentUploadHref', () => {
   it('targets the raw upload route with personality, root and destination path', () => {
-    const href = documentUploadHref('engineer', '1', 'reports/q3.md');
+    const href = documentUploadHref({ personalityId: 'engineer' }, '1', 'reports/q3.md');
     expect(href.startsWith('/documents/upload?')).toBe(true);
     const params = new URLSearchParams(href.split('?')[1]);
     expect(params.get('personality')).toBe('engineer');
@@ -139,35 +156,45 @@ describe('documentUploadHref', () => {
   });
 
   it('omits overwrite unless it was explicitly asked for', () => {
-    expect(documentUploadHref('engineer', '0', 'a.md')).not.toContain('overwrite');
-    expect(documentUploadHref('engineer', '0', 'a.md', {})).not.toContain('overwrite');
-    expect(documentUploadHref('engineer', '0', 'a.md', { overwrite: false })).not.toContain(
+    expect(documentUploadHref({ personalityId: 'engineer' }, '0', 'a.md')).not.toContain(
       'overwrite',
     );
-    expect(documentUploadHref('engineer', '0', 'a.md', { overwrite: true })).toContain(
-      'overwrite=true',
+    expect(documentUploadHref({ personalityId: 'engineer' }, '0', 'a.md', {})).not.toContain(
+      'overwrite',
     );
+    expect(
+      documentUploadHref({ personalityId: 'engineer' }, '0', 'a.md', { overwrite: false }),
+    ).not.toContain('overwrite');
+    expect(
+      documentUploadHref({ personalityId: 'engineer' }, '0', 'a.md', { overwrite: true }),
+    ).toContain('overwrite=true');
   });
 
   it('encodes a filename with a space the same way download does', () => {
-    expect(documentUploadHref('coach', '0', 'my notes.md')).toContain('path=my%20notes.md');
+    expect(documentUploadHref({ personalityId: 'coach' }, '0', 'my notes.md')).toContain(
+      'path=my%20notes.md',
+    );
   });
 
   it('encodes a non-ASCII filename the same way download does', () => {
     const name = 'reports/rapport financier — été (v2).txt';
-    const upload = documentUploadHref('coach', '0', name);
+    const upload = documentUploadHref({ personalityId: 'coach' }, '0', name);
     expect(upload).toContain(`path=${encodeURIComponent(name)}`);
     expect(new URLSearchParams(upload.split('?')[1]).get('path')).toBe(name);
     // The two hrefs must agree byte-for-byte on the path, or a file uploaded
     // under this name cannot be downloaded again under it.
     expect(new URLSearchParams(upload.split('?')[1]).get('path')).toBe(
-      new URLSearchParams(documentDownloadHref('coach', '0', name).split('?')[1]).get('path'),
+      new URLSearchParams(
+        documentDownloadHref({ personalityId: 'coach' }, '0', name).split('?')[1],
+      ).get('path'),
     );
   });
 
   it('keeps overwrite=true parseable after a filename full of separators', () => {
     const params = new URLSearchParams(
-      documentUploadHref('coach', '0', 'a&b=c?d#e f.txt', { overwrite: true }).split('?')[1],
+      documentUploadHref({ personalityId: 'coach' }, '0', 'a&b=c?d#e f.txt', {
+        overwrite: true,
+      }).split('?')[1],
     );
     expect(params.get('path')).toBe('a&b=c?d#e f.txt');
     expect(params.get('overwrite')).toBe('true');
@@ -341,34 +368,43 @@ describe('sortDocumentEntries', () => {
 
 describe('documentKeys', () => {
   it('scopes listings by personality so switching does not reuse a cache entry', () => {
-    expect(documentKeys.list('researcher', '0', '')).not.toEqual(
-      documentKeys.list('engineer', '0', ''),
+    expect(documentKeys.list({ personalityId: 'researcher' }, '0', '')).not.toEqual(
+      documentKeys.list({ personalityId: 'engineer' }, '0', ''),
     );
   });
 
   it('scopes listings by root so two declared workdirs never share a cache entry', () => {
-    expect(documentKeys.list('researcher', '0', '')).not.toEqual(
-      documentKeys.list('researcher', '1', ''),
+    expect(documentKeys.list({ personalityId: 'researcher' }, '0', '')).not.toEqual(
+      documentKeys.list({ personalityId: 'researcher' }, '1', ''),
     );
   });
 
   it('makes the post-write invalidation key a prefix of every listing key in that root', () => {
-    const invalidation = documentKeys.rootLists('researcher', '0');
+    const invalidation = documentKeys.rootLists({ personalityId: 'researcher' }, '0');
     for (const path of ['', 'reports', 'reports/2026/q3']) {
-      const listKey = documentKeys.list('researcher', '0', path);
+      const listKey = documentKeys.list({ personalityId: 'researcher' }, '0', path);
       expect(listKey.slice(0, invalidation.length)).toEqual([...invalidation]);
     }
   });
 
   it("does not invalidate another root's listings", () => {
-    const invalidation = documentKeys.rootLists('researcher', '0');
-    const other = documentKeys.list('researcher', '1', '');
+    const invalidation = documentKeys.rootLists({ personalityId: 'researcher' }, '0');
+    const other = documentKeys.list({ personalityId: 'researcher' }, '1', '');
     expect(other.slice(0, invalidation.length)).not.toEqual([...invalidation]);
   });
 
   it("does not invalidate another personality's listings", () => {
-    const invalidation = documentKeys.lists('researcher');
-    const other = documentKeys.list('engineer', '0', '');
+    const invalidation = documentKeys.lists({ personalityId: 'researcher' });
+    const other = documentKeys.list({ personalityId: 'engineer' }, '0', '');
     expect(other.slice(0, invalidation.length)).not.toEqual([...invalidation]);
+  });
+
+  it('keeps a team and a personality of the same id in separate cache entries', () => {
+    expect(documentKeys.list({ team: 'marketing' }, '0', '')).not.toEqual(
+      documentKeys.list({ personalityId: 'marketing' }, '0', ''),
+    );
+    expect(documentKeys.root({ team: 'marketing' })).not.toEqual(
+      documentKeys.root({ personalityId: 'marketing' }),
+    );
   });
 });

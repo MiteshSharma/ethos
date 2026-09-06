@@ -51,6 +51,25 @@ describe('NamedSecretsService', () => {
     expect(JSON.stringify(row)).not.toContain('tvly-abcdef123456');
   });
 
+  it('list spans every provider namespace and stamps each row with its kind', async () => {
+    await service.create({ provider: 'exa', name: 'main', value: 'sk-exa-1234567890' });
+    await service.create({ provider: 'xai', name: 'grok', value: 'xai-1234567890abcd' });
+    await service.create({ provider: 'x', name: 'bearer', value: 'AAAA-bearer-1234567890' });
+    const { secrets: list } = await service.list();
+    expect(list.map((r) => [r.provider, r.name, r.kind])).toEqual([
+      ['exa', 'main', 'web-search'],
+      ['x', 'bearer', 'x-api'],
+      ['xai', 'grok', 'x-search'],
+    ]);
+  });
+
+  it('accepts the xai and x provider namespaces', async () => {
+    await service.create({ provider: 'xai', name: 'k', value: 'xai-1234567890abcd' });
+    await service.create({ provider: 'x', name: 'k', value: 'AAAA-bearer-1234567890' });
+    expect(await secrets.get('providers/xai/k')).toBe('xai-1234567890abcd');
+    expect(await secrets.get('providers/x/k')).toBe('AAAA-bearer-1234567890');
+  });
+
   it('delete removes the secret from the vault', async () => {
     await service.create({ provider: 'brave', name: 'k1', value: 'brave-xxxxxxxx' });
     await service.delete({ provider: 'brave', name: 'k1' });
@@ -58,7 +77,7 @@ describe('NamedSecretsService', () => {
     expect((await service.list()).secrets).toHaveLength(0);
   });
 
-  it('rejects providers outside the web_search namespaces', async () => {
+  it('rejects providers outside the named-secret namespaces', async () => {
     try {
       await service.create({ provider: 'openai', name: 'main', value: 'x' });
       throw new Error('expected throw');
@@ -130,6 +149,38 @@ describe('NamedSecretsService', () => {
       globalThis.fetch = (async () => new Response('', { status: 401 })) as typeof fetch;
       const res = await service.testKey({ provider: 'brave', name: 'k' });
       expect(res).toEqual({ ok: false, error: 'Key rejected (unauthorized).' });
+    });
+
+    it('probes an xai key against /v1/models with a bearer header (200 → ok)', async () => {
+      await service.create({ provider: 'xai', name: 'grok', value: 'xai-1234567890abcd' });
+      let seen: { url: string; auth: string | null } | undefined;
+      globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+        seen = { url: String(url), auth: new Headers(init?.headers).get('Authorization') };
+        return new Response('{"data":[]}', { status: 200 });
+      }) as typeof fetch;
+      const res = await service.testKey({ provider: 'xai', name: 'grok' });
+      expect(res).toEqual({ ok: true });
+      expect(seen?.url).toBe('https://api.x.ai/v1/models');
+      expect(seen?.auth).toBe('Bearer xai-1234567890abcd');
+    });
+
+    it('maps an xai 401 to an unauthorized result', async () => {
+      await service.create({ provider: 'xai', name: 'grok', value: 'xai-1234567890abcd' });
+      globalThis.fetch = (async () => new Response('', { status: 401 })) as typeof fetch;
+      const res = await service.testKey({ provider: 'xai', name: 'grok' });
+      expect(res).toEqual({ ok: false, error: 'Key rejected (unauthorized).' });
+    });
+
+    it('does not probe an x bearer token (a search call is billable) — reports tested: false', async () => {
+      await service.create({ provider: 'x', name: 'bearer', value: 'AAAA-bearer-1234567890' });
+      let called = false;
+      globalThis.fetch = (async () => {
+        called = true;
+        return new Response('{}', { status: 200 });
+      }) as typeof fetch;
+      const res = await service.testKey({ provider: 'x', name: 'bearer' });
+      expect(res).toEqual({ ok: true, tested: false });
+      expect(called).toBe(false);
     });
 
     it('sanitizes a thrown fetch error — never echoes the raw message', async () => {

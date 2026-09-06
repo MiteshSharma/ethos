@@ -144,6 +144,18 @@ export const KEY_CATALOG: readonly KeyCatalogEntry[] = [
     getKeyUrl: 'https://console.x.ai/',
   },
   {
+    // Reflected from the named-secrets vault (provider `x`). No consumer reads
+    // it yet: the native X search backend (planned, `/2/tweets/search/recent`)
+    // will resolve `providers/x/<name>`.
+    id: 'tools.x',
+    category: 'tools',
+    label: 'X API (bearer token)',
+    refPattern: 'providers/x/bearerToken',
+    shape: { kind: 'single', field: 'bearerToken' },
+    getKeyUrl: 'https://developer.x.com/en/portal/dashboard',
+    reflectsNamedSecret: true,
+  },
+  {
     id: 'tools.reddit',
     category: 'tools',
     label: 'Reddit',

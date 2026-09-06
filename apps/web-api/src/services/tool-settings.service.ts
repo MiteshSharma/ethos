@@ -49,7 +49,7 @@ export class ToolSettingsService {
   /** Read the global default binding (`toolSettings._default`). */
   async getDefault(): Promise<{ values: ToolSettingsValues }> {
     const raw = await this.opts.config.read();
-    return { values: fromWebSearch(raw?.toolSettings._default?.web_search) };
+    return { values: fromSlot(raw?.toolSettings._default) };
   }
 
   /** Write the global default binding. */
@@ -68,13 +68,12 @@ export class ToolSettingsService {
   ): Promise<{ values: ToolSettingsValues; storage: 'personality' | 'global' }> {
     if (this.opts.personalities.isBuiltin(personalityId)) {
       const raw = await this.opts.config.read();
-      return {
-        values: fromWebSearch(raw?.toolSettings[personalityId]?.web_search),
-        storage: 'global',
-      };
+      return { values: fromSlot(raw?.toolSettings[personalityId]), storage: 'global' };
     }
-    const cfg = this.opts.personalities.getToolsConfig(personalityId);
-    return { values: fromWebSearch(cfg?.web_search), storage: 'personality' };
+    return {
+      values: fromSlot(this.opts.personalities.getToolsConfig(personalityId)),
+      storage: 'personality',
+    };
   }
 
   /** Write a personality's binding to the correct store for its type. */
@@ -89,6 +88,7 @@ export class ToolSettingsService {
     // requirePersonality + built-in guard live in the service method.
     await this.opts.personalities.writeToolsConfig(personalityId, {
       web_search: toWebSearch(values),
+      x_search: toXSearch(values),
     });
     return { ok: true, storage: 'personality' };
   }
@@ -96,7 +96,7 @@ export class ToolSettingsService {
   private async writeGlobalSlot(pid: string, values: ToolSettingsValues): Promise<void> {
     assertSafeSlotKey(pid);
     await this.opts.config.update({
-      toolSettings: { [pid]: { web_search: toWebSearch(values) } },
+      toolSettings: { [pid]: { web_search: toWebSearch(values), x_search: toXSearch(values) } },
     });
   }
 }
@@ -119,14 +119,30 @@ function assertSafeSlotKey(pid: string): void {
   }
 }
 
-/** Map the on-disk / stored binding to the generic wire shape, omitting empty
+/** Map the on-disk / stored bindings to the generic wire shape, omitting empty
  *  fields so the UI shows "unset" rather than blank strings. */
-function fromWebSearch(ws: { provider?: string; secret?: string } | undefined): ToolSettingsValues {
-  if (!ws) return {};
-  const fields: Record<string, string> = {};
-  if (ws.provider) fields.provider = ws.provider;
-  if (ws.secret) fields.secret = ws.secret;
-  return Object.keys(fields).length > 0 ? { web_search: fields } : {};
+function fromSlot(
+  slot:
+    | { web_search?: { provider?: string; secret?: string }; x_search?: { secret?: string } }
+    | undefined,
+): ToolSettingsValues {
+  const out: ToolSettingsValues = {};
+  const ws = slot?.web_search;
+  if (ws) {
+    const fields: Record<string, string> = {};
+    if (ws.provider) fields.provider = ws.provider;
+    if (ws.secret) fields.secret = ws.secret;
+    if (Object.keys(fields).length > 0) out.web_search = fields;
+  }
+  if (slot?.x_search?.secret) out.x_search = { secret: slot.x_search.secret };
+  return out;
+}
+
+/** Narrow the generic wire values into the typed x_search binding — a secret
+ *  NAME only, validated with the same rule the vault enforces. */
+function toXSearch(values: ToolSettingsValues): { secret?: string } {
+  const secret = values.x_search?.secret?.trim();
+  return secret && isValidSecretName(secret) ? { secret } : {};
 }
 
 /** Narrow the generic wire values into the typed web_search binding. Unknown

@@ -2,7 +2,7 @@ import { Button, Modal } from 'antd';
 import { useEffect, useState } from 'react';
 import type { DocumentEntry } from '../../features/documents/api/queries';
 import { documentPreviewPlan } from '../../lib/document-preview';
-import { documentDownloadHref } from '../../lib/documents';
+import { type DocumentsScope, documentDownloadHref } from '../../lib/documents';
 import { DocumentPreviewBody, type PreviewContent } from './DocumentPreviewBody';
 
 // Modal preview of one workdir file.
@@ -15,15 +15,15 @@ import { DocumentPreviewBody, type PreviewContent } from './DocumentPreviewBody'
 // workdir.
 
 interface Props {
-  personalityId: string;
+  scope: DocumentsScope;
   /** The declared root the entry was listed from — an id from `documents.root`. */
   root: string;
   entry: DocumentEntry;
   onClose: () => void;
 }
 
-export function DocumentPreviewModal({ personalityId, root, entry, onClose }: Props) {
-  const href = documentDownloadHref(personalityId, root, entry.path);
+export function DocumentPreviewModal({ scope, root, entry, onClose }: Props) {
+  const href = documentDownloadHref(scope, root, entry.path);
   const plan = documentPreviewPlan(entry.name, entry.size);
   // Depend on the primitive, not on `plan` — a fresh object every render would
   // re-fetch the file on every render.

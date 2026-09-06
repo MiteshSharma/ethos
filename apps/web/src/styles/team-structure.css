@@ -82,6 +82,20 @@
   overflow: auto;
 }
 
+/* Documents pane — the shared browser carries its own 24px gutters, so the
+   pane drops the body padding and lets the rootline / table align with the
+   header instead of double-indenting. */
+.team-documents {
+  padding: 24px 0 0;
+  gap: 8px;
+}
+.team-documents-head {
+  padding: 0 24px;
+}
+.documents-team-empty {
+  margin: 12px 24px;
+}
+
 /* ── Structure canvas ──────────────────────────────────────────────── */
 
 .team-canvas {

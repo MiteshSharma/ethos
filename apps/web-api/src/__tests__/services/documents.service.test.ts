@@ -168,7 +168,7 @@ describe('DocumentsService', () => {
   });
 
   it('rejects an unknown personality id', async () => {
-    await expect(service.root('nope')).rejects.toMatchObject({
+    await expect(service.root({ personalityId: 'nope' })).rejects.toMatchObject({
       code: 'PERSONALITY_NOT_FOUND',
     });
   });
@@ -223,11 +223,11 @@ describe('DocumentsService', () => {
     await expect(undeclared.resolveDownload({ root: '0', path: 'x' })).rejects.toMatchObject({
       code: 'WORKDIR_NOT_CONFIGURED',
     });
-    await expect(undeclared.createFolder(undefined, '0', 'x')).rejects.toMatchObject({
+    await expect(undeclared.createFolder({}, '0', 'x')).rejects.toMatchObject({
       code: 'WORKDIR_NOT_CONFIGURED',
     });
     await expect(
-      undeclared.write(undefined, '0', 'x', Buffer.from('x'), { overwrite: false }),
+      undeclared.write({}, '0', 'x', Buffer.from('x'), { overwrite: false }),
     ).rejects.toMatchObject({ code: 'WORKDIR_NOT_CONFIGURED' });
   });
 
@@ -298,9 +298,124 @@ describe('DocumentsService', () => {
     });
   });
 
+  // A team's Documents root is its work directory, `<teamsDir>/<team>/`, and
+  // the same containment applies — the team dir is the only allowlist.
+  describe('team scope', () => {
+    let teamDir: string;
+
+    beforeEach(async () => {
+      teamDir = join(dataDir, 'teams', 'marketing');
+      await mkdir(join(teamDir, 'brand'), { recursive: true });
+      await writeFile(join(teamDir, 'outcomes.md'), '# Outcomes\n');
+      await writeFile(join(teamDir, 'brand', 'voice.md'), 'warm');
+    });
+
+    it('roots at the team work directory when it exists, else has no roots', async () => {
+      expect(await service.root({ team: 'marketing' })).toEqual({
+        roots: [{ id: '0', path: teamDir }],
+        team: 'marketing',
+      });
+      expect(await service.root({ team: 'ghost' })).toEqual({ roots: [], team: 'ghost' });
+      await expect(service.list({ team: 'ghost', root: '0' })).rejects.toMatchObject({
+        code: 'WORKDIR_NOT_CONFIGURED',
+      });
+    });
+
+    it('refuses an unsafe team name and a scope naming both a personality and a team', async () => {
+      for (const team of ['..', '../outside', '.hidden', 'a/b']) {
+        await expect(service.root({ team })).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+      }
+      await expect(
+        service.root({ team: 'marketing', personalityId: 'writer' }),
+      ).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+    });
+
+    it('lists and reads inside the team directory', async () => {
+      const top = await service.list({ team: 'marketing', root: '0' });
+      expect(top.entries.map((e) => [e.name, e.isDir])).toEqual([
+        ['brand', true],
+        ['outcomes.md', false],
+      ]);
+      const nested = await service.list({ team: 'marketing', root: '0', path: 'brand' });
+      expect(nested.entries[0]?.path).toBe(join('brand', 'voice.md'));
+      expect(
+        await service.resolveDownload({ team: 'marketing', root: '0', path: 'outcomes.md' }),
+      ).toEqual({ absolutePath: join(teamDir, 'outcomes.md'), filename: 'outcomes.md', size: 11 });
+    });
+
+    it('refuses traversal out of the team directory, including into a sibling team', async () => {
+      await mkdir(join(dataDir, 'teams', 'dev'));
+      await writeFile(join(dataDir, 'teams', 'dev', 'plan.md'), 'theirs');
+      await expect(
+        service.list({ team: 'marketing', root: '0', path: '../dev' }),
+      ).rejects.toMatchObject({ code: 'FORBIDDEN' });
+      await expect(
+        service.resolveDownload({ team: 'marketing', root: '0', path: '../dev/plan.md' }),
+      ).rejects.toMatchObject({ code: 'FORBIDDEN' });
+      await expect(
+        service.delete({ team: 'marketing', root: '0', path: join(outside, 'secret.txt') }),
+      ).rejects.toMatchObject({ code: 'FORBIDDEN' });
+    });
+
+    it('refuses a symlink inside the team directory that points outside it', async () => {
+      await symlink(join(outside, 'secret.txt'), join(teamDir, 'link.txt'));
+      await symlink(outside, join(teamDir, 'escape'));
+
+      const listed = await service.list({ team: 'marketing', root: '0' });
+      expect(listed.entries).toContainEqual(
+        expect.objectContaining({ name: 'link.txt', isSymlink: true }),
+      );
+      await expect(
+        service.resolveDownload({ team: 'marketing', root: '0', path: 'link.txt' }),
+      ).rejects.toMatchObject({ code: 'FORBIDDEN' });
+      await expect(
+        service.resolveDownload({
+          team: 'marketing',
+          root: '0',
+          path: join('escape', 'secret.txt'),
+        }),
+      ).rejects.toMatchObject({ code: 'FORBIDDEN' });
+      await expect(
+        service.list({ team: 'marketing', root: '0', path: 'escape' }),
+      ).rejects.toMatchObject({ code: 'FORBIDDEN' });
+    });
+
+    it('creates folders, writes and deletes under the team directory', async () => {
+      await service.createFolder({ team: 'marketing' }, '0', 'narratives');
+      const entry = await service.write(
+        { team: 'marketing' },
+        '0',
+        join('narratives', 'q4.md'),
+        Buffer.from('draft'),
+        { overwrite: false },
+      );
+      expect(entry.path).toBe(join('narratives', 'q4.md'));
+      expect(await readFile(join(teamDir, 'narratives', 'q4.md'), 'utf-8')).toBe('draft');
+      expect(
+        await service.delete({ team: 'marketing', root: '0', path: join('narratives', 'q4.md') }),
+      ).toEqual({ ok: true });
+    });
+
+    it('honours a teamsDir override', async () => {
+      const elsewhere = join(dataDir, 'elsewhere');
+      await mkdir(join(elsewhere, 'ops'), { recursive: true });
+      const custom = new DocumentsService({
+        personalities: makeStubPersonalityRegistry([]),
+        dataDir,
+        storage: new FsStorage(),
+        teamsDir: elsewhere,
+      });
+      expect(await custom.root({ team: 'ops' })).toEqual({
+        roots: [{ id: '0', path: join(elsewhere, 'ops') }],
+        team: 'ops',
+      });
+      expect(await custom.root({ team: 'marketing' })).toEqual({ roots: [], team: 'marketing' });
+    });
+  });
+
   describe('createFolder', () => {
     it('creates a folder and returns its entry', async () => {
-      const entry = await service.createFolder(undefined, '0', 'reports');
+      const entry = await service.createFolder({}, '0', 'reports');
       expect(entry).toEqual({
         name: 'reports',
         path: 'reports',
@@ -315,37 +430,37 @@ describe('DocumentsService', () => {
 
     it('rejects when the parent does not exist', async () => {
       await expect(
-        service.createFolder(undefined, '0', join('missing-parent', 'child')),
+        service.createFolder({}, '0', join('missing-parent', 'child')),
       ).rejects.toMatchObject({ code: 'FILE_NOT_FOUND' });
     });
 
     it('rejects a name collision with an existing file or folder', async () => {
       await writeFile(join(workdir, 'taken.md'), 'x');
-      await expect(service.createFolder(undefined, '0', 'taken.md')).rejects.toMatchObject({
+      await expect(service.createFolder({}, '0', 'taken.md')).rejects.toMatchObject({
         code: 'DOCUMENT_EXISTS',
       });
 
       await mkdir(join(workdir, 'reports'));
-      await expect(service.createFolder(undefined, '0', 'reports')).rejects.toMatchObject({
+      await expect(service.createFolder({}, '0', 'reports')).rejects.toMatchObject({
         code: 'DOCUMENT_EXISTS',
       });
     });
 
     it('refuses traversal and symlink escapes the same way as the other methods', async () => {
-      await expect(
-        service.createFolder(undefined, '0', '../outside/new-dir'),
-      ).rejects.toMatchObject({ code: 'FORBIDDEN' });
+      await expect(service.createFolder({}, '0', '../outside/new-dir')).rejects.toMatchObject({
+        code: 'FORBIDDEN',
+      });
 
       await symlink(outside, join(workdir, 'escape'));
-      await expect(
-        service.createFolder(undefined, '0', join('escape', 'new-dir')),
-      ).rejects.toMatchObject({ code: 'FORBIDDEN' });
+      await expect(service.createFolder({}, '0', join('escape', 'new-dir'))).rejects.toMatchObject({
+        code: 'FORBIDDEN',
+      });
     });
   });
 
   describe('write', () => {
     it('writes a new file and returns its entry', async () => {
-      const entry = await service.write(undefined, '0', 'notes.md', Buffer.from('hello'), {
+      const entry = await service.write({}, '0', 'notes.md', Buffer.from('hello'), {
         overwrite: false,
       });
       expect(entry).toEqual({
@@ -362,14 +477,14 @@ describe('DocumentsService', () => {
     it('rejects a collision when overwrite is false', async () => {
       await writeFile(join(workdir, 'notes.md'), 'old');
       await expect(
-        service.write(undefined, '0', 'notes.md', Buffer.from('new'), { overwrite: false }),
+        service.write({}, '0', 'notes.md', Buffer.from('new'), { overwrite: false }),
       ).rejects.toMatchObject({ code: 'DOCUMENT_EXISTS' });
       expect(await readFile(join(workdir, 'notes.md'), 'utf-8')).toBe('old');
     });
 
     it('clobbers an existing file when overwrite is true', async () => {
       await writeFile(join(workdir, 'notes.md'), 'old');
-      const entry = await service.write(undefined, '0', 'notes.md', Buffer.from('new content'), {
+      const entry = await service.write({}, '0', 'notes.md', Buffer.from('new content'), {
         overwrite: true,
       });
       expect(entry.size).toBe('new content'.length);
@@ -378,7 +493,7 @@ describe('DocumentsService', () => {
 
     it('rejects when the parent does not exist', async () => {
       await expect(
-        service.write(undefined, '0', join('missing-parent', 'notes.md'), Buffer.from('x'), {
+        service.write({}, '0', join('missing-parent', 'notes.md'), Buffer.from('x'), {
           overwrite: false,
         }),
       ).rejects.toMatchObject({ code: 'FILE_NOT_FOUND' });
@@ -387,7 +502,7 @@ describe('DocumentsService', () => {
     it('rejects writing over an existing directory', async () => {
       await mkdir(join(workdir, 'reports'));
       await expect(
-        service.write(undefined, '0', 'reports', Buffer.from('x'), { overwrite: true }),
+        service.write({}, '0', 'reports', Buffer.from('x'), { overwrite: true }),
       ).rejects.toMatchObject({ code: 'INVALID_INPUT' });
     });
 
@@ -398,7 +513,7 @@ describe('DocumentsService', () => {
           controller.close();
         },
       });
-      const entry = await service.write(undefined, '0', 'stream.md', stream, {
+      const entry = await service.write({}, '0', 'stream.md', stream, {
         overwrite: false,
       });
       expect(entry.size).toBe('streamed'.length);

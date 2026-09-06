@@ -252,6 +252,7 @@ describe('TEAM_PANES', () => {
       'overview',
       'board',
       'structure',
+      'documents',
       'memory',
       'activity',
       'channels',

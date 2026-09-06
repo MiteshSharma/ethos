@@ -81,6 +81,7 @@ import {
   MeshRouteResultSchema,
   MissedRunPolicySchema,
   ModelTierConfigSchema,
+  NamedSecretKindSchema,
   NamedSecretProviderSchema,
   OnboardingStepSchema,
   PendingMemorySchema,
@@ -4351,7 +4352,7 @@ const a2a = {
 };
 
 // ---------------------------------------------------------------------------
-// Named secrets — global vault manager for web_search provider keys (Phase 2)
+// Named secrets — global vault manager for tool provider keys (Phase 2)
 //
 // A named secret lives at `providers/<provider>/<name>` in the vault. The raw
 // value is written here and NEVER round-tripped back — `list` returns masked
@@ -4369,7 +4370,7 @@ const NamedSecretViewSchema = z.object({
   /** Masked preview (e.g. `…abc1`, or `<set>` / `<unset>`) — never the raw
    *  value, and never both ends of one. See `redactSecretValue`. */
   preview: z.string(),
-  kind: z.literal('web-search'),
+  kind: NamedSecretKindSchema,
 });
 
 /** @experimental */
@@ -4391,7 +4392,15 @@ const namedSecrets = {
     .output(z.object({ ok: z.literal(true) })),
   testKey: oc
     .input(z.object({ provider: NamedSecretProviderSchema, name: NamedSecretNameSchema }))
-    .output(z.object({ ok: z.boolean(), error: z.string().optional() })),
+    .output(
+      z.object({
+        ok: z.boolean(),
+        error: z.string().optional(),
+        /** `false` when the provider has no live probe (an `x` search call is
+         *  billable) — `ok` then only says the secret exists. */
+        tested: z.boolean().optional(),
+      }),
+    ),
 };
 
 // ---------------------------------------------------------------------------
@@ -4555,25 +4564,35 @@ const DocumentEntrySchema = z.object({
   isSymlink: z.boolean(),
 });
 
-/** Omitted `personalityId` means the configured default personality. */
-const DocumentsPersonalityInput = z.object({ personalityId: z.string().min(1).optional() });
+/**
+ * Which scope the call addresses: a personality (omitted `personalityId` means
+ * the configured default) or, with `team`, a team's work directory
+ * (`~/.ethos/teams/<team>/`, its one root). Passing both is refused.
+ */
+const DocumentsScopeInput = z.object({
+  personalityId: z.string().min(1).optional(),
+  team: z.string().min(1).optional(),
+});
 
 /**
- * Every root the personality declares. `id` is opaque to the client — feed it
- * back as `root` on list/delete/createFolder and on the download/upload routes.
+ * Every root the scope declares. `id` is opaque to the client — feed it back
+ * as `root` on list/delete/createFolder and on the download/upload routes.
+ * Exactly one of `personalityId` / `team` echoes which scope answered.
  *
  * An EMPTY `roots` array is the "Documents unconfigured" answer, not an error:
- * the personality declares no `fs_reach.workdir` at all, so there is nothing to
- * browse. Every other procedure fails with `WORKDIR_NOT_CONFIGURED` in that
- * state; `root` is the discovery call that lets the UI say so plainly.
+ * the personality declares no `fs_reach.workdir` at all (or the team has no
+ * work directory yet), so there is nothing to browse. Every other procedure
+ * fails with `WORKDIR_NOT_CONFIGURED` in that state; `root` is the discovery
+ * call that lets the UI say so plainly.
  */
 const DocumentsRootOutput = z.object({
   roots: z.array(z.object({ id: z.string(), path: z.string() })),
-  personalityId: z.string(),
+  personalityId: z.string().optional(),
+  team: z.string().optional(),
 });
 
 /** Which declared root the operation addresses — an `id` from `documents.root`. */
-const DocumentsRootInput = DocumentsPersonalityInput.extend({ root: z.string().min(1) });
+const DocumentsRootInput = DocumentsScopeInput.extend({ root: z.string().min(1) });
 
 const DocumentsListInput = DocumentsRootInput.extend({
   /** Subdirectory relative to the root. Omitted = the root itself. */
@@ -4589,7 +4608,7 @@ const DocumentsCreateFolderInput = DocumentsRootInput.extend({ path: z.string().
 
 /** @experimental */
 const documents = {
-  root: oc.input(DocumentsPersonalityInput).output(DocumentsRootOutput),
+  root: oc.input(DocumentsScopeInput).output(DocumentsRootOutput),
   list: oc.input(DocumentsListInput).output(DocumentsListOutput),
   delete: oc.input(DocumentsDeleteInput).output(DocumentsDeleteOutput),
   // No `upload` here on purpose — bytes never travel over RPC (see the

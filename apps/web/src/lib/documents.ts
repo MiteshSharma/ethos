@@ -4,6 +4,26 @@ import { z } from 'zod';
 // wires these to state; the tests drive them directly.
 
 /**
+ * What a Documents call addresses: a personality's declared `fs_reach.workdir`
+ * roots, or a team's work directory (`~/.ethos/teams/<team>/`). The same
+ * browser, hooks and routes serve both; only the scope differs.
+ */
+export type DocumentsScope = { personalityId: string } | { team: string };
+
+/** The scope's query-string form — `personality=…` or `team=…`, as the routes read it. */
+export function documentsScopeQuery(scope: DocumentsScope): string {
+  return 'team' in scope
+    ? `team=${encodeURIComponent(scope.team)}`
+    : `personality=${encodeURIComponent(scope.personalityId)}`;
+}
+
+/** The scope's react-query key segment — distinct per kind so a team and a
+ *  personality that share an id never share a cache entry. */
+export function documentsScopeKey(scope: DocumentsScope): readonly [string, string] {
+  return 'team' in scope ? ['team', scope.team] : ['personality', scope.personalityId];
+}
+
+/**
  * One declared Documents root, as `documents.root` returns it. `id` is opaque
  * (a stringified index today) and is fed back verbatim as `root` on every
  * other call — list, delete, createFolder, download, upload.
@@ -82,8 +102,8 @@ export function documentRowActions(entry: {
  * space as `+`, which a query parser is free to hand back as a literal `+`.
  * A filename with a space must survive the round trip byte-for-byte.
  */
-export function documentDownloadHref(personalityId: string, root: string, path: string): string {
-  return `/documents/download?personality=${encodeURIComponent(personalityId)}&root=${encodeURIComponent(root)}&path=${encodeURIComponent(path)}`;
+export function documentDownloadHref(scope: DocumentsScope, root: string, path: string): string {
+  return `/documents/download?${documentsScopeQuery(scope)}&root=${encodeURIComponent(root)}&path=${encodeURIComponent(path)}`;
 }
 
 /**
@@ -96,12 +116,12 @@ export function documentDownloadHref(personalityId: string, root: string, path: 
  * point of the 409 the modal turns into a "replace existing file" choice.
  */
 export function documentUploadHref(
-  personalityId: string,
+  scope: DocumentsScope,
   root: string,
   path: string,
   opts: { overwrite?: boolean } = {},
 ): string {
-  const base = `/documents/upload?personality=${encodeURIComponent(personalityId)}&root=${encodeURIComponent(root)}&path=${encodeURIComponent(path)}`;
+  const base = `/documents/upload?${documentsScopeQuery(scope)}&root=${encodeURIComponent(root)}&path=${encodeURIComponent(path)}`;
   return opts.overwrite ? `${base}&overwrite=true` : base;
 }
 

@@ -353,9 +353,17 @@ export interface WebSearchToolSetting {
   secret?: string;
 }
 
-/** Per-personality tool config. Only `web_search` is modeled in v1. */
+/** A personality's binding for the `x_search` tool — one provider (xAI), so
+ *  only the secret NAME. Resolves to `providers/xai/<name>`; absent → the
+ *  default `providers/xai/apiKey`. */
+export interface XSearchToolSetting {
+  secret?: string;
+}
+
+/** Per-personality tool config. */
 export interface PersonalityToolSettings {
   web_search?: WebSearchToolSetting;
+  x_search?: XSearchToolSetting;
 }
 
 /** Global FALLBACK map: personality ID (or `_default`) → per-tool config. */
@@ -2852,6 +2860,8 @@ export async function writeConfig(
       const ws = settings.web_search;
       if (ws?.provider) lines.push(`toolSettings.${id}.web_search.provider: ${ws.provider}`);
       if (ws?.secret) lines.push(`toolSettings.${id}.web_search.secret: ${ws.secret}`);
+      const xs = settings.x_search;
+      if (xs?.secret) lines.push(`toolSettings.${id}.x_search.secret: ${xs.secret}`);
     }
   }
   if (config.models) {
@@ -4422,6 +4432,15 @@ function parseConfigYaml(src: string): EthosConfig {
       } else {
         ws.secret = val;
       }
+      continue;
+    }
+    // toolSettings.<personality|_default>.x_search.secret: <name>
+    const xsMatch = line.match(/^toolSettings\.([^.]+)\.x_search\.secret:\s*(.+)$/);
+    if (xsMatch) {
+      const id = xsMatch[1].trim();
+      const slot = toolSettings[id] ?? {};
+      toolSettings[id] = slot;
+      slot.x_search = { secret: xsMatch[2].trim().replace(/^["']|["']$/g, '') };
       continue;
     }
     // activeContext.type / activeContext.name

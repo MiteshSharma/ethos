@@ -98,6 +98,7 @@ import { TeamActivity } from './pages/team/TeamActivity';
 import { TeamBoard } from './pages/team/TeamBoard';
 import { TeamChannels } from './pages/team/TeamChannels';
 import { TeamChat } from './pages/team/TeamChat';
+import { TeamDocuments } from './pages/team/TeamDocuments';
 import { TeamMemory } from './pages/team/TeamMemory';
 import { TeamOverview } from './pages/team/TeamOverview';
 import { TeamSettings } from './pages/team/TeamSettings';
@@ -137,6 +138,7 @@ const TEAM_PANE_ELEMENTS: Record<TeamPaneKey, ReactNode> = {
   overview: <TeamOverview />,
   board: <TeamBoard />,
   structure: <TeamStructure />,
+  documents: <TeamDocuments />,
   memory: <TeamMemory />,
   activity: <TeamActivity />,
   channels: <TeamChannels />,

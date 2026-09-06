@@ -7,6 +7,7 @@ import { LedgerFeed } from '../../components/team/LedgerFeed';
 import { MemberRow } from '../../components/team/MemberRow';
 import { StatusStrip } from '../../components/team/StatusStrip';
 import { NavIcon } from '../../components/ui/NavIcon';
+import { useDocumentsList } from '../../features/documents/api/queries';
 import { useKanbanBoard } from '../../features/kanban/api/queries';
 import { useTeam } from '../../features/teams/api/queries';
 import { useTeamLedger } from '../../hooks/useTeamLedger';
@@ -27,6 +28,11 @@ export function TeamOverview() {
   const teamQuery = useTeam(teamId);
   const boardQuery = useKanbanBoard(teamId);
   const ledgerQuery = useTeamLedger(teamId, LEDGER_LIMIT, boardQuery.dataUpdatedAt);
+  // Top-level entries of the team's work directory — the same single listing
+  // the column's Documents row counts. A team with no directory yet answers
+  // WORKDIR_NOT_CONFIGURED; the line then links without a count.
+  const documentsQuery = useDocumentsList({ team: teamId }, '0', '', { retry: false });
+  const documentCount = documentsQuery.data?.entries.length;
 
   const board = boardQuery.data?.board ?? null;
   const reasons = useMemo(() => taskReasons(board?.recentEvents ?? []), [board]);
@@ -92,6 +98,17 @@ export function TeamOverview() {
                 {topic}
               </Link>
             ))}
+          </div>
+          <div className="team-sec" style={{ marginTop: 14 }}>
+            Documents{' '}
+            {documentCount !== undefined && (
+              <span className="team-sec-cnt">
+                {documentCount} top-level {documentCount === 1 ? 'entry' : 'entries'}
+              </span>
+            )}
+            <Link className="team-sec-more" to={buildTeamPath(teamId, 'documents')}>
+              Open →
+            </Link>
           </div>
           {team.coordinator && (
             <div className="team-colv-foot">

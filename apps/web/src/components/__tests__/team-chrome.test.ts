@@ -39,6 +39,7 @@ globalThis.ResizeObserver = class {
 const teamsList = vi.fn();
 const teamsGet = vi.fn();
 const kanbanGetBoard = vi.fn();
+const documentsList = vi.fn();
 const sessionsList = vi.fn();
 const personalitiesList = vi.fn();
 const configGet = vi.fn();
@@ -50,6 +51,7 @@ vi.mock('../../rpc', () => ({
       get: (...args: unknown[]) => teamsGet(...args),
     },
     kanban: { getBoard: (...args: unknown[]) => kanbanGetBoard(...args) },
+    documents: { list: (...args: unknown[]) => documentsList(...args) },
     sessions: { list: (...args: unknown[]) => sessionsList(...args) },
     personalities: {
       list: (...args: unknown[]) => personalitiesList(...args),
@@ -188,6 +190,14 @@ beforeEach(() => {
       memberStats: [],
     },
   });
+  documentsList.mockResolvedValue({
+    entries: ['brand', 'opportunities', 'state', 'outcomes.md'].map((name) => ({
+      name,
+      path: name,
+      isDir: !name.includes('.'),
+      isSymlink: false,
+    })),
+  });
   sessionsList.mockResolvedValue({ items: SESSIONS });
   personalitiesList.mockResolvedValue({ items: PERSONALITIES, defaultId: 'researcher' });
   configGet.mockResolvedValue({ adminEnabled: false, personality: 'researcher' });
@@ -220,6 +230,7 @@ describe('ScopeNav — team branch (§3)', () => {
       'Overview',
       'Board',
       'Structure',
+      'Documents',
       'Memory',
       'Activity',
       'Channels',
@@ -232,6 +243,9 @@ describe('ScopeNav — team branch (§3)', () => {
     expect(byLabel('Board')?.querySelector('.sidebar-nav-badge')?.textContent).toBe('2');
     expect(byLabel('Structure')?.querySelector('.sidebar-nav-hint')?.textContent).toBe('2');
     expect(byLabel('Memory')?.querySelector('.sidebar-nav-hint')?.textContent).toBe('3');
+    expect(documentsList).toHaveBeenCalledWith({ team: 'marketing', root: '0' });
+    expect(byLabel('Documents')?.querySelector('.sidebar-nav-hint')?.textContent).toBe('4');
+    expect(byLabel('Documents')?.getAttribute('href')).toBe('/t/marketing/documents');
     expect(byLabel('Channels')?.querySelector('.sidebar-nav-hint')?.textContent).toBe('1');
     expect(byLabel('Overview')?.getAttribute('href')).toBe('/t/marketing/overview');
     expect(byLabel('Overview')?.classList.contains('active')).toBe(true);
