@@ -108,6 +108,18 @@ describe('postureWhy', () => {
     // And it must not still claim the tools run there.
     expect(why).not.toContain('Execution tools run on');
   });
+
+  it('does not blame a declared `execution: none` on an absent toolset', () => {
+    // `requirement === 'none'` short-circuits BEFORE the `hasExecTool` test in
+    // `resolveExecutionPosture`, so a personality whose toolset names `terminal`
+    // still resolves to `backend: 'none'`. Asserting "no execution tools" there
+    // states something false about the toolset.
+    const declared = postureWhy(posture({ backend: 'none', requirement: 'none' }));
+    expect(declared).toContain('execution: none');
+    expect(declared).not.toContain('no execution tools');
+    // The undeclared case keeps the wording it had.
+    expect(postureWhy(posture({ backend: 'none' }))).toContain('no execution tools');
+  });
 });
 
 describe('override control', () => {

@@ -16,6 +16,7 @@ const CATEGORY_LABELS: Record<string, string> = {
   spans: 'spans',
   blobs: 'blobs',
   archive: 'archive',
+  channelTranscript: 'channelTranscript',
   'events.error': 'events.error',
   'events.audit': 'events.audit',
   'events.channel': 'events.channel',
@@ -34,6 +35,8 @@ function getDefault(category: string): string {
       return RETENTION_DEFAULTS.blobs;
     case 'archive':
       return RETENTION_DEFAULTS.archive;
+    case 'channelTranscript':
+      return RETENTION_DEFAULTS.channelTranscript;
     case 'events.error':
       return RETENTION_DEFAULTS.events.error;
     case 'events.audit':
@@ -60,6 +63,8 @@ function getRetentionValue(cfg: RetentionConfig | undefined, category: string): 
       return cfg.blobs;
     case 'archive':
       return cfg.archive;
+    case 'channelTranscript':
+      return cfg.channelTranscript;
     case 'events.error':
       return cfg.events?.error;
     case 'events.audit':
@@ -90,6 +95,9 @@ function setRetentionValue(cfg: RetentionConfig, category: string, value: string
       break;
     case 'archive':
       out.archive = value;
+      break;
+    case 'channelTranscript':
+      out.channelTranscript = value;
       break;
     case 'events.error':
       out.events = { ...out.events, error: value };
@@ -124,6 +132,9 @@ function deleteRetentionValue(cfg: RetentionConfig, category: string): Retention
       break;
     case 'archive':
       delete out.archive;
+      break;
+    case 'channelTranscript':
+      delete out.channelTranscript;
       break;
     case 'events.error':
       out.events = { ...out.events };
@@ -216,7 +227,7 @@ export async function runRetention(sub: string, argv: string[]): Promise<void> {
       const defaultVal = getDefault(key);
       const displayVal = overrideVal ?? defaultVal;
       const tag = overrideVal ? '(override)' : '(default)';
-      console.log(`  ${label.padEnd(16)} ${displayVal.padEnd(8)} ${tag}`);
+      console.log(`  ${label.padEnd(18)} ${displayVal.padEnd(8)} ${tag}`);
     }
     console.log();
 
@@ -224,7 +235,7 @@ export async function runRetention(sub: string, argv: string[]): Promise<void> {
       console.log('Defaults:');
       console.log('══════════════════════');
       for (const [key, label] of Object.entries(CATEGORY_LABELS)) {
-        console.log(`  ${label.padEnd(16)} ${getDefault(key)}`);
+        console.log(`  ${label.padEnd(18)} ${getDefault(key)}`);
       }
       console.log();
     }

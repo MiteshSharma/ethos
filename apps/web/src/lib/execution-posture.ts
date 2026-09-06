@@ -82,7 +82,17 @@ export function postureWhy(posture: ExecutionPostureWire): string {
     case 'local':
       return 'Execution tools run in this process on the host. There is no container boundary — filesystem and network limits are enforced in-app only.';
     case 'none':
-      return 'This personality has no execution tools, so there is no execution backend.';
+      // Two different facts land on `backend: 'none'` and the resolver keeps
+      // them apart with `requirement` (`resolveExecutionPosture` in
+      // @ethosagent/wiring: `requirement === 'none'` short-circuits BEFORE the
+      // `hasExecTool` test). Without reading it this line asserts "no execution
+      // tools" for a personality that declared `execution: none` while its
+      // toolset names `terminal` — the same split the CLI character sheet's
+      // G-EXEC row already makes (`character-sheet.ts`, "posture none — this
+      // personality declares execution: none").
+      return posture.requirement === 'none'
+        ? 'This personality declares execution: none — it does not execute, whatever tools its toolset names.'
+        : 'This personality has no execution tools, so there is no execution backend.';
   }
 }
 

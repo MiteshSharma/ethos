@@ -30,12 +30,23 @@ export const RECORD_KEY_RE = /^[A-Za-z0-9_-]+$/;
 /** Mirrors RetentionDurationSchema — 'forever' or <n> followed by d|w|m|y. */
 export const RETENTION_DURATION_RE = /^(forever|\d+[dwmy])$/;
 
+/**
+ * Every subkey `ConfigGetData['retention']` can carry. It must list ALL of them:
+ * `config.update`'s retention patch is a full replacement of the subkeys it owns
+ * (`RETENTION_SUBKEYS` in apps/web-api/src/services/config.service.ts — the
+ * `owned` sweep in `update`), and this list is what `retentionRowsFromConfig`
+ * turns into editable rows and `buildConfigPatch` rebuilds the patch from. A
+ * subkey missing here is read off config, dropped on the floor, and then DELETED
+ * from config.yaml by the next unrelated save. Pinned by
+ * `apps/web/src/pages/__tests__/retention-subkeys.test.ts`.
+ */
 export const RETENTION_SUBKEYS: readonly RetentionSubkey[] = [
   'messages',
   'traces',
   'spans',
   'blobs',
   'archive',
+  'channelTranscript',
   'events.error',
   'events.audit',
   'events.channel',

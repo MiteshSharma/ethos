@@ -311,6 +311,17 @@ const DockerAbsentSchema = z.object({
 });
 const ExecutionPostureSchema = z.object({
   backend: z.enum(['docker', 'local', 'ssh', 'none']),
+  /**
+   * What the PERSONALITY required (`execution:` in its `config.yaml`), absent
+   * when it required nothing. Carried BESIDE `backend` because `ExecutionPosture`
+   * in `@ethosagent/types` says a surface must be able to show both — what was
+   * asked for and what this machine provides. Without it a `backend: 'none'`
+   * that declared `execution: none` is indistinguishable from one that simply
+   * has no exec-bearing tool, which are different facts about the personality;
+   * `postureWhy` in `apps/web/src/lib/execution-posture.ts` reads this to tell
+   * them apart, the same split `character-sheet.ts` makes for the CLI sheet.
+   */
+  requirement: z.enum(['remote', 'none']).optional(),
   networkMode: z.enum(['none', 'bridge']),
   memoryMb: z.number(),
   containerized: z.boolean(),
@@ -1095,6 +1106,7 @@ const RetentionSubkeySchema = z.enum([
   'spans',
   'blobs',
   'archive',
+  'channelTranscript',
   'events.error',
   'events.audit',
   'events.channel',

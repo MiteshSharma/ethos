@@ -137,6 +137,7 @@ export type RetentionSubkey =
   | 'spans'
   | 'blobs'
   | 'archive'
+  | 'channelTranscript'
   | 'events.error'
   | 'events.audit'
   | 'events.channel'
@@ -148,6 +149,7 @@ const RETENTION_SUBKEYS: readonly RetentionSubkey[] = [
   'spans',
   'blobs',
   'archive',
+  'channelTranscript',
   'events.error',
   'events.audit',
   'events.channel',

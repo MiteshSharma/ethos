@@ -740,6 +740,30 @@ describe('ConfigService — settings passthrough groups', () => {
     });
   });
 
+  // `retention.channelTranscript` (RETENTION_DEFAULTS.channelTranscript = 30d,
+  // packages/types/src/retention.ts) prunes observe-mode transcripts — real
+  // message text from watched rooms. It parsed and pruned long before either
+  // setter surface listed it, so the only way to shorten the window was to hand
+  // edit config.yaml, and this service REJECTED a patch that named it.
+  //
+  // The read half matters as much as the write half: `update`'s retention patch
+  // replaces every subkey in RETENTION_SUBKEYS, so a subkey the service writes
+  // but does not report back would be swept out of config.yaml by the next
+  // unrelated save — silently restoring the 30d default over a shorter window an
+  // operator had chosen. Both halves are asserted here.
+  it('reads and writes retention.channelTranscript like any other subkey', async () => {
+    await writeBase(['retention.channelTranscript: 7d']);
+    expect((await service.get()).retention).toMatchObject({ channelTranscript: '7d' });
+
+    await service.update({ retention: { channelTranscript: '14d', messages: '90d' } });
+    const written = await storage.read(join(DATA, 'config.yaml'));
+    expect(written).toContain('retention.channelTranscript: 14d');
+    expect((await service.get()).retention).toMatchObject({
+      channelTranscript: '14d',
+      messages: '90d',
+    });
+  });
+
   it('round-trips every parity leaf under its dotted config key', async () => {
     await writeBase();
     await service.update({

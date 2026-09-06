@@ -216,11 +216,26 @@
 //   src/index.ts                 machine actually KEEP a host key it learns"
 //                                before an `accept-new` connection is
 //                                spawned. It is a pre-flight probe on an
-//                                OPERATOR-supplied path — `execution.ssh.
-//                                knownHostsFile`, or ssh's own
-//                                `~/.ssh/known_hosts` when that is unset —
-//                                which lives outside `~/.ethos/` entirely and
-//                                is read by the ssh binary, never by Ethos:
+//                                OPERATOR-supplied path, resolved the way ssh
+//                                itself resolves it: `execution.ssh.
+//                                knownHostsFile` when set (Ethos passes it as
+//                                a command-line `-o`, which outranks the
+//                                config file), otherwise the first entry of
+//                                the `userknownhostsfile` line in `ssh -G`
+//                                output for that destination
+//                                (`knownHostsFromSshConfig`), which honours
+//                                the operator's `~/.ssh/config` including
+//                                `Include` and `Match` blocks and so can name
+//                                a path neither Ethos nor the operator typed
+//                                here. `~/.ssh/known_hosts`
+//                                (`DEFAULT_KNOWN_HOSTS`) is only the fail-open
+//                                fallback for a `-G` this process cannot read
+//                                — no ssh binary, non-zero status, timeout, no
+//                                `userknownhostsfile` line, or a quoted path
+//                                it will not split. Whichever path that
+//                                resolution names lives outside `~/.ethos/`
+//                                entirely and is read by the ssh binary,
+//                                never by Ethos:
 //                                nothing is opened, nothing is parsed, no
 //                                personality data passes through it. Storage
 //                                could not express it even if the path were

@@ -82,6 +82,7 @@ describe('ExecutionPosture survives the wire whole', () => {
   /** Typed as the real interface, so a field REMOVED there fails to compile. */
   const posture: ExecutionPosture = {
     backend: 'ssh',
+    requirement: 'remote',
     networkMode: 'none',
     memoryMb: 2048,
     containerized: false,
@@ -110,6 +111,34 @@ describe('ExecutionPosture survives the wire whole', () => {
     // configured — a host with no explicit port must never gain `:22` here.
     expect(out.sshTarget).toBe('deploy@build-01:22');
     expect(out.sshRefused?.message).toBe('ssh refused: constitution requires a sandbox');
+  });
+
+  it('carries the personality REQUIREMENT beside the backend, not folded into it', () => {
+    // `sshRefused` already covers the UNMET requirement. What was missing is the
+    // MET one: a `backend: 'none'` that declared `execution: none` and one that
+    // simply has no exec-bearing tool are different facts, and with the field
+    // stripped they arrive at the browser identical.
+    const declaredNone: ExecutionPosture = {
+      backend: 'none',
+      requirement: 'none',
+      networkMode: 'none',
+      memoryMb: 256,
+      containerized: false,
+      mounts: [],
+      scratchPaths: [],
+    };
+    const noExecTool: ExecutionPosture = { ...declaredNone };
+    delete noExecTool.requirement;
+
+    const a = sheetOut.parse({ markdown: '', posture: declaredNone }) as {
+      posture: ExecutionPosture;
+    };
+    const b = sheetOut.parse({ markdown: '', posture: noExecTool }) as {
+      posture: ExecutionPosture;
+    };
+    expect(a.posture.requirement).toBe('none');
+    expect(b.posture.requirement).toBeUndefined();
+    expect(a.posture).not.toEqual(b.posture);
   });
 
   it('keeps the dockerAbsent decision it already carried', () => {
