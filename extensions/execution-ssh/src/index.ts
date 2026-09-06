@@ -1,4 +1,4 @@
-import { type ChildProcess, spawn } from 'node:child_process';
+import { type ChildProcess, spawn, spawnSync } from 'node:child_process';
 import { accessSync, constants as fsConstants } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -130,11 +130,20 @@ export class SshEnvUnsupportedError extends Error {
  *
  * ssh reports BOTH as exit status 255: it exits 255 on its own failures, and it
  * also propagates a remote command that genuinely exited 255. The two are told
- * apart by the diagnostic ssh writes to stderr, which it prefixes `ssh:`
- * (plan §5). KNOWN LIMIT: authentication refusals are printed by ssh WITHOUT
- * that prefix (`user@host: Permission denied (publickey).`), so they surface as
- * a remote exit 255 rather than as this error. `probe()` reports those verbatim
- * — that is the surface an operator should be reading for a credential problem.
+ * apart by the diagnostic ssh writes to stderr, which it MOSTLY prefixes `ssh:`
+ * (plan §5) — see {@link isSshDiagnostic} for the one unprefixed line that is
+ * also ssh's own.
+ *
+ * KNOWN LIMIT: authentication refusals are printed by ssh WITHOUT that prefix
+ * (`user@host: Permission denied (publickey).`) and are NOT matched here, so
+ * they surface as a remote exit 255 rather than as this error. That gap is
+ * covered at a different seam rather than by widening the match: `probe()`
+ * reports the failure verbatim, and every code tool gates on `isAvailable()`
+ * before it runs a command, so a credential problem reaches the agent as
+ * `not_available` carrying ssh's own sentence. Widening the match instead
+ * would have to guess which `Permission denied` lines are ssh's and which are
+ * the remote command's, and the remote command prints that sentence far more
+ * often than ssh does.
  */
 export class SshTransportError extends Error {
   readonly code = 'SSH_TRANSPORT_FAILED';
@@ -245,6 +254,41 @@ function createDiagnosticBuffer(): { push: (chunk: Buffer) => void; text: () => 
   };
 }
 
+/**
+ * ssh's terminal line for EVERY host-key refusal — an unknown host under
+ * `StrictHostKeyChecking=yes`, and a CHANGED key under `accept-new` or `yes`
+ * alike. Printed without the `ssh:` prefix, which is why the prefix test alone
+ * is not enough.
+ *
+ * The claim that this exact byte sequence is what ssh prints is enforced by
+ * `extensions/execution-ssh/src/__tests__/ssh.test.ts` ("reports a host-key
+ * verification failure as a transport error"), which drives it through the
+ * same stderr path a real client uses. Verified against OpenSSH 9.6p1, whose
+ * `sshconnect.c` emits it from the `verify_host_key` failure path.
+ */
+const HOST_KEY_VERIFICATION_FAILED = 'Host key verification failed.';
+
+/**
+ * Whether a stderr line is ssh diagnosing ITSELF, rather than output from the
+ * remote command.
+ *
+ * `ssh:`-prefixed lines are ssh's own by construction. The host-key refusal is
+ * the one message it prints unprefixed that this backend must not mistake for
+ * a remote exit 255: a changed or unpinnable host key is precisely what
+ * {@link sshKnownHostsUnwritableError} exists to make impossible to miss, and
+ * classifying it as a remote failure hands it to the agent as a failing
+ * command — an instruction to go fix something that never ran.
+ *
+ * A remote command whose own stderr carries this line (a nested `ssh` on the
+ * target that failed its host-key check, and whose 255 the outer ssh
+ * propagates) is classified as a transport failure too. That is the honest
+ * reading: it IS a host-key verification failure, and reporting it as one is
+ * more useful than reporting it as a command that failed.
+ */
+function isSshDiagnostic(line: string): boolean {
+  return line.startsWith('ssh:') || line.trim() === HOST_KEY_VERIFICATION_FAILED;
+}
+
 /** `-o ConnectTimeout=` for a real exec. */
 const EXEC_CONNECT_TIMEOUT_SEC = 10;
 
@@ -351,6 +395,79 @@ export function sshKnownHostsError(ssh: SshTarget): string | null {
  */
 const DEFAULT_KNOWN_HOSTS = '~/.ssh/known_hosts';
 
+/** Wall-clock ceiling for the {@link runSshDashG} subprocess. */
+const SSH_CONFIG_TIMEOUT_MS = 5_000;
+
+/**
+ * `ssh -G` output for a target, or `null` when this process could not obtain
+ * it. Injectable so the parse and the decision built on it can be exercised
+ * without a real ssh binary; the production default is {@link runSshDashG}.
+ */
+export type SshConfigResolver = (ssh: SshTarget) => string | null;
+
+/**
+ * Resolve ssh's EFFECTIVE configuration for this destination without
+ * connecting.
+ *
+ * The argv is the one a real exec would use, not a reduced one: a command-line
+ * `-o` outranks the config file and `Match` blocks can key on the user, host
+ * and port, so resolving a different argv would answer a question nobody
+ * asked. `-G` prints the result and exits; no connection is opened.
+ *
+ * `-G` does evaluate `Match exec` blocks, which run commands on the Ethos
+ * host. That is not new exposure — the operator's `~/.ssh/config` is already
+ * trusted input and a real connection evaluates the same blocks (see
+ * {@link buildSshArgs} on the `ProxyCommand` residue) — but it does mean a
+ * config this process did not write can make the call slow, hence the timeout.
+ * stdin is closed so nothing it spawns can block waiting for input.
+ *
+ * `null` on ANY failure — no ssh binary, non-zero status, timeout. The caller
+ * treats that as "cannot determine" (see {@link sshKnownHostsUnwritableError}).
+ */
+function runSshDashG(ssh: SshTarget): string | null {
+  const result = spawnSync(
+    'ssh',
+    ['-G', ...buildSshArgs(ssh, ['true'], PROBE_CONNECT_TIMEOUT_SEC)],
+    { encoding: 'utf-8', timeout: SSH_CONFIG_TIMEOUT_MS, stdio: ['ignore', 'pipe', 'pipe'] },
+  );
+  if (result.error || result.status !== 0) return null;
+  return typeof result.stdout === 'string' ? result.stdout : null;
+}
+
+/**
+ * The `UserKnownHostsFile` list in `ssh -G` output, or `null` when the output
+ * names none this process can read.
+ *
+ * `-G` prints one lower-cased keyword per line followed by its resolved value;
+ * `userknownhostsfile` carries the whitespace-separated LIST ssh will consult,
+ * with the learned key going to the first entry.
+ *
+ * A value containing `"` is reported as undeterminable rather than split:
+ * OpenSSH quotes paths that contain spaces, and splitting one on whitespace
+ * would yield fragments that are not paths, which the caller would then probe
+ * as if they were and refuse a target over.
+ */
+export function knownHostsFromSshConfig(gOutput: string): readonly string[] | null {
+  for (const line of gOutput.split('\n')) {
+    const [keyword, ...paths] = line.trim().split(/\s+/);
+    if (keyword?.toLowerCase() !== 'userknownhostsfile') continue;
+    if (paths.length === 0 || paths.some((p) => p.includes('"'))) return null;
+    return paths;
+  }
+  return null;
+}
+
+function knownHostsRedirectedMessage(destination: string, path: string): string {
+  return (
+    `execution.ssh: ssh's own configuration resolves UserKnownHostsFile to '${path}' for ` +
+    `'${destination}', and that destination cannot persist a learned host key. With ` +
+    "strictHostKeys 'accept-new' every connection would then be a first connection and would " +
+    'accept whatever key is offered, while this config claims the key is pinned. Remove that ' +
+    'setting from your ssh config, or point execution.ssh.knownHostsFile at a writable path — ' +
+    'Ethos passes that on the command line, where it outranks the config file.'
+  );
+}
+
 type Writability = 'writable' | 'unwritable' | 'missing';
 
 function writability(path: string): Writability {
@@ -427,16 +544,59 @@ function knownHostsUnwritableMessage(file: string, problem: string, fix: string)
  * to the home directory, so a fresh container is not refused for a directory
  * ssh would have created.
  *
+ * WHICH file is itself a question this cannot answer lexically when
+ * `knownHostsFile` is unset — the common case. Ethos then passes no
+ * `-o UserKnownHostsFile`, so the operator's `~/.ssh/config` decides, and a
+ * `Host build-01` block setting `UserKnownHostsFile /dev/null` makes a probe of
+ * `~/.ssh/known_hosts` PASS on a file ssh never opens: nothing is pinned, which
+ * is the exact state this check exists to refuse. `ssh -G` answers the real
+ * question — it resolves the effective config for a destination without
+ * connecting — so that is what the unset case consults
+ * ({@link runSshDashG}). A configured `knownHostsFile` needs no such lookup:
+ * it is passed as a command-line `-o`, which outranks the config file.
+ *
+ * FAIL OPEN on not knowing; fail closed only on knowing. No ssh binary, a
+ * non-zero `-G`, a timeout, output with no `userknownhostsfile` line, or a
+ * quoted path this will not split — all fall back to
+ * {@link DEFAULT_KNOWN_HOSTS}, which is the behaviour that shipped before `-G`
+ * was consulted, so an ssh that formats its resolved config differently is no
+ * worse off than it was. Refusing every execution on an unrecognised
+ * subprocess result would take working deployments down over a check that is
+ * advisory. A `-G` that DOES name a destination keeping nothing is positive
+ * evidence, and is refused.
+ *
+ * Not cached. It runs only under `accept-new` with `knownHostsFile` unset, once
+ * per exec and once per probe, beside an ssh connection that costs orders of
+ * magnitude more — and a cache would have to be invalidated on `~/.ssh/config`
+ * edits, which is the same live-filesystem staleness this check already refuses
+ * to accept for the writability half.
+ *
  * Deliberately NOT duplicated into `packages/config` the way the lexical check
  * is. That one refuses a VALUE, which is as true at boot as it ever will be;
  * this one reads the filesystem, which a `chmod`, a mount, or a container's
  * first run can change under a process that is already up.
  */
-export function sshKnownHostsUnwritableError(ssh: SshTarget): string | null {
+export function sshKnownHostsUnwritableError(
+  ssh: SshTarget,
+  resolveConfig: SshConfigResolver = runSshDashG,
+): string | null {
   if ((ssh.strictHostKeys ?? 'accept-new') !== 'accept-new') return null;
 
-  const configured = ssh.knownHostsFile?.split(/\s+/).filter((p) => p.length > 0)[0];
-  const file = expandHome(configured ?? DEFAULT_KNOWN_HOSTS);
+  let subject = ssh.knownHostsFile?.split(/\s+/).filter((p) => p.length > 0)[0];
+  if (subject === undefined) {
+    const output = resolveConfig(ssh);
+    const effective = output === null ? null : knownHostsFromSshConfig(output);
+    // Every entry is checked, not just the first, for the same reason
+    // {@link sshKnownHostsError} checks every entry of the configured list: a
+    // list is only as trustworthy as what ssh actually consults.
+    for (const path of effective ?? []) {
+      if (NON_PERSISTENT_KNOWN_HOSTS.has(path.toLowerCase())) {
+        return knownHostsRedirectedMessage(sshDestination(ssh), path);
+      }
+    }
+    subject = effective?.[0] ?? DEFAULT_KNOWN_HOSTS;
+  }
+  const file = expandHome(subject);
   if (file === null) return null;
 
   const fileState = writability(file);
@@ -623,18 +783,14 @@ async function* streamChild(child: ChildProcess, opts: ExecOpts): AsyncIterable<
     resolveNext?.();
   });
   // ssh propagates the remote command's exit status as its own exit code, and
-  // uses 255 for its OWN failures. Exit 255 with an `ssh:`-prefixed diagnostic
-  // on stderr is ssh failing; exit 255 without one is the remote command
-  // genuinely exiting 255, which is passed through as an ordinary exit chunk.
+  // uses 255 for its OWN failures. Exit 255 with a diagnostic ssh wrote about
+  // itself on stderr ({@link isSshDiagnostic}) is ssh failing; exit 255 without
+  // one is the remote command genuinely exiting 255, which is passed through as
+  // an ordinary exit chunk.
   child.on('close', (code) => {
     exitCode = code ?? null;
     if (code === 255) {
-      const diagnostic = stderrHead
-        .text()
-        .split('\n')
-        .filter((line) => line.startsWith('ssh:'))
-        .join('; ')
-        .trim();
+      const diagnostic = stderrHead.text().split('\n').filter(isSshDiagnostic).join('; ').trim();
       if (diagnostic) error = new SshTransportError(diagnostic);
     }
     done = true;

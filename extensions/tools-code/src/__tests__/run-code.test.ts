@@ -218,6 +218,149 @@ describe('run_tests / lint routing (F1)', () => {
 });
 
 // ---------------------------------------------------------------------------
+// F11 — a host-key verification failure must not read as a red test suite.
+//
+// `run_tests` and `lint` rendered ANY non-zero exit as `Tests failed (code
+// 255):` / `Lint failed:` with `execution_failed`, and ran no availability
+// probe. ssh exits 255 for its OWN failures, so the precise event the
+// known-hosts apparatus exists to produce — a changed or unpinnable host key —
+// reached the agent as a failing suite, and the agent goes and edits tests that
+// were never executed.
+// ---------------------------------------------------------------------------
+
+/**
+ * `SshTransportError`'s shape, mirrored rather than imported: `tools-code` must
+ * not depend on a concrete backend, which is why the production code reads the
+ * `code` structurally. The string is pinned on the other side by
+ * `extensions/execution-ssh/src/__tests__/ssh.test.ts`
+ * ("SshTransportError carries the code tools-code matches on").
+ */
+class FakeSshTransportError extends Error {
+  readonly code = 'SSH_TRANSPORT_FAILED';
+  constructor(diagnostic: string) {
+    super(`ssh transport failed: ${diagnostic}`);
+    this.name = 'SshTransportError';
+  }
+}
+
+/**
+ * A fake ssh backend: either one whose probe refuses (the way a changed host
+ * key makes it) or one that passes its probe and then loses the transport.
+ *
+ * Built standalone rather than by mutating {@link makeBackend}'s result —
+ * `ExecutionBackend.name` is readonly, and the name is what these tools read to
+ * decide they are talking to a remote target.
+ */
+function makeSshBackend(opts: {
+  available: boolean;
+  probeError?: string;
+  transportError?: string;
+}): FakeBackend & { lastProbeError?: string } {
+  const backend: FakeBackend & { lastProbeError?: string } = {
+    name: 'ssh',
+    isAvailable: vi.fn().mockResolvedValue(opts.available),
+    exec(cmd: string, execOpts: ExecOpts): AsyncIterable<ExecChunk> {
+      backend.lastCmd = cmd;
+      backend.lastOpts = execOpts;
+      // An explicit async iterator rather than a generator: a generator body
+      // whose only statement is a `throw` carries no `yield`, which Biome
+      // rejects.
+      return {
+        [Symbol.asyncIterator]: () => ({
+          next: () =>
+            opts.transportError === undefined
+              ? Promise.resolve({ done: true as const, value: undefined })
+              : Promise.reject(new FakeSshTransportError(opts.transportError)),
+        }),
+      };
+    },
+    spawnSession(personalityId: string) {
+      return {
+        personalityId,
+        exec: (cmd: string, o: ExecOpts = {}) => backend.exec(cmd, o),
+        dispose: () => Promise.resolve(),
+      };
+    },
+    mountsFor: () => [],
+    dispose: () => Promise.resolve(),
+    ...(opts.probeError !== undefined ? { lastProbeError: opts.probeError } : {}),
+  };
+  return backend;
+}
+
+const HOST_KEY_FAILED = 'Host key verification failed.';
+
+describe('run_tests / lint transport failures (F11)', () => {
+  it.each([
+    ['run_tests', 1],
+    ['lint', 2],
+  ])('%s reports a refused host key as not_available, not a failing suite', async (_n, index) => {
+    const backend = makeSshBackend({ available: false, probeError: HOST_KEY_FAILED });
+    const tool = createCodeTools({ backend })[index];
+    const result = await tool?.execute({}, ctx);
+    expect(result?.ok).toBe(false);
+    if (result && !result.ok) {
+      expect(result.code).toBe('not_available');
+      expect(result.error).toContain(HOST_KEY_FAILED);
+      expect(result.error).not.toContain('failed (code');
+      expect(result.error).not.toContain('Lint failed');
+    }
+    // The command never ran, so nothing about it is reported.
+    expect(backend.lastCmd).toBeUndefined();
+  });
+
+  it.each([
+    ['run_tests', 1],
+    ['lint', 2],
+  ])('%s reports a transport failure mid-exec as not_available', async (_n, index) => {
+    const tool = createCodeTools({
+      backend: makeSshBackend({ available: true, transportError: HOST_KEY_FAILED }),
+    })[index];
+    const result = await tool?.execute({}, ctx);
+    expect(result?.ok).toBe(false);
+    if (result && !result.ok) {
+      expect(result.code).toBe('not_available');
+      expect(result.error).toBe(`ssh transport failed: ${HOST_KEY_FAILED}`);
+    }
+  });
+
+  it('run_code reports a transport failure mid-exec as not_available too', async () => {
+    const [runCode] = createCodeTools({
+      backend: makeSshBackend({ available: true, transportError: HOST_KEY_FAILED }),
+    });
+    const result = await runCode?.execute({ runtime: 'python', code: 'print(1)' }, ctx);
+    expect(result?.ok).toBe(false);
+    if (result && !result.ok) expect(result.code).toBe('not_available');
+  });
+
+  // THE CONTROL. The gate above must not swallow the thing these tools exist to
+  // report: a suite that really ran and really failed is still a failing suite.
+  it('run_tests still reports an actually-failing suite as a failing suite', async () => {
+    const backend = makeBackend(true, { stdout: '2 failed | 8 passed', exitCode: 1 });
+    const [, runTests] = createCodeTools({ backend });
+    const result = await runTests.execute({}, ctx);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.code).toBe('execution_failed');
+      expect(result.error).toContain('Tests failed (code 1)');
+      expect(result.error).toContain('2 failed | 8 passed');
+    }
+  });
+
+  it('lint still reports actual lint findings as a failing lint', async () => {
+    const backend = makeBackend(true, { stdout: 'src/a.ts:1 noExplicitAny', exitCode: 1 });
+    const [, , lint] = createCodeTools({ backend });
+    const result = await lint.execute({}, ctx);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.code).toBe('execution_failed');
+      expect(result.error).toContain('Lint failed:');
+      expect(result.error).toContain('noExplicitAny');
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Ground-truth evidence (plan `ground-truth-verification`, R6)
 // ---------------------------------------------------------------------------
 

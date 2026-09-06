@@ -7,12 +7,13 @@ import { runExecutionConformance } from '@ethosagent/core';
 import type { ExecChunk, Logger, PersonalityConfig, SecretsResolver } from '@ethosagent/types';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-vi.mock('node:child_process', () => ({ spawn: vi.fn() }));
+vi.mock('node:child_process', () => ({ spawn: vi.fn(), spawnSync: vi.fn() }));
 
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import {
   buildRemoteWords,
   buildSshArgs,
+  knownHostsFromSshConfig,
   SshDestinationInvalidError,
   SshEnvUnsupportedError,
   SshExecutionBackend,
@@ -96,6 +97,19 @@ function useReplies(list: Reply[]): void {
   );
 }
 
+/**
+ * Drive the `ssh -G` lookup without a real ssh binary. `null` is the
+ * subprocess failing (no binary, non-zero status, timeout); a string is its
+ * stdout.
+ */
+function useSshConfig(stdout: string | null): void {
+  vi.mocked(spawnSync).mockReturnValue(
+    (stdout === null
+      ? { status: 1, stdout: '', stderr: '' }
+      : { status: 0, stdout, stderr: '' }) as ReturnType<typeof spawnSync>,
+  );
+}
+
 function backend(ssh?: Record<string, unknown>) {
   return new SshExecutionBackend({
     config: ssh ? { ssh: { host: 'build-01', ...ssh } } : {},
@@ -169,6 +183,10 @@ beforeEach(() => {
   debugLines.length = 0;
   vi.mocked(spawn).mockReset();
   useReplies([{ code: 0 }]);
+  // Default: `ssh -G` could not be run. That is the FAIL-OPEN branch, so every
+  // pre-existing expectation about the unset default still describes the
+  // behaviour under test rather than being rewritten around the new lookup.
+  useSshConfig(null);
   savedHome = process.env.HOME;
   tmpHome = mkdtempSync(join(tmpdir(), 'ethos-ssh-home-'));
   mkdirSync(join(tmpHome, '.ssh'));
@@ -490,6 +508,167 @@ describe('sshKnownHostsUnwritableError (pre-spawn host-key persistence on this m
   });
 });
 
+// ---------------------------------------------------------------------------
+// F10 — the writability probe has to probe the file ssh WILL USE.
+//
+// With `knownHostsFile` unset — the common case — Ethos passes no
+// `-o UserKnownHostsFile`, so the operator's `~/.ssh/config` decides. A
+// `Host build-01 / UserKnownHostsFile /dev/null` block leaves a probe of
+// `~/.ssh/known_hosts` passing on a file ssh never opens, and NOTHING IS EVER
+// PINNED — the exact state the probe exists to refuse. `ssh -G` resolves the
+// effective config for a destination without connecting, so that is what the
+// unset case asks. Driven through a fake here; no real ssh is required.
+// ---------------------------------------------------------------------------
+describe('knownHostsFromSshConfig (parsing `ssh -G` output)', () => {
+  it('reads the userknownhostsfile list', () => {
+    expect(
+      knownHostsFromSshConfig(
+        'user deploy\nhostname build-01\nuserknownhostsfile ~/.ssh/known_hosts ~/.ssh/known_hosts2\nport 22\n',
+      ),
+    ).toEqual(['~/.ssh/known_hosts', '~/.ssh/known_hosts2']);
+  });
+
+  it('returns null when the output names no known-hosts file', () => {
+    expect(knownHostsFromSshConfig('user deploy\nhostname build-01\n')).toBeNull();
+  });
+
+  it('returns null for empty output', () => {
+    expect(knownHostsFromSshConfig('')).toBeNull();
+  });
+
+  // OpenSSH quotes a path containing spaces. Splitting one on whitespace would
+  // yield fragments that are not paths, which the caller would then probe as if
+  // they were and refuse a working target over.
+  it('declines to split a quoted path', () => {
+    expect(knownHostsFromSshConfig('userknownhostsfile "/keys/my hosts/known_hosts"\n')).toBeNull();
+  });
+});
+
+describe('sshKnownHostsUnwritableError (effective known-hosts per `ssh -G`)', () => {
+  const G = (line: string) => () => `hostname build-01\n${line}\n`;
+
+  it('refuses when the operator’s ssh config redirects known-hosts to /dev/null', () => {
+    const err = sshKnownHostsUnwritableError(
+      { host: 'build-01' },
+      G('userknownhostsfile /dev/null'),
+    );
+    expect(err).toContain('/dev/null');
+    expect(err).toContain('build-01');
+    expect(err).toContain('cannot persist a learned host key');
+  });
+
+  // OpenSSH's literal, not a path. Same hole, spelled differently.
+  it('refuses the OpenSSH literal `none`', () => {
+    expect(
+      sshKnownHostsUnwritableError({ host: 'build-01' }, G('userknownhostsfile none')),
+    ).toContain('cannot persist');
+  });
+
+  // A list is only as trustworthy as what ssh actually consults — the same rule
+  // the lexical check applies to a configured list.
+  it('refuses a non-persistent entry anywhere in the resolved list', () => {
+    expect(
+      sshKnownHostsUnwritableError(
+        { host: 'build-01' },
+        G('userknownhostsfile ~/.ssh/known_hosts /dev/null'),
+      ),
+    ).toContain('/dev/null');
+  });
+
+  it('names the destination it resolved for, user included', () => {
+    expect(
+      sshKnownHostsUnwritableError(
+        { host: 'build-01', user: 'deploy' },
+        G('userknownhostsfile /dev/null'),
+      ),
+    ).toContain('deploy@build-01');
+  });
+
+  // The redirect is a REAL path, just not the default one: the probe must
+  // follow it rather than keep testing ~/.ssh/known_hosts.
+  it('probes the file `ssh -G` actually named, not the default', () => {
+    const redirected = join(tmpHome, 'nodir', 'known_hosts');
+    const err = sshKnownHostsUnwritableError(
+      { host: 'build-01' },
+      G(`userknownhostsfile ${redirected}`),
+    );
+    expect(err).toContain(redirected);
+    expect(err).not.toContain(join(tmpHome, '.ssh', 'known_hosts'));
+  });
+
+  it('accepts a redirected file whose directory is writable', () => {
+    expect(
+      sshKnownHostsUnwritableError(
+        { host: 'build-01' },
+        G(`userknownhostsfile ${join(tmpHome, 'known_hosts_alt')}`),
+      ),
+    ).toBeNull();
+  });
+
+  // FAIL OPEN on not knowing. Each of these falls back to ~/.ssh/known_hosts —
+  // the behaviour that shipped before `-G` was consulted — so an ssh that
+  // formats its resolved config differently is no worse off than it was.
+  it.each<[string, () => string | null]>([
+    ['`ssh -G` could not be run', () => null],
+    ['the output carries no userknownhostsfile line', () => 'hostname build-01\n'],
+    ['the resolved path is quoted', () => 'userknownhostsfile "/a b/known_hosts"\n'],
+  ])('falls back to ssh’s own default when %s', (_label, resolver) => {
+    // ~/.ssh is writable here, so the fallback ACCEPTS …
+    expect(sshKnownHostsUnwritableError({ host: 'build-01' }, resolver)).toBeNull();
+    // … and it is genuinely the default being probed, not a skipped check.
+    process.env.HOME = join(tmpHome, 'no-such-home');
+    expect(sshKnownHostsUnwritableError({ host: 'build-01' }, resolver)).toContain(
+      join(tmpHome, 'no-such-home', '.ssh', 'known_hosts'),
+    );
+  });
+
+  // A configured knownHostsFile is passed as a command-line `-o`, which
+  // outranks the config file — there is nothing for `-G` to tell us.
+  it('does not consult `ssh -G` when knownHostsFile is set', () => {
+    const resolver = vi.fn(() => 'userknownhostsfile /dev/null\n');
+    expect(
+      sshKnownHostsUnwritableError(
+        { host: 'build-01', knownHostsFile: join(tmpHome, '.ssh', 'known_hosts') },
+        resolver,
+      ),
+    ).toBeNull();
+    expect(resolver).not.toHaveBeenCalled();
+  });
+
+  it('does not consult `ssh -G` under strictHostKeys yes', () => {
+    const resolver = vi.fn(() => 'userknownhostsfile /dev/null\n');
+    expect(
+      sshKnownHostsUnwritableError({ host: 'build-01', strictHostKeys: 'yes' }, resolver),
+    ).toBeNull();
+    expect(resolver).not.toHaveBeenCalled();
+  });
+});
+
+// The same refusal at the seam that matters: nothing is spawned.
+describe('SshExecutionBackend and a redirected known-hosts file', () => {
+  it('refuses exec before spawning ssh when `ssh -G` resolves /dev/null', async () => {
+    useSshConfig('hostname build-01\nuserknownhostsfile /dev/null\n');
+    await expect(collect(backend({}).exec('echo hi', {}))).rejects.toBeInstanceOf(
+      SshKnownHostsInvalidError,
+    );
+    expect(spawned).toHaveLength(0);
+  });
+
+  it('reports the same target unavailable, without connecting', async () => {
+    useSshConfig('hostname build-01\nuserknownhostsfile /dev/null\n');
+    const be = backend({});
+    expect(await be.isAvailable()).toBe(false);
+    expect(be.lastProbeError).toContain('/dev/null');
+    expect(spawned).toHaveLength(0);
+  });
+
+  it('still spawns when `ssh -G` resolves a writable file', async () => {
+    useSshConfig(`hostname build-01\nuserknownhostsfile ${join(tmpHome, '.ssh', 'known_hosts')}\n`);
+    await collect(backend({}).exec('echo hi', {}));
+    expect(spawned).toHaveLength(1);
+  });
+});
+
 describe('buildRemoteWords', () => {
   it('wraps the command in sh -c with no cd when no workdir is configured', () => {
     expect(buildRemoteWords({ host: 'h' }, 'echo hi', {})).toEqual(['sh', '-c', "'echo hi'"]);
@@ -768,6 +947,39 @@ describe('SshExecutionBackend.exec', () => {
     await expect(collect(backend({}).exec('echo hi', {}))).rejects.toBeInstanceOf(
       SshTransportError,
     );
+  });
+
+  // F11 — the event the known-hosts apparatus exists to PRODUCE. ssh prints
+  // this line without its `ssh:` prefix, so a prefix-only test classified a
+  // changed or unverifiable host key as a remote exit 255 — which `run_tests`
+  // then rendered as `Tests failed (code 255)`, an instruction to the agent to
+  // go fix a suite that never ran.
+  it('reports a host-key verification failure as a transport error', async () => {
+    useReplies([
+      {
+        stderr: [
+          '@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@\n',
+          '@    WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!     @\n',
+          'Host key verification failed.\n',
+        ],
+        code: 255,
+      },
+    ]);
+    let message = '';
+    try {
+      await collect(backend({}).exec('pnpm test', {}));
+    } catch (e) {
+      expect(e).toBeInstanceOf(SshTransportError);
+      message = e instanceof Error ? e.message : '';
+    }
+    expect(message).toBe('ssh transport failed: Host key verification failed.');
+  });
+
+  // `extensions/tools-code` classifies a transport failure by reading this code
+  // structurally — it must not import a concrete backend — so the string is one
+  // half of a contract with no compiler holding it together. This is the pin.
+  it('SshTransportError carries the code tools-code matches on', () => {
+    expect(new SshTransportError('x').code).toBe('SSH_TRANSPORT_FAILED');
   });
 
   it('passes a remote command that genuinely exited 255 through as an exit chunk', async () => {

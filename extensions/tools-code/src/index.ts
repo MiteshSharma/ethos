@@ -37,6 +37,50 @@ function lastProbeError(backend: ExecutionBackend): string | undefined {
 }
 
 /**
+ * The tool's answer when the resolved backend's own availability probe says no.
+ *
+ * ONE wording for every code tool, deliberately: run_code, run_tests and lint
+ * resolve the same backend, so two spellings of the same refusal would be two
+ * answers to one question. When the probe had something to say, say it —
+ * "not available" alone leaves an operator guessing between a wrong key, an
+ * unreachable host, and a host key that no longer matches.
+ */
+function backendUnavailable(backend: ExecutionBackend): ToolResult {
+  const detail = lastProbeError(backend);
+  return {
+    ok: false,
+    error: detail
+      ? `Code execution backend is not available: ${detail}`
+      : 'Code execution backend is not available',
+    code: 'not_available',
+  };
+}
+
+/**
+ * Whether `err` is the ssh backend reporting that ssh ITSELF failed — it could
+ * not connect, authenticate, or verify the host key — as opposed to the remote
+ * command running and exiting non-zero.
+ *
+ * Read structurally, like {@link lastProbeError}: `SshTransportError` lives in
+ * `@ethosagent/execution-ssh` and this package must not import a concrete
+ * backend to reach it. The string is that class's own `readonly code`, which no
+ * compiler holds to this one, so both sides are pinned by test:
+ * `extensions/execution-ssh/src/__tests__/ssh.test.ts` ("SshTransportError
+ * carries the code tools-code matches on") asserts the producer's spelling, and
+ * `extensions/tools-code/src/__tests__/run-code.test.ts` ("… reports a
+ * transport failure mid-exec as not_available") drives that same shape through
+ * this consumer.
+ *
+ * It matters because the alternative is silent: a transport failure rendered
+ * as `execution_failed` sits beside `Tests failed` in the agent's context and
+ * reads as a command that ran and lost, so the agent goes and edits tests that
+ * were never executed.
+ */
+function isTransportFailure(err: unknown): err is Error {
+  return err instanceof Error && 'code' in err && err.code === 'SSH_TRANSPORT_FAILED';
+}
+
+/**
  * Lane D — wall-clock ceiling for executions that use the in-script tool API.
  * A script looping over dozens of tool calls legitimately outlives the plain
  * 30s default; plain executions keep today's semantics untouched.
@@ -208,16 +252,14 @@ function createRunCodeTool(
       // pin this tool to `not_available` for a minute. When the probe failed
       // with something to say, say it: "not available" alone leaves an operator
       // guessing between a wrong key and an unreachable host.
-      if (!backend || !(await backend.isAvailable())) {
-        const detail = backend ? lastProbeError(backend) : undefined;
+      if (!backend) {
         return {
           ok: false,
-          error: detail
-            ? `Code execution backend is not available: ${detail}`
-            : 'Code execution backend is not available',
+          error: 'Code execution backend is not available',
           code: 'not_available',
         };
       }
+      if (!(await backend.isAvailable())) return backendUnavailable(backend);
 
       // tools-as-code-api Lane B/D — when the ScriptToolBridge is wired and the
       // runtime has a shim, run framed: the shim injects ethos.call() and each
@@ -317,6 +359,11 @@ function createRunCodeTool(
         // surface the watcher's reason, not the raw abort error.
         if (abortReason !== undefined) {
           return { ok: false, error: abortReason, code: 'execution_failed' };
+        }
+        // ssh failing between the probe and the exec — the availability cache
+        // window — is still ssh failing, not the script failing.
+        if (isTransportFailure(err)) {
+          return { ok: false, error: err.message, code: 'not_available' };
         }
         return {
           ok: false,
@@ -420,6 +467,15 @@ function makeCommandTool(
       // Routed path (docker posture): run inside the mount-confined backend.
       // env is empty so host secrets never cross into the container (review #3).
       if (backend) {
+        // The availability gate run_code has always had, and this path never
+        // did. Without it ssh's own failures — a refused credential, a changed
+        // or unpinnable host key — reach the non-zero branch below and are
+        // rendered `Tests failed (code 255)` / `Lint failed:`, which tells the
+        // agent to go fix a suite that never ran. The check runs on EVERY
+        // invocation; the backend decides what to cache, and the ssh backend
+        // caches only successes, so a transient blip does not pin these tools
+        // to `not_available` for a minute.
+        if (!(await backend.isAvailable())) return backendUnavailable(backend);
         try {
           const { stdout, stderr, exitCode } = await drainExec(
             backend.exec(command, {
@@ -451,6 +507,11 @@ function makeCommandTool(
               }
             : { ok: true, value: body, structured: { command } };
         } catch (err) {
+          // Same reason as the gate above: ssh failing to reach the host in the
+          // window after a cached probe success is not the command failing.
+          if (isTransportFailure(err)) {
+            return { ok: false, error: err.message, code: 'not_available' };
+          }
           return {
             ok: false,
             error: err instanceof Error ? err.message : String(err),
