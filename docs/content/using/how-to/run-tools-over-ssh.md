@@ -121,6 +121,8 @@ ssh prints authentication refusals without its usual `ssh:` prefix. What catches
 
 A refusal that lands *between* a successful probe and the command (the probe result is trusted for 60 seconds) is caught too: ssh's authentication line has a fixed shape (`user@host: Permission denied (publickey).`) and a whole line matching it is read as ssh failing, not as a command that ran and exited 255.
 
+That shape is not unique to *your* connection, though — see [Your command was itself an ssh](#your-command-was-itself-an-ssh) for what happens when the remote command prints the same sentence.
+
 ### `Host key verification failed.`
 
 The target's host key is not the one that was pinned, or `strictHostKeys: yes` is set and no key is pinned at all. This is reported as an unavailable backend, never as a failing command — a host key that no longer matches is not something to fix by editing tests, and telling the agent otherwise would send it off doing exactly that.
@@ -129,7 +131,7 @@ Under `accept-new` this means the key **changed**, which is the one thing that p
 
 ### `ssh transport failed: Connection to <host> closed by remote host.`
 
-The connection died *while* the command was running — the remote sshd was restarted, the network dropped, or a keepalive went unanswered (`Timeout, server <host> not responding.` is the same event seen from the other end). ssh exits 255 for its own failures exactly as a remote command exiting 255 does, so these are told apart by matching ssh's own diagnostic lines. When one matches, the tool reports `not_available`, not a failing command.
+The connection died *while* the command was running — the remote sshd was restarted, the network dropped, or a keepalive went unanswered (`Timeout, server <host> not responding.` is the same event seen from the other end). ssh exits 255 for its own failures exactly as a remote command exiting 255 does, so Ethos asks the remote shell instead of guessing: the command it sends carries an epilogue that echoes a one-time random receipt when — and only when — the command's own status was 255. No receipt means the remote shell never got back to it, so a matching ssh diagnostic is read as the transport failing and the tool reports `not_available`, not a failing command. The receipt itself is stripped out and never reaches the agent.
 
 No probe can prevent this: it happens after the command was accepted, potentially minutes in. Re-run the tool.
 
@@ -137,7 +139,18 @@ If it recurs, the fix is on one of three machines. On the **remote**, `ClientAli
 
 That last one works because Ethos does not isolate ssh from its own configuration. `buildSshArgs` in `extensions/execution-ssh/src/index.ts` passes no `-F`, so ssh reads that config file exactly as it would for an `ssh` you typed yourself — it is the same resolution the known-hosts check inspects with `ssh -G` — and none of the `-o` options Ethos does pass is a `ServerAlive*`, so nothing on the command line overrides yours.
 
-The match is a fixed list of lines one OpenSSH build was observed to print, so a drop that prints something else still surfaces as `Command exited with error (code 255)` with ssh's diagnostic in the output. If the output names ssh rather than your command, treat it as a transport failure regardless of the code.
+The fallback is a fixed list of lines one OpenSSH build was observed to print, so a drop that prints something else still surfaces as `Command exited with error (code 255)` with ssh's diagnostic in the output. If the output names ssh rather than your command, treat it as a transport failure regardless of the code.
+
+### Your command was itself an ssh
+
+Running `terminal: ssh other-host ...`, or a `run_code` script that shells out to ssh, makes the *remote* ssh print the same sentences the outer one does — `user@host: Permission denied (publickey).`, `Connection to <host> closed by remote host.` — and exit 255. The outer connection was fine and your command really did run, so this is reported as `Command exited with error (code 255)` with the inner ssh's message, not as an unavailable backend. The receipt is what separates the two: your command reached the epilogue, a dead outer connection would not have.
+
+Two cases still read as a transport failure even though the command ran, because no receipt is produced:
+
+- The command **ends the remote shell itself** — an explicit `exit 255`, or the shell dying on a signal — *and* prints a line from the fallback list.
+- Something is written to the remote's stderr **after** the receipt, which pushes it out of the window Ethos inspects. A stray `__ethos_ssh_exit255_<hex>__` line in the output is that case.
+
+Both are rare, and both fail in the safe direction: the tool says the command may not have run rather than claiming a result it cannot vouch for. For the first, let the inner ssh's status fall through — `ssh other-host ...` on its own already works; it is the explicit `exit 255` after it that skips the receipt.
 
 ### The tool timed out but the remote command kept running
 

@@ -6,6 +6,13 @@ import { afterAll, describe, expect, it } from 'vitest';
 import { buildRemoteWords } from '../index';
 
 /**
+ * A stand-in for the per-exec exit-255 receipt. The production value is 128
+ * random bits; nothing here depends on the randomness, only on the shape being
+ * a bare `sh` word, so a fixed literal keeps the assertions readable.
+ */
+const SENTINEL = '__ethos_ssh_exit255_fixed_for_tests__';
+
+/**
  * The claim the HIGH-1 fix rests on, executed rather than asserted.
  *
  * `buildRemoteWords` used to discard the remote cwd whenever `opts.shell` was
@@ -69,9 +76,12 @@ afterAll(() => {
 describe('remote words actually executed by a real shell', () => {
   it('delivers stdin to a `sh -s` runner AND applies remoteWorkdir', async () => {
     const workdir = scratchDir('workdir');
-    const words = buildRemoteWords({ host: 'h', remoteWorkdir: workdir }, 'sh -s', {
-      shell: false,
-    });
+    const words = buildRemoteWords(
+      { host: 'h', remoteWorkdir: workdir },
+      'sh -s',
+      { shell: false },
+      SENTINEL,
+    );
     const result = await runAsRemoteLoginShell(
       words,
       'printf "%s|%s\\n" STDIN_REACHED_RUNNER "$PWD"\n',
@@ -89,6 +99,7 @@ describe('remote words actually executed by a real shell', () => {
       { host: 'h', remoteWorkdir: workdir },
       `'${process.execPath}' --input-type=module`,
       { shell: false },
+      SENTINEL,
     );
     const result = await runAsRemoteLoginShell(
       words,
@@ -98,27 +109,75 @@ describe('remote words actually executed by a real shell', () => {
     expect(result.code).toBe(0);
   });
 
-  it('propagates the runner exit status through the `exec` wrap', async () => {
+  // `exec` used to front the runner so its status WAS the wrapping shell's.
+  // The exit-255 epilogue cannot coexist with `exec` — an `exec`d process never
+  // returns to the shell that would emit the receipt — so the status is now
+  // carried explicitly by `exit $__ethos_st`. That claim is what this executes:
+  // if the epilogue were status-opaque, `run_tests` would report the wrong code
+  // for every remote failure.
+  it('preserves the runner exit status now that `exec` is gone', async () => {
     const workdir = scratchDir('exit');
-    const words = buildRemoteWords({ host: 'h', remoteWorkdir: workdir }, 'sh -s', {
-      shell: false,
-    });
-    // `exec` replaces the wrapping shell, so this IS the runner's own status —
-    // not a shell reporting a child's.
+    const words = buildRemoteWords(
+      { host: 'h', remoteWorkdir: workdir },
+      'sh -s',
+      { shell: false },
+      SENTINEL,
+    );
     const result = await runAsRemoteLoginShell(words, 'exit 7\n');
     expect(result.code).toBe(7);
+    // 7 is not 255, so no receipt is emitted and nothing is added to stderr.
+    expect(result.stderr).toBe('');
+  });
+
+  // The discriminator itself, executed rather than asserted: a remote command
+  // exiting 255 leaves a receipt, and one exiting anything else does not.
+  it.each([
+    [0, false],
+    [1, false],
+    [254, false],
+    [255, true],
+  ])('emits the receipt for exit %i: %s', async (status, expected) => {
+    const words = buildRemoteWords({ host: 'h' }, 'sh -s', { shell: false }, SENTINEL);
+    const result = await runAsRemoteLoginShell(words, `exit ${status}\n`);
+    expect(result.code).toBe(status);
+    expect(result.stderr.includes(SENTINEL)).toBe(expected);
+  });
+
+  // The epilogue is joined with TWO newlines, and this is why. A command ending
+  // in a backslash is a line CONTINUATION: with one newline the shell splices
+  // `__ethos_st=$?` onto the command and runs `echo a __ethos_st=$?`, exiting
+  // 2. With two, the continuation consumes the empty line and the command runs
+  // exactly as it does unwrapped.
+  it('survives a command ending in a line continuation', async () => {
+    const words = buildRemoteWords({ host: 'h' }, 'echo a \\', {}, SENTINEL);
+    const result = await runAsRemoteLoginShell(words, '');
+    expect(result.stdout).toBe('a\n');
+    expect(result.stderr).toBe('');
+    expect(result.code).toBe(0);
+  });
+
+  // And this is why the epilogue is joined with a NEWLINE rather than `;` — a
+  // `;`-joined epilogue disappears into the comment.
+  it('survives a command ending in a comment', async () => {
+    const words = buildRemoteWords({ host: 'h' }, 'echo hi # list them', {}, SENTINEL);
+    const result = await runAsRemoteLoginShell(words, '');
+    expect(result.stdout).toBe('hi\n');
+    expect(result.code).toBe(0);
   });
 
   it('survives an embedded single quote in the workdir, wrapped and unwrapped alike', async () => {
     const parent = scratchDir('quote');
     const workdir = join(parent, "o'brien's dir");
     await runAsRemoteLoginShell(
-      buildRemoteWords({ host: 'h' }, 'sh -s', {}),
+      buildRemoteWords({ host: 'h' }, 'sh -s', {}, SENTINEL),
       `mkdir -p '${workdir.replaceAll("'", `'\\''`)}'\n`,
     );
-    const stdinDriven = buildRemoteWords({ host: 'h', remoteWorkdir: workdir }, 'sh -s', {
-      shell: false,
-    });
+    const stdinDriven = buildRemoteWords(
+      { host: 'h', remoteWorkdir: workdir },
+      'sh -s',
+      { shell: false },
+      SENTINEL,
+    );
     const result = await runAsRemoteLoginShell(stdinDriven, 'printf "%s\\n" "$PWD"\n');
     expect(result.stderr).toBe('');
     expect(result.stdout.trim()).toBe(workdir);
@@ -128,6 +187,7 @@ describe('remote words actually executed by a real shell', () => {
       { host: 'h', remoteWorkdir: workdir },
       'printf "%s\\n" "$PWD"',
       {},
+      SENTINEL,
     );
     const wrapped = await runAsRemoteLoginShell(shellDriven, '');
     expect(wrapped.stdout.trim()).toBe(workdir);
@@ -139,6 +199,7 @@ describe('remote words actually executed by a real shell', () => {
       { host: 'h', remoteWorkdir: workdir },
       `echo "it's here"`,
       {},
+      SENTINEL,
     );
     const a = await runAsRemoteLoginShell(shellDriven, '');
     expect(a.stdout.trim()).toBe("it's here");
@@ -150,6 +211,7 @@ describe('remote words actually executed by a real shell', () => {
       { host: 'h', remoteWorkdir: workdir },
       `sh -c "echo \\"it's here\\""`,
       { shell: false },
+      SENTINEL,
     );
     const b = await runAsRemoteLoginShell(stdinDriven, '');
     expect(b.stdout.trim()).toBe("it's here");

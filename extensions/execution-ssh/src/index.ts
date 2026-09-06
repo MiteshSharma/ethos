@@ -1,4 +1,5 @@
 import { type ChildProcess, spawn } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
 import { accessSync, constants as fsConstants } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -129,36 +130,73 @@ export class SshEnvUnsupportedError extends Error {
  * open — as opposed to the remote command running and exiting non-zero.
  *
  * ssh reports BOTH as exit status 255: it exits 255 on its own failures, and it
- * also propagates a remote command that genuinely exited 255. The two are told
- * apart by the diagnostic ssh writes to stderr, only SOME of which it prefixes
- * `ssh:` (plan §5) — see {@link isSshDiagnostic} for the unprefixed lines that
- * are also ssh's own, and for how they are told apart from remote output.
+ * also propagates a remote command that genuinely exited 255. Two things tell
+ * those apart, and they are consulted in this order:
  *
- * KNOWN LIMIT: the classification is string matching over stderr, so it is
- * bounded in two directions and neither is closed.
+ *  1. THE RECEIPT, which is positive evidence. Ethos composes the remote
+ *     script, so {@link exit255Epilogue} appends a line that echoes a per-exec
+ *     random sentinel to stderr when — and only when — the remote command's own
+ *     status was 255. A receipt can only exist if the connection carried the
+ *     script to a remote shell, that shell ran the command, and it survived to
+ *     report the status: it is evidence that the command RAN, not a guess about
+ *     which process printed a line. Receipt seen ⇒ remote exit 255, and no
+ *     transport error is raised whatever else stderr holds.
+ *     {@link streamChild} strips it back out, so it never reaches a caller.
+ *  2. THE DIAGNOSTIC LIST, consulted only when NO receipt arrived — the
+ *     `ssh:`-prefixed lines and {@link SSH_SELF_DIAGNOSTICS}, via
+ *     {@link isSshDiagnostic}.
  *
- *  - TOO NARROW. Only the patterns {@link SSH_SELF_DIAGNOSTICS} lists are
- *    claimed, and that list is what one OpenSSH build was observed to print,
- *    not what every build can print. An unlisted fatal line still surfaces as
- *    a remote exit 255. There is no seam behind this one: the gap opens
+ * The receipt is what closes a collision the list alone cannot see. The remote
+ * command can ITSELF be an ssh — `terminal: ssh other-host …`, or a `run_code`
+ * bash script that shells out — and then it prints byte-identical lines
+ * (`user@host: Permission denied (publickey).`, `Connection to <host> closed by
+ * remote host.`, `kex_exchange_identification: read: Connection reset by peer`)
+ * and exits 255, while the outer connection was fine and the command genuinely
+ * ran. Reported as a transport failure that reads `not_available`, which tells
+ * the agent its command never ran — a different wrong answer from the one the
+ * list was added to fix, not a smaller one. Both directions were reproduced
+ * against a throwaway sshd on OpenSSH_9.6p1: a nested denied `ssh` (receipt
+ * present, outer exit 255) and an sshd session killed mid-`sleep` (no receipt,
+ * `Connection to 127.0.0.1 closed by remote host.`, outer exit 255).
+ *
+ * KNOWN LIMITS. The receipt is sound where it exists; these are the places it
+ * is absent or unreadable, and each falls back to the list, i.e. to exactly the
+ * behaviour that shipped before it:
+ *
+ *  - NO RECEIPT THOUGH THE COMMAND RAN. The epilogue is unreachable when the
+ *    command ends the shell itself: an explicit `exit 255` in the command, or
+ *    the wrapping `sh` dying on a signal. A command that does that AND prints a
+ *    listed line is still misread as a transport failure. Pinned as a limit,
+ *    not a defect: nothing in this file can observe a shell that chose not to
+ *    return.
+ *  - RECEIPT PUSHED OUT OF THE STRIP WINDOW. {@link streamChild} holds back
+ *    exactly one receipt line of stderr, so anything written to stderr AFTER it
+ *    — ssh's own line on a connection that died after the remote had already
+ *    exited, or a remote background process — leaves the receipt unrecognised
+ *    and visible in the tool's stderr. Fails to the list.
+ *  - A RECEIPT PROVES THE COMMAND RAN, NOT THAT THE OUTPUT IS WHOLE. A drop
+ *    after the epilogue still truncates what was streamed.
+ *  - FORGERY IS NOT DEFENDED. The sentinel is 128 random bits per exec, but it
+ *    travels in the remote script, so a process on the target can read it out
+ *    of its parent's argv and print it. That is not a boundary here: this
+ *    backend already sends the remote arbitrary commands and trusts what comes
+ *    back (see the containment note on {@link SshExecutionBackend}). The
+ *    randomness is against ACCIDENT — a command that happens to echo a fixed
+ *    literal — and 128 bits closes that completely.
+ *  - THE LIST IS STILL BOUNDED IN BOTH DIRECTIONS, and it is still what decides
+ *    every no-receipt case. TOO NARROW: {@link SSH_SELF_DIAGNOSTICS} is what
+ *    one OpenSSH build was observed to print, so an unlisted fatal line
+ *    surfaces as a remote exit 255. There is no seam behind it — the gap opens
  *    MID-EXEC, after `isAvailable()` has already passed, and a probe cannot
  *    cover a connection that dies during a ten-minute test run. What the probe
- *    gate DOES cover is a failure that is already true before the command is
- *    sent — a wrong key, an unreachable host, a known-hosts destination this
- *    machine cannot write — and it covers those for every execution tool
- *    (`createRunCodeTool` and `makeCommandTool` in `@ethosagent/tools-code`,
- *    `makeTerminalTool` in `@ethosagent/tools-terminal`).
- *  - TOO BROAD is the worse error, so the patterns are anchored rather than
- *    searched for inside a line: remote output that merely contains
- *    `Connection reset by peer` is a failing command, and reporting it as a
- *    transport failure would tell the agent its test suite never ran when it
- *    did. Every pattern is anchored at the line's start and all but one at its
- *    end; the exception is `kex_exchange_identification:`, whose tail is
- *    `strerror` output and cannot be enumerated without missing real variants
- *    — its entry in {@link SSH_SELF_DIAGNOSTICS} makes that case. A remote
- *    command whose own stderr is byte-identical to one of ssh's fatal lines is
- *    still claimed — in practice that means the remote ran `ssh` and it
- *    failed, which is the honest reading anyway.
+ *    gate DOES cover is a failure already true before the command is sent (a
+ *    wrong key, an unreachable host, a known-hosts destination this machine
+ *    cannot write), for every execution tool (`createRunCodeTool` and
+ *    `makeCommandTool` in `@ethosagent/tools-code`, `makeTerminalTool` in
+ *    `@ethosagent/tools-terminal`). TOO BROAD is the worse error, so the
+ *    patterns stay anchored rather than searched for inside a line: remote
+ *    output that merely contains `Connection reset by peer` is a failing
+ *    command, and claiming it would tell the agent its test suite never ran.
  */
 export class SshTransportError extends Error {
   readonly code = 'SSH_TRANSPORT_FAILED';
@@ -270,6 +308,65 @@ function createDiagnosticBuffer(): { push: (chunk: Buffer) => void; text: () => 
 }
 
 /**
+ * The fixed head of the exit-255 receipt (see {@link SshTransportError}).
+ *
+ * Lower-case and underscore-led so it is a valid `sh` word needing no quoting
+ * in {@link exit255Epilogue}, and unmistakable in a stream if it ever escapes
+ * the strip in {@link streamChild}.
+ */
+const EXIT255_SENTINEL_PREFIX = '__ethos_ssh_exit255_';
+
+/**
+ * A fresh receipt for one exec.
+ *
+ * PER EXEC, not per backend or per process: a value that outlived one command
+ * could be echoed back by a later one, and the whole point of the receipt is
+ * that it belongs to the exec whose exit status it is claiming. 128 bits is
+ * sized against ACCIDENTAL collision — a command that prints the literal — and
+ * nothing else; see the FORGERY limit on {@link SshTransportError}.
+ */
+function newExit255Sentinel(): string {
+  return `${EXIT255_SENTINEL_PREFIX}${randomBytes(16).toString('hex')}__`;
+}
+
+/**
+ * The POSIX epilogue every remote script carries, and the only thing on the
+ * remote side that this backend adds to what the caller asked for.
+ *
+ * `<script>` ⇒ `<script>\n\n__ethos_st=$?\n[ "$__ethos_st" -eq 255 ] && echo
+ * <sentinel> >&2\nexit $__ethos_st`.
+ *
+ * Every piece of the shape is load-bearing:
+ *
+ *  - NEWLINES, NOT `;`. A command ending in a comment (`ls # list them`) would
+ *    swallow a `;`-joined epilogue into the comment. A newline ends a comment.
+ *  - TWO newlines, not one. A command ending in a backslash is a line
+ *    CONTINUATION, which eats one newline and joins the epilogue's first line
+ *    onto the command. Verified against both `/bin/sh` (dash 0.5.12) and
+ *    `bash` 5.2.21: with one newline, `echo a \` runs as `echo a __ethos_st=$?`
+ *    and exits 2; with two it prints `a` and exits 0, exactly as the unwrapped
+ *    form does. Executed by `__tests__/remote-words-stdin.test.ts` ("survives a
+ *    command ending in a line continuation").
+ *  - `$?` CAPTURED FIRST, into a variable, and re-raised by `exit`. The status
+ *    the caller must see is the command's, not the receipt's — so the epilogue
+ *    is status-transparent for every code, 255 included.
+ *  - THE RECEIPT ONLY ON 255. It is only needed where ssh's own exit status is
+ *    ambiguous, and emitting it on every exec would put a line in the stream of
+ *    every command for no gain. So the visible cost is confined to the exits
+ *    that are already being adjudicated.
+ *  - `echo` RATHER THAN `printf`. Both are POSIX; the sentinel is a single bare
+ *    word with no escapes and no leading `-`, which is the one input every
+ *    `echo` implementation agrees on.
+ *  - `>&2`. stderr, not stdout: if the strip window is ever overrun (see the
+ *    KNOWN LIMITS on {@link SshTransportError}) a leaked line lands in
+ *    diagnostics rather than corrupting program output a caller may parse —
+ *    `run_code` returns the script's stdout verbatim.
+ */
+function exit255Epilogue(sentinel: string): string {
+  return `\n\n__ethos_st=$?\n[ "$__ethos_st" -eq 255 ] && echo ${sentinel} >&2\nexit $__ethos_st`;
+}
+
+/**
  * The stderr lines ssh writes ABOUT ITSELF on a fatal path, beyond the ones it
  * prefixes `ssh:`.
  *
@@ -299,7 +396,7 @@ function createDiagnosticBuffer(): { push: (chunk: Buffer) => void; text: () => 
  * The comment on each entry names the run.
  *
  * This list is a snapshot of one build, not a proof of coverage — see the
- * KNOWN LIMIT on {@link SshTransportError}.
+ * KNOWN LIMITS on {@link SshTransportError}.
  */
 const SSH_SELF_DIAGNOSTICS: readonly RegExp[] = [
   // EVERY host-key refusal — an unknown host under `StrictHostKeyChecking=yes`,
@@ -372,15 +469,22 @@ const SSH_SELF_DIAGNOSTICS: readonly RegExp[] = [
  * `ssh:`-prefixed lines are ssh's own by construction. The rest are the
  * patterns in {@link SSH_SELF_DIAGNOSTICS} — whole-line anchored, except the
  * one prefix its own entry argues for; the reason for anchoring and the limits
- * of the list are documented there and on {@link SshTransportError}. Classifying one of these as a remote failure hands
- * it to the agent as a failing command — an instruction to go fix something
- * that never ran.
+ * of the list are documented there and on {@link SshTransportError}.
+ * Classifying one of these as a remote failure hands it to the agent as a
+ * failing command — an instruction to go fix something that never ran.
  *
- * A remote command whose own stderr carries one of these lines (a nested `ssh`
- * on the target that failed, and whose 255 the outer ssh propagates) is
- * classified as a transport failure too. That is the honest reading: it IS an
- * ssh failure, and reporting it as one is more useful than reporting it as a
- * command that failed.
+ * THIS FUNCTION CANNOT TELL WHO PRINTED THE LINE, and nothing in a byte stream
+ * can. A remote command that is itself an `ssh` prints the same bytes ssh
+ * prints about its own connection, so a line matching here is evidence of an
+ * ssh failure SOMEWHERE, not evidence that it was the outer one. That is why
+ * {@link streamChild} consults this only after the exit-255 receipt is absent:
+ * the receipt answers "did the outer connection carry a command that ran", this
+ * answers "does the output look like ssh", and only the first is decisive.
+ *
+ * The residual misread is the one the receipt cannot reach — a remote command
+ * that runs, prints a listed line, and ends the remote shell without returning
+ * to the epilogue (an explicit `exit 255`, or a signal). It is one of the KNOWN
+ * LIMITS on {@link SshTransportError}, not a defence of the classification.
  */
 function isSshDiagnostic(line: string): boolean {
   const trimmed = line.trim();
@@ -917,42 +1021,65 @@ export function buildSshArgs(
  *
  * ssh joins its remote words with spaces and hands the result to the remote
  * LOGIN shell, which parses it — so the script is quoted once here and arrives
- * as a single `sh -c` argument.
+ * as a single `sh -c` argument. `cmd` is therefore parsed EXACTLY ONCE, by that
+ * `sh`, whatever the login shell is.
  *
  * cwd policy (D8): the host's `ctx.workingDir` is never sent anywhere near this
  * function. The remote cwd is `opts.cwd` when the tool call supplied one (used
  * verbatim as a REMOTE path), else `ssh.remoteWorkdir`, else nothing — in which
  * case the remote login directory stands.
  *
- * `shell: false` means ONE thing here: do not put a QUOTING layer around `cmd`.
- * The caller composed `cmd` as a ready remote command line for a stdin-driven
- * runner (`python3 -`, `node --input-type=module`, `bash -s`), so it is
- * interpolated raw and parsed by exactly one shell — the same single parse the
- * unwrapped form gets from the remote login shell.
+ * `sentinel` is the exit-255 receipt for this one exec; {@link exit255Epilogue}
+ * appends the lines that emit it, and {@link SshTransportError} says what it
+ * buys. It is a parameter rather than something generated here because
+ * {@link SshExecutionBackend.exec} has to hand the SAME value to
+ * {@link streamChild}, which strips it back out and reads it.
  *
- * It does NOT mean "no remote cwd", which is what it used to mean by accident.
+ * ONE SHAPE FOR EVERY CALL, which is a change: `opts.shell` no longer branches
+ * here, and the two things it used to select are gone.
+ *
+ *  - `exec` is gone. It used to front the `shell: false` runner so that "its
+ *    pid, its signal disposition and its exit status are the remote command's
+ *    own", and it is incompatible with an epilogue by definition — an `exec`d
+ *    process never returns to the shell that would emit the receipt. Dropping
+ *    it costs less than it reads: the exit status is preserved explicitly by
+ *    `exit $__ethos_st` (proved with a real shell in
+ *    `__tests__/remote-words-stdin.test.ts`), and a signal-killed runner now
+ *    reports 128+N instead of the 255 `exec` produced — which is strictly more
+ *    information, since 255 is the value this whole file exists to disambiguate.
+ *    What is genuinely lost is one remote `sh` process per exec and the runner
+ *    being the session's own pid; sshd hangs the connection up by signalling
+ *    the process GROUP, so both still die on a drop.
+ *  - The unwrapped `[cmd]` form is gone. With no workdir, `shell: false` used
+ *    to send the command as bare remote words for the LOGIN shell to parse. The
+ *    workdir variant already went through `sh -c`, so this only ever changed
+ *    which shell parsed a `run_code` runner line on hosts whose login shell is
+ *    not POSIX (fish, csh) — and it now requires `sh`, which this backend
+ *    already required of every `terminal` call and which its POSIX-remote
+ *    target assumption gives it.
+ *
+ * `shell: false` keeps its one substantive promise: no QUOTING layer is put
+ * around `cmd`. The caller composed it as a ready remote command line for a
+ * stdin-driven runner (`python3 -`, `node --input-type=module`, `bash -s`), and
+ * it is still interpolated raw into the script and parsed once.
+ *
  * `sh -c` does not consume its child's stdin — the runner inherits the
- * descriptor and still reads the program from it — so the cwd can and must be
- * applied to `run_code` too, which otherwise ran in the remote LOGIN directory
- * while `config.yaml`, the character sheet and the injected prompt all said
- * `remoteWorkdir`. Verified: `printf 'import os; print(os.getcwd())' | sh -c
- * "cd '/tmp/x' && exec python3 -"` prints `/tmp/x`, and the same shape carries
- * stdin to `node --input-type=module` and `bash -s`.
- *
- * `exec` is why the wrap is free: the runner REPLACES the wrapping shell, so
- * its pid, its signal disposition and its exit status are the remote command's
- * own (`sh -c "cd /tmp/x && exec python3 -"` on a script calling `sys.exit(7)`
- * exits 7). With no workdir to apply there is nothing to wrap and `cmd` is sent
- * as-is.
+ * descriptor and still reads the program from it — which is why the cwd applies
+ * to `run_code` at all, and why it survives the loss of `exec`: the wrapping
+ * `sh` reads its script from argv and never touches the pipe. Verified:
+ * `printf 'import os; print(os.getcwd())' | sh -c "cd '/tmp/x' && python3 -"`
+ * prints `/tmp/x`, and the same shape carries stdin to `node --input-type=module`
+ * and `bash -s`.
  */
-export function buildRemoteWords(ssh: SshTarget, cmd: string, opts: ExecOpts): string[] {
+export function buildRemoteWords(
+  ssh: SshTarget,
+  cmd: string,
+  opts: ExecOpts,
+  sentinel: string,
+): string[] {
   const workdir = opts.cwd ?? ssh.remoteWorkdir;
-  if (opts.shell === false) {
-    if (!workdir) return [cmd];
-    return ['sh', '-c', shellQuote(`cd ${shellQuote(workdir)} && exec ${cmd}`)];
-  }
   const script = workdir ? `cd ${shellQuote(workdir)} && ${cmd}` : cmd;
-  return ['sh', '-c', shellQuote(script)];
+  return ['sh', '-c', shellQuote(`${script}${exit255Epilogue(sentinel)}`)];
 }
 
 /**
@@ -965,14 +1092,60 @@ export function buildRemoteWords(ssh: SshTarget, cmd: string, opts: ExecOpts): s
  * backend targets POSIX remotes. Killing the client drops the connection and
  * sshd normally hangs up the remote session, but a remote process that ignores
  * SIGHUP, or has detached from it, MAY SURVIVE the timeout. Same for abort.
+ *
+ * `sentinel` is this exec's exit-255 receipt (see {@link SshTransportError}).
+ * It arrives on stderr as its own line, and stderr is therefore streamed with a
+ * HOLDBACK of exactly one receipt line: the tail is withheld until more bytes
+ * arrive or the process closes, so the receipt can be recognised and removed
+ * before anything is yielded. Nothing else is delayed: the holdback is 55 bytes
+ * (the sentinel's shape is pinned by ssh.test.ts, "sends a fresh 128-bit
+ * sentinel with every exec"), and every consumer of this stream drains it whole
+ * — `drainExec` in `@ethosagent/tools-code` and `@ethosagent/tools-terminal` —
+ * before rendering anything.
+ *
+ * The holdback is deliberately NOT the {@link createDiagnosticBuffer} head:
+ * that keeps the FIRST 4096 bytes and drops the rest, so a command with more
+ * stderr than that would lose the receipt entirely. Two buffers, two jobs.
  */
-async function* streamChild(child: ChildProcess, opts: ExecOpts): AsyncIterable<ExecChunk> {
+async function* streamChild(
+  child: ChildProcess,
+  opts: ExecOpts,
+  sentinel: string,
+): AsyncIterable<ExecChunk> {
   const chunks: ExecChunk[] = [];
   let done = false;
   let error: Error | null = null;
   let resolveNext: (() => void) | null = null;
   let exitCode: number | null = null;
   const stderrHead = createDiagnosticBuffer();
+  // The receipt as it lands on the wire: the sentinel word plus `echo`'s
+  // newline. Compared as BYTES against the tail, so a partial receipt split
+  // across two `data` events is rejoined before it is tested.
+  const receipt = Buffer.from(`${sentinel}\n`, 'utf-8');
+  /** stderr bytes withheld so a trailing receipt can still be removed. */
+  let stderrTail: Buffer<ArrayBufferLike> = Buffer.alloc(0);
+  let receiptSeen = false;
+
+  /**
+   * Yield everything still withheld, minus a trailing receipt.
+   *
+   * Called on close AND on the timeout/abort paths, so held-back stderr is
+   * never silently dropped. Stripping unconditionally is deliberate: on an
+   * abort the receipt is not consulted, but leaking it into the caller's stderr
+   * would be a visible artefact of an implementation detail.
+   */
+  const flushStderrTail = (): void => {
+    let tail = stderrTail;
+    stderrTail = Buffer.alloc(0);
+    if (
+      tail.length >= receipt.length &&
+      tail.subarray(tail.length - receipt.length).equals(receipt)
+    ) {
+      receiptSeen = true;
+      tail = tail.subarray(0, tail.length - receipt.length);
+    }
+    if (tail.length > 0) chunks.push({ stream: 'stderr', data: tail.toString('utf-8') });
+  };
 
   child.stdout?.on('data', (c: Buffer) => {
     chunks.push({ stream: 'stdout', data: c.toString('utf-8') });
@@ -980,17 +1153,30 @@ async function* streamChild(child: ChildProcess, opts: ExecOpts): AsyncIterable<
   });
   child.stderr?.on('data', (c: Buffer) => {
     stderrHead.push(c);
-    chunks.push({ stream: 'stderr', data: c.toString('utf-8') });
+    stderrTail = stderrTail.length === 0 ? c : Buffer.concat([stderrTail, c]);
+    if (stderrTail.length > receipt.length) {
+      // Cut on a character boundary, for the reason `createDiagnosticBuffer`
+      // decodes late: a multi-byte sequence split across the cut would decode
+      // as two U+FFFD in output an operator reads.
+      const cut = utf8SafeEnd(stderrTail, stderrTail.length - receipt.length);
+      if (cut > 0) {
+        chunks.push({ stream: 'stderr', data: stderrTail.subarray(0, cut).toString('utf-8') });
+        stderrTail = stderrTail.subarray(cut);
+      }
+    }
     resolveNext?.();
   });
   // ssh propagates the remote command's exit status as its own exit code, and
-  // uses 255 for its OWN failures. Exit 255 with a diagnostic ssh wrote about
-  // itself on stderr ({@link isSshDiagnostic}) is ssh failing; exit 255 without
-  // one is the remote command genuinely exiting 255, which is passed through as
-  // an ordinary exit chunk.
+  // uses 255 for its OWN failures. The receipt decides between them: present
+  // means the remote shell ran the command and reported 255, so the 255 is the
+  // command's and is passed through as an ordinary exit chunk. Only when it is
+  // ABSENT does the stderr diagnostic list get a vote ({@link isSshDiagnostic}),
+  // and a match there is ssh failing. See {@link SshTransportError} for what
+  // each half can and cannot prove.
   child.on('close', (code) => {
+    flushStderrTail();
     exitCode = code ?? null;
-    if (code === 255) {
+    if (code === 255 && !receiptSeen) {
       const diagnostic = stderrHead.text().split('\n').filter(isSshDiagnostic).join('; ').trim();
       if (diagnostic) error = new SshTransportError(diagnostic);
     }
@@ -1005,6 +1191,7 @@ async function* streamChild(child: ChildProcess, opts: ExecOpts): AsyncIterable<
 
   const timeoutMs = opts.timeoutMs ?? 30000;
   const timer = setTimeout(() => {
+    flushStderrTail();
     error = new ExecTimeoutError();
     child.kill();
     done = true;
@@ -1020,6 +1207,7 @@ async function* streamChild(child: ChildProcess, opts: ExecOpts): AsyncIterable<
       signal.addEventListener(
         'abort',
         () => {
+          flushStderrTail();
           error = new ExecAbortedError();
           child.kill();
           done = true;
@@ -1067,6 +1255,13 @@ async function* streamChild(child: ChildProcess, opts: ExecOpts): AsyncIterable<
  * per the repo's cross-package rule. The only difference is what `onCeiling`
  * kills: docker kills the container, this kills the local client (the remote
  * process may survive, exactly as for a timeout — see {@link streamChild}).
+ *
+ * The ceiling is also the reason truncation cannot be mistaken for a transport
+ * failure, which matters now that the absence of an exit-255 receipt is
+ * evidence. Returning here abandons the inner generator, so `streamChild`'s
+ * `close` handler never gets to classify and NO exit chunk is emitted at all —
+ * the caller sees a null exit code, not a 255 with a missing receipt. Pinned by
+ * ssh.test.ts ("truncation … never becomes a transport failure").
  */
 export async function* withByteCeiling(
   inner: AsyncIterable<ExecChunk>,
@@ -1213,9 +1408,12 @@ export class SshExecutionBackend implements ExecutionBackend {
     const ssh = await this.target();
     const envKeys = Object.keys(opts.env ?? {});
     if (envKeys.length > 0) throw new SshEnvUnsupportedError(envKeys);
-    const args = buildSshArgs(ssh, buildRemoteWords(ssh, cmd, opts));
+    // One receipt per exec, shared by the two halves that need it: the remote
+    // script that emits it and the stream reader that strips and reads it.
+    const sentinel = newExit255Sentinel();
+    const args = buildSshArgs(ssh, buildRemoteWords(ssh, cmd, opts, sentinel));
     const child = spawn('ssh', args, { stdio: ['pipe', 'pipe', 'pipe'] });
-    yield* withByteCeiling(streamChild(child, opts), MAX_EXEC_OUTPUT_BYTES, () => {
+    yield* withByteCeiling(streamChild(child, opts, sentinel), MAX_EXEC_OUTPUT_BYTES, () => {
       child.kill();
     });
   }

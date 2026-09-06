@@ -13,6 +13,7 @@ import { spawn } from 'node:child_process';
 import {
   buildRemoteWords,
   buildSshArgs,
+  ExecTimeoutError,
   knownHostsFromSshConfig,
   type SshConfigResolver,
   SshDestinationInvalidError,
@@ -63,6 +64,13 @@ interface Reply {
    * diagnostic buffer has to rejoin before decoding.
    */
   stderr?: (string | Buffer)[];
+  /**
+   * Emit the exit-255 receipt on stderr, after everything else — what the
+   * remote wrapper does when the command's own status was 255. The value is
+   * read back out of THIS spawn's argv ({@link receiptFor}), so a test can only
+   * produce a receipt if `exec` really put one in the remote script.
+   */
+  receipt?: true;
   code: number;
 }
 
@@ -100,6 +108,7 @@ function fakeSpawn(replyFor: (index: number) => Reply) {
       for (const s of reply.stderr ?? []) {
         child.stderr.emit('data', Buffer.isBuffer(s) ? s : Buffer.from(s));
       }
+      if (reply.receipt) child.stderr.emit('data', Buffer.from(`${receiptFor(index)}\n`));
       child.emit('close', reply.code);
     }, 0);
     return child as unknown as ChildProcess;
@@ -163,6 +172,48 @@ function unquoteSingleWord(word: string): string {
     }
   }
   return out;
+}
+
+/**
+ * A fixed stand-in for the per-exec exit-255 receipt, for the pure
+ * {@link buildRemoteWords} assertions. Production generates 128 random bits per
+ * exec; nothing below depends on the randomness, only on the shape.
+ */
+const SENTINEL = '__ethos_ssh_exit255_fixed_for_tests__';
+
+/**
+ * The epilogue {@link buildRemoteWords} appends to EVERY remote script. Spelled
+ * out here rather than imported so a silent change to the remote grammar — the
+ * one thing on the wire that Ethos adds to the caller's command — fails a test
+ * instead of passing one.
+ */
+const EPILOGUE = `\n\n__ethos_st=$?\n[ "$__ethos_st" -eq 255 ] && echo ${SENTINEL} >&2\nexit $__ethos_st`;
+
+/**
+ * The remote script with that epilogue removed, so the quoting assertions read
+ * as they did before it existed — and assert that it is present on every path.
+ */
+function scriptOf(words: readonly string[]): string {
+  const script = unquoteSingleWord(words[2] ?? '');
+  expect(script.endsWith(EPILOGUE)).toBe(true);
+  return script.slice(0, -EPILOGUE.length);
+}
+
+/**
+ * The receipt the remote wrapper would echo for a given spawn, recovered from
+ * that spawn's own argv. Throws when there is none — a test asking for a
+ * receipt on a command that never carried a sentinel is testing nothing.
+ */
+/** The epilogue a given spawn's remote script actually carries. */
+function epilogueFor(index: number): string {
+  return `\n\n__ethos_st=$?\n[ "$__ethos_st" -eq 255 ] && echo ${receiptFor(index)} >&2\nexit $__ethos_st`;
+}
+
+function receiptFor(index: number): string {
+  const script = spawned[index]?.args.at(-1) ?? '';
+  const found = /__ethos_ssh_exit255_[0-9a-f]{32}__/.exec(script);
+  if (!found) throw new Error(`no exit-255 sentinel in remote script: ${script}`);
+  return found[0];
 }
 
 async function collect(stream: AsyncIterable<ExecChunk>): Promise<ExecChunk[]> {
@@ -780,20 +831,30 @@ describe('SshExecutionBackend and a redirected known-hosts file', () => {
 
 describe('buildRemoteWords', () => {
   it('wraps the command in sh -c with no cd when no workdir is configured', () => {
-    expect(buildRemoteWords({ host: 'h' }, 'echo hi', {})).toEqual(['sh', '-c', "'echo hi'"]);
+    const words = buildRemoteWords({ host: 'h' }, 'echo hi', {}, SENTINEL);
+    expect(words.slice(0, 2)).toEqual(['sh', '-c']);
+    expect(scriptOf(words)).toBe('echo hi');
   });
 
   it('prefixes cd <remoteWorkdir> when the operator configured one', () => {
-    const words = buildRemoteWords({ host: 'h', remoteWorkdir: '/srv/app' }, 'echo hi', {});
+    const words = buildRemoteWords(
+      { host: 'h', remoteWorkdir: '/srv/app' },
+      'echo hi',
+      {},
+      SENTINEL,
+    );
     expect(words.slice(0, 2)).toEqual(['sh', '-c']);
-    expect(unquoteSingleWord(words[2] ?? '')).toBe("cd '/srv/app' && echo hi");
+    expect(scriptOf(words)).toBe("cd '/srv/app' && echo hi");
   });
 
   it('prefers an explicit tool-call cwd over remoteWorkdir, verbatim as a remote path', () => {
-    const words = buildRemoteWords({ host: 'h', remoteWorkdir: '/srv/app' }, 'pwd', {
-      cwd: '/var/tmp/job',
-    });
-    expect(unquoteSingleWord(words[2] ?? '')).toBe("cd '/var/tmp/job' && pwd");
+    const words = buildRemoteWords(
+      { host: 'h', remoteWorkdir: '/srv/app' },
+      'pwd',
+      { cwd: '/var/tmp/job' },
+      SENTINEL,
+    );
+    expect(scriptOf(words)).toBe("cd '/var/tmp/job' && pwd");
   });
 
   // HIGH 1. `shell: false` used to return early and discard BOTH `opts.cwd` and
@@ -801,59 +862,99 @@ describe('buildRemoteWords', () => {
   // `shell: false` — ran in the remote LOGIN directory while config.yaml, the
   // character sheet and the injected prompt all said `remoteWorkdir`.
   it('applies remoteWorkdir to a stdin-driven runner when shell is false', () => {
-    const words = buildRemoteWords({ host: 'h', remoteWorkdir: '/srv/app' }, 'python3 -', {
-      shell: false,
-    });
+    const words = buildRemoteWords(
+      { host: 'h', remoteWorkdir: '/srv/app' },
+      'python3 -',
+      { shell: false },
+      SENTINEL,
+    );
     expect(words.slice(0, 2)).toEqual(['sh', '-c']);
-    expect(unquoteSingleWord(words[2] ?? '')).toBe("cd '/srv/app' && exec python3 -");
+    expect(scriptOf(words)).toBe("cd '/srv/app' && python3 -");
   });
 
   it('prefers an explicit cwd over remoteWorkdir when shell is false', () => {
-    const words = buildRemoteWords({ host: 'h', remoteWorkdir: '/srv/app' }, 'bash -s', {
-      shell: false,
-      cwd: '/var/tmp/job',
-    });
-    expect(unquoteSingleWord(words[2] ?? '')).toBe("cd '/var/tmp/job' && exec bash -s");
-  });
-
-  // With no workdir there is nothing to wrap, so `shell: false` keeps its one
-  // remaining job: no quoting layer around a command the caller already composed
-  // as a remote command line.
-  it('leaves the command unwrapped when shell is false and no workdir applies', () => {
-    expect(buildRemoteWords({ host: 'h' }, 'node --input-type=module', { shell: false })).toEqual([
-      'node --input-type=module',
-    ]);
-  });
-
-  it('uses exec only on the shell:false path, so a shell:true command still runs as a child', () => {
-    const wrapped = unquoteSingleWord(
-      buildRemoteWords({ host: 'h', remoteWorkdir: '/srv/app' }, 'echo hi', {})[2] ?? '',
+    const words = buildRemoteWords(
+      { host: 'h', remoteWorkdir: '/srv/app' },
+      'bash -s',
+      { shell: false, cwd: '/var/tmp/job' },
+      SENTINEL,
     );
-    expect(wrapped).toBe("cd '/srv/app' && echo hi");
-    expect(wrapped).not.toContain('exec');
+    expect(scriptOf(words)).toBe("cd '/var/tmp/job' && bash -s");
+  });
+
+  // This used to return the bare `[cmd]` for the remote LOGIN shell to parse.
+  // The epilogue needs a shell that comes BACK to it, so every path is now the
+  // `sh -c` one the workdir variant already used. `shell: false` keeps its one
+  // substantive promise — no quoting layer around `cmd`, which is still parsed
+  // exactly once.
+  it('wraps a shell:false runner with no workdir, still parsing the command once', () => {
+    const words = buildRemoteWords(
+      { host: 'h' },
+      'node --input-type=module',
+      { shell: false },
+      SENTINEL,
+    );
+    expect(words.slice(0, 2)).toEqual(['sh', '-c']);
+    expect(scriptOf(words)).toBe('node --input-type=module');
+  });
+
+  // `exec` fronted the shell:false runner so its status was the wrapping
+  // shell's. It cannot coexist with the epilogue — an `exec`d process never
+  // returns to the shell that would emit the receipt — so it is gone from both
+  // paths, and the status is carried by `exit $__ethos_st` instead (executed
+  // against a real shell in `remote-words-stdin.test.ts`).
+  it('no longer uses exec on either path', () => {
+    for (const opts of [{}, { shell: false }]) {
+      const words = buildRemoteWords(
+        { host: 'h', remoteWorkdir: '/srv/app' },
+        'echo hi',
+        opts,
+        SENTINEL,
+      );
+      expect(scriptOf(words)).toBe("cd '/srv/app' && echo hi");
+    }
+  });
+
+  // The receipt line is the only thing this backend adds to what the caller
+  // asked for, so its grammar is pinned rather than left to `scriptOf` alone.
+  it('appends the exit-255 epilogue verbatim, inside the single quoting layer', () => {
+    const words = buildRemoteWords({ host: 'h' }, 'echo hi', {}, SENTINEL);
+    expect(unquoteSingleWord(words[2] ?? '')).toBe(
+      `echo hi\n\n__ethos_st=$?\n[ "$__ethos_st" -eq 255 ] && echo ${SENTINEL} >&2\nexit $__ethos_st`,
+    );
+    // One word, still: the epilogue's newlines and `$` must not escape the wrap.
+    expect(words).toHaveLength(3);
   });
 
   it('survives an embedded single quote in the workdir on the shell:false path', () => {
-    const words = buildRemoteWords({ host: 'h', remoteWorkdir: "/srv/o'brien" }, 'python3 -', {
-      shell: false,
-    });
-    const script = unquoteSingleWord(words[2] ?? '');
-    expect(script.endsWith(' && exec python3 -')).toBe(true);
+    const words = buildRemoteWords(
+      { host: 'h', remoteWorkdir: "/srv/o'brien" },
+      'python3 -',
+      { shell: false },
+      SENTINEL,
+    );
+    const script = scriptOf(words);
+    expect(script.endsWith(' && python3 -')).toBe(true);
     const cdWord = script.slice(3, script.indexOf(' && '));
     expect(unquoteSingleWord(cdWord)).toBe("/srv/o'brien");
   });
 
   it('survives an embedded single quote in the command', () => {
     const cmd = `echo "it's here"`;
-    const words = buildRemoteWords({ host: 'h' }, cmd, {});
+    const words = buildRemoteWords({ host: 'h' }, cmd, {}, SENTINEL);
     // Reading the wrapped word back the way sh would must yield the command
     // unchanged — and must not split into a second word.
-    expect(unquoteSingleWord(words[2] ?? '')).toBe(cmd);
+    expect(scriptOf(words)).toBe(cmd);
   });
 
   it('survives an embedded single quote in the workdir', () => {
-    const words = buildRemoteWords({ host: 'h', remoteWorkdir: "/srv/o'brien" }, 'pwd', {});
-    const script = unquoteSingleWord(words[2] ?? '');
+    const words = buildRemoteWords(
+      { host: 'h', remoteWorkdir: "/srv/o'brien" },
+      'pwd',
+      {},
+      SENTINEL,
+    );
+    const script = scriptOf(words);
     const [cdWord, rest] = [script.slice(3, script.indexOf(' && ')), script.slice(-3)];
     expect(rest).toBe('pwd');
     expect(unquoteSingleWord(cdWord)).toBe("/srv/o'brien");
@@ -880,7 +981,7 @@ describe('SshExecutionBackend.exec', () => {
       'deploy@build-01',
       'sh',
       '-c',
-      "'cd '\\''/srv/app'\\'' && echo hi'",
+      `'cd '\\''/srv/app'\\'' && echo hi${epilogueFor(0)}'`,
     ]);
   });
 
@@ -892,14 +993,27 @@ describe('SshExecutionBackend.exec', () => {
       'build-01',
       'sh',
       '-c',
-      "'cd '\\''/srv/app'\\'' && exec python3 -'",
+      `'cd '\\''/srv/app'\\'' && python3 -${epilogueFor(0)}'`,
     ]);
   });
 
-  it('sends the runner unwrapped when shell is false and no workdir is configured', async () => {
+  it('wraps the runner in sh -c when shell is false and no workdir is configured', async () => {
     const be = backend({});
     await collect(be.exec('python3 -', { shell: false, stdin: 'print(1)' }));
-    expect(spawned[0]?.args.slice(-3)).toEqual(['--', 'build-01', 'python3 -']);
+    expect(spawned[0]?.args.slice(-5, -1)).toEqual(['--', 'build-01', 'sh', '-c']);
+    expect(spawned[0]?.args.at(-1)).toBe(`'python3 -${epilogueFor(0)}'`);
+  });
+
+  // The two halves of the discriminator have to agree on ONE value: the script
+  // that emits the receipt and the reader that strips it. Nothing in the type
+  // system holds them together, so this pins that `exec` puts a well-formed
+  // sentinel on the wire at all, and that it differs per call.
+  it('sends a fresh 128-bit sentinel with every exec', async () => {
+    const be = backend({});
+    await collect(be.exec('echo hi', {}));
+    await collect(be.exec('echo hi', {}));
+    expect(receiptFor(0)).toMatch(/^__ethos_ssh_exit255_[0-9a-f]{32}__$/);
+    expect(receiptFor(1)).not.toBe(receiptFor(0));
   });
 
   // HIGH 2. The destination is refused BEFORE spawn — asserted on what would
@@ -1139,6 +1253,138 @@ describe('SshExecutionBackend.exec', () => {
     useReplies([{ stderr: ['app: fatal\n'], code: 255 }]);
     const chunks = await collect(backend({}).exec('exit 255', {}));
     expect(chunks.at(-1)).toEqual({ stream: 'exit', code: 255 });
+  });
+
+  // THE COLLISION the exit-255 receipt exists to resolve, and the case the
+  // diagnostic list alone gets wrong in the opposite direction. The REMOTE
+  // command can itself be an ssh (`terminal: ssh other-host …`, or a `run_code`
+  // bash script that shells out): it prints the identical bytes, exits 255, and
+  // the outer connection was fine the whole time. Every line below was captured
+  // from a real nested run — outer ssh to a throwaway sshd on OpenSSH_9.6p1,
+  // inner ssh to a second sshd with an empty `authorized_keys` or to a socket
+  // server that closes on accept — with the epilogue in place, which produced
+  // exactly this: the inner ssh's diagnostic, then the receipt, then exit 255.
+  it.each([
+    'nobodyuser@127.0.0.1: Permission denied (publickey).',
+    'kex_exchange_identification: read: Connection reset by peer',
+    'Connection reset by 127.0.0.1 port 22203',
+    'Connection to 127.0.0.1 closed by remote host.',
+    'Host key verification failed.',
+  ])('reads %j WITH a receipt as the remote command exiting 255', async (line) => {
+    useReplies([{ stderr: [`${line}\n`], receipt: true, code: 255 }]);
+    const chunks = await collect(backend({}).exec('ssh other-host true', {}));
+    expect(chunks.at(-1)).toEqual({ stream: 'exit', code: 255 });
+    // The diagnostic is still the command's own output and must survive intact.
+    expect(chunks.map((c) => (c.stream === 'stderr' ? c.data : '')).join('')).toContain(line);
+  });
+
+  // Precedence, stated as a test: the receipt is positive evidence that the
+  // remote shell ran the command and reported its status, so it outranks even a
+  // line ssh prefixes with its own name. Nothing but a real remote shell that
+  // reached the epilogue can produce one.
+  it('lets a receipt outrank an ssh:-prefixed diagnostic', async () => {
+    useReplies([
+      {
+        stderr: ['ssh: connect to host inner port 22: Connection refused\n'],
+        receipt: true,
+        code: 255,
+      },
+    ]);
+    const chunks = await collect(backend({}).exec('ssh inner true', {}));
+    expect(chunks.at(-1)).toEqual({ stream: 'exit', code: 255 });
+  });
+
+  // The receipt is an implementation detail of the classification and must not
+  // reach a caller — `terminal` joins stdout and stderr straight into the
+  // agent's context. Stripped on every exit code, not just 255.
+  it.each([0, 1, 255])('strips the receipt out of the stream on exit %i', async (code) => {
+    useReplies([{ stderr: ['real stderr\n'], receipt: true, code }]);
+    const chunks = await collect(backend({}).exec('whatever', {}));
+    const stderr = chunks.map((c) => (c.stream === 'stderr' ? c.data : '')).join('');
+    expect(stderr).toBe('real stderr\n');
+    expect(stderr).not.toContain('__ethos_ssh_exit255_');
+  });
+
+  // The receipt arrives on a socket, so it can be split across `data` events
+  // like any other bytes. The holdback rejoins before it tests, which is the
+  // whole reason the tail is kept as raw `Buffer` rather than decoded text.
+  it('recognises a receipt split across two data events', async () => {
+    vi.mocked(spawn).mockImplementation(
+      fakeSpawn((index) => {
+        const whole = `${receiptFor(index)}\n`;
+        return {
+          stderr: [
+            'Connection to 127.0.0.1 closed by remote host.\n',
+            whole.slice(0, 9),
+            whole.slice(9),
+          ],
+          code: 255,
+        };
+      }) as typeof spawn,
+    );
+    const chunks = await collect(backend({}).exec('ssh other-host true', {}));
+    expect(chunks.at(-1)).toEqual({ stream: 'exit', code: 255 });
+    expect(chunks.map((c) => (c.stream === 'stderr' ? c.data : '')).join('')).not.toContain(
+      '__ethos_ssh_exit255_',
+    );
+  });
+
+  // A DOCUMENTED LIMIT, pinned so it cannot be mistaken for a guarantee. The
+  // holdback is exactly one receipt line, so anything written to stderr after
+  // the receipt pushes it out of the window: it is neither recognised nor
+  // stripped, and classification falls back to the diagnostic list — which is
+  // the behaviour that shipped before the receipt existed.
+  it('falls back to the list when something is written to stderr after the receipt', async () => {
+    vi.mocked(spawn).mockImplementation(
+      fakeSpawn((index) => ({
+        stderr: [`${receiptFor(index)}\n`, 'Connection to 127.0.0.1 closed by remote host.\n'],
+        code: 255,
+      })) as typeof spawn,
+    );
+    await expect(collect(backend({}).exec('ssh other-host true', {}))).rejects.toBeInstanceOf(
+      SshTransportError,
+    );
+  });
+
+  // Truncation must never READ as a missing receipt. It cannot: the byte
+  // ceiling abandons the inner generator, so `close` never classifies and no
+  // exit chunk is emitted at all — the caller sees a null exit code, which
+  // `drainExec` in tools-code/tools-terminal treats as an unknown outcome, not
+  // as a backend that went away.
+  it('never turns truncation into a transport failure', async () => {
+    useReplies([
+      {
+        stderr: ['Connection to 127.0.0.1 closed by remote host.\n', 'x'.repeat(1_000_001)],
+        code: 255,
+      },
+    ]);
+    const chunks = await collect(backend({}).exec('pnpm test', {}));
+    expect(chunks.at(-1)).toEqual({
+      stream: 'stderr',
+      data: '\n[output truncated at 1000000 bytes]\n',
+    });
+    expect(chunks.some((c) => c.stream === 'exit')).toBe(false);
+  });
+
+  // The holdback must not swallow stderr on the paths that never reach `close`.
+  it('flushes the held-back stderr tail on a timeout', async () => {
+    useReplies([{ stderr: ['tail\n'], code: 0 }]);
+    vi.mocked(spawn).mockImplementation(((cmd: string, args: readonly string[]) => {
+      // The `ssh -G` lookup still has to answer, or the known-hosts probe
+      // never resolves and this test measures that instead of the timeout.
+      if (args[0] === '-G') return fakeSpawn(() => ({ code: 0 }))(cmd, args);
+      const child = new FakeChild();
+      spawned.push({ args: [...args], child });
+      setTimeout(() => child.stderr.emit('data', Buffer.from('short tail')), 0);
+      return child as unknown as ChildProcess;
+    }) as unknown as typeof spawn);
+    const chunks: ExecChunk[] = [];
+    await expect(
+      (async () => {
+        for await (const c of backend({}).exec('sleep 99', { timeoutMs: 20 })) chunks.push(c);
+      })(),
+    ).rejects.toBeInstanceOf(ExecTimeoutError);
+    expect(chunks.map((c) => (c.stream === 'stderr' ? c.data : '')).join('')).toBe('short tail');
   });
 });
 

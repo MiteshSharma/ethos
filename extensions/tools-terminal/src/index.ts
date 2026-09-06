@@ -186,7 +186,7 @@ function makeTerminalTool(route: ExecutionRouter): Tool {
         // rendered `Command exited with error (code 255)`, which tells the
         // agent a command ran on the remote and failed when nothing ever
         // reached it. That gap was load-bearing in two places that claimed
-        // otherwise: the KNOWN LIMIT on `SshTransportError` in
+        // otherwise: the KNOWN LIMITS on `SshTransportError` in
         // `extensions/execution-ssh/src/index.ts` ("every code tool gates on
         // isAvailable()") and this feature's own how-to, whose Verify step is
         // `terminal: hostname`. The check runs on EVERY invocation; the
