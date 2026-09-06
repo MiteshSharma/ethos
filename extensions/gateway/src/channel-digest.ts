@@ -91,10 +91,13 @@ export interface ChannelDigestSettings {
    * It is reported, never silently dropped: see `ChannelDigestReport.deferred`
    * and the `channel.digest_lane_cap` event.
    *
-   * WHY IT DOES NOT STARVE. Lanes are attempted in ascending cursor order and
-   * the cursor is the store's GLOBAL ingestion sequence, so the lane furthest
-   * behind goes first and a lane just digested sorts to the back. A deferred
-   * lane is therefore at the front of the next run. See `digestWatchedLanes`.
+   * WHY IT DOES NOT STARVE. Lanes are ordered by their LAST ATTEMPT and then
+   * by cursor, both ascending, so a lane the cap deferred was not attempted and
+   * sorts ahead of every lane that ran. Ordering by cursor alone was not enough
+   * and was the bug: a cursor advances only on a confirmed delivery, so a lane
+   * that fails the same way every night sat at cursor 0 for ever and held the
+   * front of every run. See `Attempts` and the `candidates` sort in
+   * `digestWatchedLanes`.
    */
   maxLanesPerRun?: number;
   /**
@@ -248,6 +251,40 @@ const DIGEST_SYSTEM_PROMPT =
 type Watermarks = Record<string, number>;
 
 /**
+ * laneKey → the run clock (`deps.now`) at which this lane last REACHED THE
+ * PROVIDER — that is, last spent a charge against `maxLanesPerRun`, whatever
+ * came of it.
+ *
+ * A SECOND ordering key, and it exists because the cursor alone could not
+ * carry the one the cap needs. A cursor advances only on a CONFIRMED delivery,
+ * so a lane that fails the same way every night — its platform has no
+ * `channel_filter.<platform>.ownerUserId`, its owner names an observed chat,
+ * its provider call throws — keeps cursor 0 for ever. Ordered by cursor alone,
+ * those lanes sort to the FRONT of every run, spend the whole cap (the charge
+ * is taken before the call, deliberately — see the charge site), and defer the
+ * healthy lanes behind them permanently. 25 broken lanes were enough to
+ * silence 5 working ones for good.
+ *
+ * Stamping the ATTEMPT rather than the outcome makes the rotation real: a lane
+ * that spent a charge sorts to the back next run whether it delivered or not,
+ * so the cap becomes a fair round-robin over every lane instead of a queue the
+ * front of which never moves. The cost bound is untouched — the charge is
+ * still taken before the call, so a lane that throws still cannot buy the run
+ * a second one. Pinned by `a permanently failing lane does not monopolise the
+ * cap` in `__tests__/channel-digest.test.ts`.
+ *
+ * ON DISK it is `attemptedAt` beside `id` in the same entry, and `id` is
+ * always written even when it is 0, so a build that predates this field reads
+ * the entry as the cursor it has always been rather than dropping it. An
+ * absent or unusable `attemptedAt` reads as 0 — never attempted, front of the
+ * queue — which costs one extra attempt and never a skipped lane.
+ *
+ * Not a durability record and not consulted by anything but the sort: losing
+ * this file loses an ordering, not a message.
+ */
+type Attempts = Record<string, number>;
+
+/**
  * Is this a value the store could actually have issued as a row id?
  *
  * `Number.isFinite` was not enough: it admits `-1`, `1.5`, `1e300` and
@@ -258,18 +295,20 @@ function isCursorId(id: unknown): id is number {
   return typeof id === 'number' && Number.isSafeInteger(id) && id >= 0;
 }
 
-async function readWatermarks(
+async function readLaneState(
   from: ChannelDigestDeps['watermarks'],
   observability: ChannelDigestDeps['observability'],
-): Promise<Watermarks> {
-  if (!from) return {};
+): Promise<{ marks: Watermarks; attempts: Attempts }> {
+  const empty = { marks: {}, attempts: {} };
+  if (!from) return empty;
   const raw = await from.storage.read(from.path);
-  if (!raw) return {};
+  if (!raw) return empty;
   const marks: Watermarks = {};
+  const attempts: Attempts = {};
   const dropped: string[] = [];
   try {
     const parsed: unknown = JSON.parse(raw);
-    if (typeof parsed !== 'object' || parsed === null) return {};
+    if (typeof parsed !== 'object' || parsed === null) return empty;
     for (const [key, value] of Object.entries(parsed)) {
       // `{ id: n }`. A bare number is the pre-cursor format — see the note on
       // `Watermarks` for why reading it as an id would silence the lane.
@@ -280,12 +319,18 @@ async function readWatermarks(
       const id: unknown = value.id;
       if (isCursorId(id)) marks[key] = id;
       else dropped.push(key);
+      // Read INDEPENDENTLY of the cursor and never reported: the same
+      // non-negative-safe-integer shape, but a bad one costs an extra attempt
+      // rather than a silent lane, so it degrades to "never attempted" instead
+      // of dropping the entry. See `Attempts`.
+      const attemptedAt: unknown = (value as { attemptedAt?: unknown }).attemptedAt;
+      if (isCursorId(attemptedAt)) attempts[key] = attemptedAt;
     }
   } catch {
     // Corrupt file — treat as no watermark. Every lane then re-reads from the
     // start of what retention still holds, which duplicates rather than loses
     // (see the semantics note on `runChannelDigest`).
-    return {};
+    return empty;
   }
   // One report per run rather than one per entry: a file damaged at all is
   // usually damaged throughout, and the operator needs the lane names, not a
@@ -298,7 +343,7 @@ async function readWatermarks(
       details: { path: from.path, lanes: dropped, count: dropped.length },
     });
   }
-  return marks;
+  return { marks, attempts };
 }
 
 /** `2026-09-05T14:03:00Z` → `14:03`. */
@@ -468,8 +513,9 @@ export interface ChannelDigestReport {
   /**
    * Lanes with undigested messages that `maxLanesPerRun` left for the next
    * run. Not a loss and not a failure: their cursors are untouched, so the
-   * rows are read again — and because lanes are ordered by cursor, a lane
-   * counted here is at the FRONT of the next run's queue.
+   * rows are read again — and because lanes are ordered by their last attempt,
+   * a lane counted here was not attempted and sorts ahead of every lane that
+   * was, on the next run.
    *
    * Counted by probing, one row per remaining lane, rather than by taking the
    * length of the tail: most of that tail is lanes with nothing new, and a
@@ -566,11 +612,13 @@ export function summarizeChannelDigest(report: ChannelDigestReport): string {
  * A run is also bounded in LANES, not only in messages per lane:
  * `maxLanesPerRun` caps how many of them may reach the provider, because
  * `transcriptLaneKey` carries a thread id and one watched Slack channel can be
- * eighty lanes in a day. Lanes are attempted in ascending cursor order — the
- * most-behind first — so the cap defers rather than starves, and what it
- * deferred is counted in `ChannelDigestReport.deferred` and in a
- * `channel.digest_lane_cap` event. A deferred lane's cursor is untouched, so
- * the next run reads exactly the rows this one did not.
+ * eighty lanes in a day. Lanes are attempted least-recently-attempted first,
+ * with the cursor breaking ties — so the cap defers rather than starves even
+ * when a lane fails on every run, and what it deferred is counted in
+ * `ChannelDigestReport.deferred` and in a `channel.digest_lane_cap` event. A
+ * deferred lane's cursor is untouched, so the next run reads exactly the rows
+ * this one did not. See `Attempts` for why the cursor could not carry that
+ * ordering by itself.
  *
  * Without `deps.watermarks` there is no cursor at all and every run re-digests
  * whatever retention still holds. A lane digested for the FIRST time is the
@@ -644,8 +692,12 @@ async function digestWatchedLanes(
   const limit = settings.maxMessagesPerLane ?? DEFAULT_MAX_MESSAGES_PER_LANE;
   const costWarnUsd = settings.costWarnUsdPerLane ?? DEFAULT_COST_WARN_USD_PER_LANE;
   const deliverTo = settings.deliverTo ?? 'owner';
-  const watermarks = await readWatermarks(deps.watermarks, deps.observability);
-  let watermarksChanged = false;
+  const { marks: watermarks, attempts } = await readLaneState(deps.watermarks, deps.observability);
+  // Set by a cursor advance OR by an attempt stamp. Both live in the same file
+  // and both have to survive the run: a run in which every lane failed changes
+  // no cursor but must still record that those lanes had their turn, or the
+  // rotation the cap depends on never moves. See `Attempts`.
+  let stateChanged = false;
 
   // `deliverTo: 'inApp'` makes the feed the ENTIRE delivery. With no feed
   // wired, every digest this run produces would be summarised, marked
@@ -683,19 +735,35 @@ async function digestWatchedLanes(
   // can hold another deployment's rooms, and summarising one would deliver it
   // through the wrong bot to the wrong owner.
   //
-  // ORDERED BY CURSOR, ASCENDING, and that ordering is what makes the cap below
-  // safe. A watermark is the store's GLOBAL ingestion sequence, not a per-lane
-  // counter, so comparing two lanes' cursors compares how far behind the store
-  // each one is: a lane digested last night carries a cursor from last night, a
-  // lane the cap has not reached in a week carries one from a week ago, and a
-  // lane never digested carries 0. Least-consumed first is therefore
-  // most-behind first, and it self-rotates for free — a lane's cursor jumps to
-  // the front of the sequence the moment it is digested, which puts it at the
-  // BACK of the next run's queue. No rotation offset has to be persisted for
-  // this, and no lane can be starved by its position in `listLanes`.
+  // ORDERED BY LAST ATTEMPT, THEN BY CURSOR, BOTH ASCENDING, and that ordering
+  // is what makes the cap below safe.
+  //
+  // LAST ATTEMPT FIRST, and it has to be first. A cursor advances only on a
+  // CONFIRMED delivery, so ordering by cursor alone put every permanently
+  // failing lane — no `ownerUserId` on its platform, an owner naming an
+  // observed chat, a provider that throws every time — at cursor 0 for ever,
+  // and therefore at the front of every single run. With more such lanes than
+  // the cap, they spent all of it every night and the healthy lanes behind
+  // them were deferred permanently: `deferred` said so, and nothing ever
+  // cleared it. Stamping the attempt (see `Attempts`) sorts a lane that spent
+  // a charge to the back whether it delivered or not, which turns the cap into
+  // a round-robin over every lane instead of a queue with a fixed head.
+  //
+  // CURSOR SECOND, among lanes last attempted at the same moment — the whole
+  // of a run's lanes share one stamp, and a cold file gives every lane 0. A
+  // watermark is the store's GLOBAL ingestion sequence, not a per-lane counter,
+  // so comparing two lanes' cursors compares how far behind the store each one
+  // is: a lane digested last night carries a cursor from last night, a lane the
+  // cap has not reached in a week carries one from a week ago, and a lane never
+  // digested carries 0. Least-consumed first is therefore most-behind first,
+  // and no lane can be starved by its position in `listLanes`.
   const candidates = lanes
     .filter((candidate) => byBotKey.has(candidate.botKey))
-    .sort((a, b) => (watermarks[a.laneKey] ?? 0) - (watermarks[b.laneKey] ?? 0));
+    .sort(
+      (a, b) =>
+        (attempts[a.laneKey] ?? 0) - (attempts[b.laneKey] ?? 0) ||
+        (watermarks[a.laneKey] ?? 0) - (watermarks[b.laneKey] ?? 0),
+    );
   const maxLanes = settings.maxLanesPerRun ?? DEFAULT_MAX_LANES_PER_RUN;
   /** Lanes past the cap that DO have work waiting. See `ChannelDigestReport.deferred`. */
   const deferred: string[] = [];
@@ -719,10 +787,12 @@ async function digestWatchedLanes(
     // on every run regardless of what the lane before it did.
     //
     // There IS a queue position, since `maxLanesPerRun` bounds how many lanes
-    // one run may pay for — but it is not one a lane can be starved in. The
-    // order is ascending cursor, so a lane the cap deferred is among the
-    // least-consumed and sorts to the FRONT next run, while the lanes that ran
-    // sort to the back. See the `candidates` sort above.
+    // one run may pay for — but no lane holds the front of it. Lanes are
+    // ordered by their last ATTEMPT, so a lane the cap deferred was not
+    // attempted and sorts ahead of every lane that ran, and a lane that ran
+    // sorts behind them whether it delivered or failed. See the `candidates`
+    // sort above and `Attempts`; the case that used to break this is pinned by
+    // `a permanently failing lane does not monopolise the cap` in the tests.
     try {
       const cursor = watermarks[lane.laneKey] ?? 0;
 
@@ -755,7 +825,16 @@ async function digestWatchedLanes(
       // SPEND, and a turn that throws or comes back empty was billed like any
       // other — counting only the ones that produced a digest would let a lane
       // failing deterministically buy the run an unbounded number of calls.
+      //
+      // The attempt is RECORDED here for the same reason and at the same
+      // instant: the charge is what the next run's ordering has to see, and it
+      // is taken here rather than on the way out so a throw below cannot skip
+      // it. A lane that spends a charge every run and never advances its cursor
+      // is exactly the lane that used to hold the front of the queue for ever
+      // — see `Attempts` and the `candidates` sort.
       lanesSummarised += 1;
+      attempts[lane.laneKey] = now;
+      stateChanged = true;
       const turn = await runLaneTurn(
         bot.loop,
         buildDigestPrompt({
@@ -799,7 +878,7 @@ async function digestWatchedLanes(
         // the fact that the call returned — is what consumes the lane.
         if (feed.ok) {
           watermarks[lane.laneKey] = nextCursor;
-          watermarksChanged = true;
+          stateChanged = true;
         } else {
           report.undelivered += 1;
           deps.observability?.recordSafetyBlock({
@@ -879,7 +958,7 @@ async function digestWatchedLanes(
       if (sent.ok) {
         report.deliveredToOwner += 1;
         watermarks[lane.laneKey] = nextCursor;
-        watermarksChanged = true;
+        stateChanged = true;
       } else {
         report.undelivered += 1;
         deps.observability?.recordSafetyBlock({
@@ -918,14 +997,26 @@ async function digestWatchedLanes(
 
   // One write per run, after every lane. A crash before it re-digests the whole
   // run — at-least-once, as documented above.
-  if (watermarksChanged && deps.watermarks) {
+  //
+  // Cursor and attempt stamp share an entry, and `id` is ALWAYS written even
+  // when it is 0. A lane that was attempted and never delivered has no cursor,
+  // and an entry of `{ attemptedAt }` alone would be dropped by the reader's
+  // `'id' in value` guard — and by every build that predates `attemptedAt`,
+  // which reads this file too when an operator rolls back. `{ id: 0 }` is what
+  // "nothing consumed" has always meant, so both readers agree.
+  if (stateChanged && deps.watermarks) {
+    const keys = new Set([...Object.keys(watermarks), ...Object.keys(attempts)]);
+    const entries: Record<string, { id: number; attemptedAt?: number }> = {};
+    for (const key of keys) {
+      const attemptedAt = attempts[key];
+      entries[key] =
+        attemptedAt === undefined
+          ? { id: watermarks[key] ?? 0 }
+          : { id: watermarks[key] ?? 0, attemptedAt };
+    }
     await deps.watermarks.storage.writeAtomic(
       deps.watermarks.path,
-      JSON.stringify(
-        Object.fromEntries(Object.entries(watermarks).map(([key, id]) => [key, { id }])),
-        null,
-        2,
-      ),
+      JSON.stringify(entries, null, 2),
     );
   }
 

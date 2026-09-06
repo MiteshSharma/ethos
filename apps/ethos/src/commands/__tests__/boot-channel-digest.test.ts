@@ -306,7 +306,12 @@ describe('a digest broadcast to a feed nobody is listening to', () => {
 
     // Summarised — the LLM pass ran and was paid for — but delivered to nobody.
     expect(report).toMatchObject({ summarised: 1, undelivered: 1 });
-    expect(await watermarks()).toBeNull();
+    // The lane reached the provider, so the file records the ATTEMPT — the
+    // lane cap's second ordering key (`Attempts` in
+    // extensions/gateway/src/channel-digest). The CURSOR is what consumption
+    // means, and it is still 0.
+    const written: Record<string, { id: number }> = JSON.parse((await watermarks()) ?? '{}');
+    expect(written['telegram:bot-a:-100']?.id).toBe(0);
 
     // ...so the next run digests the same messages again rather than the room's
     // day having silently disappeared.

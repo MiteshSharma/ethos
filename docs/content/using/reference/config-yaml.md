@@ -4,7 +4,7 @@ description: "Every field in ~/.ethos/config.yaml — provider, model, channel t
 kind: reference
 audience: user
 slug: config-yaml
-updated: 2026-09-05
+updated: 2026-09-06
 ---
 
 `~/.ethos/config.yaml` is a flat `key: value` file. Dotted keys (e.g. `retention.messages`, `providers.0.provider`) are how nested structures appear on disk — there is no indentation-based nesting. The parser ignores quotes around values.
@@ -424,7 +424,7 @@ retention.events.install: forever
 
 Notes:
 
-- **`retention.channelTranscript` can only be set by hand-editing this file.** `ethos retention set` rejects it as an unknown category, and the web Settings page does not list it. Every other field above is settable through both.
+- **A per-personality window for `retention.channelTranscript` prunes nothing.** Observe-mode transcripts live in one `~/.ethos/channel-transcript.db` with no personality column, and the nightly job reads the global `retention.channelTranscript` only. `ethos retention set channelTranscript <duration> --personality <id>` is refused for that reason and names it. The web Settings page does not refuse it — a `personalities.<id>.retention.channelTranscript` row saves a value nothing reads. Set the global key.
 - **Pruning runs once a night, at 03:00 local time, and a missed run is not made up.** All retention categories are aged out by a single system cron job (`observability-prune`) on a fixed `0 3 * * *` schedule that no config key changes. That job is created with `missedRunPolicy: skip`, so a machine that was asleep or powered off at 03:00 rolls the run forward rather than executing it late — a laptop that is never awake at 03:00 never prunes anything, indefinitely and silently. There is no prune at startup. Run Ethos on a machine that is up at 03:00 if a window here matters to you.
 - **`ethos data prune` does not cover `retention.channelTranscript`.** It prunes the observability store only. The channel transcript is a separate database with no manual prune command; the nightly job is the only thing that ages it out.
 - **Per-message audit events outlive the transcript text they describe.** Every message an observe-mode channel records also emits a `channel.observed` audit event carrying the platform, chat id and sender id — no message text, but a durable record of who spoke where and when. That event is in the `audit` category (`365d`) and in a different database, so it survives the transcript's `30d` window by roughly 12×. Lowering `retention.channelTranscript` does not lower it; set `retention.events.audit` too if that matters to you.
@@ -441,6 +441,40 @@ personalities.engineer-paired.retention.traces: 180d
 Notes:
 
 - Only the `retention` sub-block is parsed under `personalities.<id>.*`. Other top-level keys cannot be overridden per personality from this file — set them in the personality's own `config.yaml`.
+- **No category honours a per-personality window on the nightly prune today.** `personalities.<id>.retention.*` is read by `ethos retention show --personality <id>` and by `ethos data prune --personality <id>` (which prunes on demand, against the merged window). The scheduled `observability-prune` job reads the global `retention.*` block only, so a value set here shortens nothing on its own.
+
+## channelDigest.* {#channel-digest}
+
+Type: object · Default: off
+
+The scheduled summary of what [`observe`-mode](#telegram-bots) channels recorded. One digest per lane — a lane is a chat *and* a thread — delivered to the owner's DM from the bot that watched it, plus the in-app notifications feed. Nothing is ever posted back into the observed room.
+
+Off unless `enabled: true`. Seeded only by `ethos gateway start` and `ethos boot`; `ethos serve` runs no channel adapters and creates no job.
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `channelDigest.enabled` | boolean | `false` | Create the `channel-digest` cron job. Any value other than the literal `true` reads as `false`. |
+| `channelDigest.cron` | cron expression | `0 8 * * *` | When the digest runs, in the host's local time. |
+| `channelDigest.deliverTo` | `owner` \| `inApp` | `owner` | `owner` — the owner's DM *and* the in-app feed. `inApp` — the feed only. The feed always gets a copy, so this names the delivery that can be switched off, not a choice between two. Any other value is a parse error. |
+| `channelDigest.maxMessagesPerLane` | integer ≥ 1 | `500` | Messages read per lane per run. The oldest undigested ones are taken first; the rest are counted, reported in the digest's footnote, and read by the next run. A whole-string check — `500 messages` is a parse error, not `500`. |
+| `channelDigest.maxLanesPerRun` | integer ≥ 1 | `25` | Lanes one run may send to the model. A real ceiling: it binds before any money is spent. Lanes past it are deferred with their cursors untouched, so nothing is lost — one watched Slack channel with 80 threads in a day is otherwise 80 model calls and 80 direct messages from one nightly run. |
+| `channelDigest.costWarnUsdPerLane` | number > 0 | `0.5` | Spend **notice** threshold for one lane, in USD. Not a ceiling — a digest is a single model call that reports its cost after billing, so a lane that costs more is still delivered, with a footnote saying what it cost. |
+
+```yaml
+channelDigest.enabled: true
+channelDigest.cron: 0 8 * * *
+channelDigest.deliverTo: owner
+channelDigest.maxLanesPerRun: 25
+```
+
+Notes:
+
+- **Owner delivery needs `channel_filter.<platform>.ownerUserId`.** A platform with no owner id has nowhere to send its digests: each lane is counted undelivered, its cursor is left alone, and a `channel.digest_undelivered` event says why. The in-app copy still goes out.
+- **An owner id that names a watched chat is refused.** `ownerUserId` is a bare platform id, and on Telegram or WhatsApp nothing in it distinguishes a DM from a group — so a value copied from an observed chat would post the summary into a room it is about, in front of the people it is about. Any observed chat on that platform is refused, not just the lane being summarised.
+- **`deliverTo: inApp` under `ethos gateway` refuses to start.** Only `ethos boot` serves the web UI that the feed reaches, so under `ethos gateway` every digest would be generated and discarded. The error names both fixes.
+- **Delivery is what consumes a lane.** A cursor advances only on a confirmed delivery, so a failed send, a missing owner, a refused owner or a crash mid-run all leave the messages to be digested again. Duplicates are possible by design; a lost digest is not.
+- **The digest turn gets no tools, no memory, no session and no plugin hooks.** It is a bare model call, not an agent turn — the one place in the system where unfiltered third-party text meets a model. See [Security controls](../../security/controls.md).
+- **Two runs cannot overlap.** A run holds `~/.ethos/channel-digest.lock` for its whole duration; a second run skips and says so rather than waiting.
 
 ## logs.rotation {#logs-rotation}
 

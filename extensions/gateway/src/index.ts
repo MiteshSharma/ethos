@@ -1892,6 +1892,25 @@ export class Gateway {
     //    instead would produce a transcript of a group conversation with
     //    every non-owner's half missing — a digest of nothing.
     //
+    //  * AFTER the clarify correlator above, and that IS a hole in the
+    //    transcript — a known one, left open deliberately. A message in a
+    //    watched room that answers a clarify the agent is already blocked on
+    //    is consumed by `clarifyCorrelator` and returns before it reaches this
+    //    block, so it is never recorded. Reaching it needs a clarify pending
+    //    in this very chat (the correlator matches on the pending route's
+    //    chatId, and only on Telegram and WhatsApp — see
+    //    `registerGatewayClarifySurfaces` in apps/ethos/src/commands/gateway),
+    //    which observe mode normally makes impossible: the agent never speaks
+    //    in a watched room, so the realistic path is a room switched from
+    //    respond to observe with a clarify still outstanding.
+    //
+    //    Recording first and correlating second would close it, and was not
+    //    done: the message would then be kept for `retention.channelTranscript`
+    //    AND summarised into the owner's digest DM, so the fix retains more
+    //    third-party text and delivers it further than the hole does. Nothing
+    //    enforces the ordering beyond the two blocks' position in this
+    //    function; there is no test pinning it either way.
+    //
     // Returns unconditionally: with no store wired, a `recordOnly` message is
     // dropped, which is what happened before observe mode existed.
     if (message.recordOnly) {

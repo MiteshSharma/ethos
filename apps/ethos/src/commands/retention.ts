@@ -10,6 +10,31 @@ import { getSecretsResolver, getStorage } from '../wiring';
 // ethos retention reset <category|--all> [--personality <id>]
 // ---------------------------------------------------------------------------
 
+/**
+ * Categories `--personality` may NOT be used with, and why.
+ *
+ * `personalitiesConfig.<id>.retention` is written and displayed by this
+ * command and read by `ethos data` — and by NOTHING that prunes. No category
+ * honours a per-personality window today; the difference with
+ * `channelTranscript` is that there is nothing for one to honour. Observe-mode
+ * transcripts live in ONE `~/.ethos/channel-transcript.db` with no personality
+ * column, pruned from the `observability-prune` cron handler
+ * (`apps/ethos/src/wiring.ts`) against the global `retention.channelTranscript`
+ * alone, so a per-personality value here could never be more than a number in
+ * a file.
+ *
+ * Refused rather than accepted-and-ignored because this is third-party message
+ * text: an operator who sets a shorter window and is told it was set has been
+ * told the room is forgotten sooner than it is. The pre-existing gap for every
+ * OTHER category is not fixed here — see the message, which names it.
+ */
+const NO_PERSONALITY_SCOPE: Record<string, string> = {
+  channelTranscript:
+    'observe-mode transcripts are one database with no personality column — ' +
+    'the nightly prune reads the global retention.channelTranscript only. ' +
+    'Set it without --personality.',
+};
+
 const CATEGORY_LABELS: Record<string, string> = {
   messages: 'messages',
   traces: 'traces',
@@ -253,6 +278,15 @@ export async function runRetention(sub: string, argv: string[]): Promise<void> {
       console.error(
         `Unknown category: ${category}. Valid: ${Object.keys(CATEGORY_LABELS).join(', ')}`,
       );
+      process.exit(1);
+    }
+    // Refused BEFORE the duration is parsed and before anything is written:
+    // a value this command cannot honour must not reach config.yaml at all.
+    // See `NO_PERSONALITY_SCOPE`. `reset --personality` is deliberately still
+    // allowed, so a value an earlier build wrote can be cleared.
+    const noScope = flags.personality ? NO_PERSONALITY_SCOPE[category] : undefined;
+    if (noScope) {
+      console.error(`retention.${category} cannot be set per personality: ${noScope}`);
       process.exit(1);
     }
     // Validate duration

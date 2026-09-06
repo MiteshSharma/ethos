@@ -161,6 +161,24 @@ function stubLoop(text = 'three lines of summary') {
   };
 }
 
+/**
+ * The clock `makeDeps` runs at, and therefore the `attemptedAt` every lane
+ * that REACHED THE PROVIDER writes into the watermark file.
+ *
+ * The stamp is the lane cap's second ordering key (`Attempts` in
+ * ../channel-digest): a cursor advances only on a confirmed delivery, so a lane
+ * that fails every night stays at cursor 0 and, ordered by cursor alone, held
+ * the front of every run for ever. Its consequence here is that a lane that was
+ * attempted writes an entry whether or not it was consumed — with `id: 0` when
+ * it was not, which is what "nothing consumed" has always meant.
+ */
+const RUN_NOW = Date.UTC(2026, 8, 4, 12, 0);
+
+/** The watermark entry a lane attempted at `attemptedAt` with cursor `id` writes. */
+function entry(id: number, attemptedAt = RUN_NOW): { id: number; attemptedAt: number } {
+  return { id, attemptedAt };
+}
+
 function makeDeps(over: Partial<ChannelDigestDeps> = {}): ChannelDigestDeps & {
   sends: Array<{ botKey: string; chatId: string; text: string }>;
   notices: string[];
@@ -189,7 +207,7 @@ function makeDeps(over: Partial<ChannelDigestDeps> = {}): ChannelDigestDeps & {
         blocks.push(opts);
       },
     },
-    now: () => Date.UTC(2026, 8, 4, 12, 0),
+    now: () => RUN_NOW,
     ...over,
   };
 }
@@ -711,7 +729,12 @@ describe('an owner target that names the observed chat', () => {
       const watermarks = { storage, path: '/ethos/channel-digest-watermarks.json' };
 
       await runChannelDigest(twoRooms({ watermarks }));
-      expect(await storage.read(watermarks.path)).toBeNull();
+      // Both lanes were attempted, so both write an entry — but neither cursor
+      // moved, which is what "unconsumed" means. See `RUN_NOW`.
+      expect(JSON.parse((await storage.read(watermarks.path)) ?? '{}')).toEqual({
+        [A]: entry(0),
+        [B]: entry(0),
+      });
 
       const fixed = twoRooms({ watermarks, ownerChatId: () => 'owner-1' });
       const report = await runChannelDigest(fixed);
@@ -1006,7 +1029,9 @@ describe('the watermark', () => {
 
     const failed = run(storage, msgs, { sendVia: async () => ({ ok: false, error: 'no chat' }) });
     expect((await runChannelDigest(failed.deps)).undelivered).toBe(1);
-    expect(await storage.read(WATERMARK_PATH)).toBeNull();
+    // The lane was attempted, so it records the attempt — at cursor 0, which is
+    // the whole of what "did not advance" means. See `RUN_NOW`.
+    expect(JSON.parse((await storage.read(WATERMARK_PATH)) ?? '{}')).toEqual({ [LANE]: entry(0) });
 
     const retry = run(storage, msgs, { now: () => Date.UTC(2026, 8, 4, 13, 0) });
     const report = await runChannelDigest(retry.deps);
@@ -1021,7 +1046,7 @@ describe('the watermark', () => {
 
     await runChannelDigest(refused.deps);
 
-    expect(await storage.read(WATERMARK_PATH)).toBeNull();
+    expect(JSON.parse((await storage.read(WATERMARK_PATH)) ?? '{}')).toEqual({ [LANE]: entry(0) });
   });
 
   // ---- late arrivals ------------------------------------------------------
@@ -1125,9 +1150,11 @@ describe('the watermark', () => {
 
     const raw = await storage.read(WATERMARK_PATH);
     const marks: unknown = JSON.parse(raw ?? '{}');
-    // The consumed row's ingestion id — not the run's `now`, not a timestamp
-    // of any kind, and not the row that arrived behind it.
-    expect(marks).toEqual({ [LANE]: { id: 1 } });
+    // `id` is the consumed row's ingestion id — not the run's `now`, not a
+    // timestamp of any kind, and not the row that arrived behind it. The run
+    // clock appears only as `attemptedAt`, which is an ordering key for the
+    // lane cap and is never read as a cursor. See `RUN_NOW`.
+    expect(marks).toEqual({ [LANE]: entry(1) });
 
     // ...so the next run digests exactly the one it did not see.
     const next = run(storage, msgs, { now: () => Date.UTC(2026, 8, 4, 13, 0) });
@@ -1245,7 +1272,7 @@ describe('the watermark', () => {
       expect(deps.calls[0]?.prompt ?? '').toContain('not lost');
       // ...and the bad value is replaced by a real one.
       expect(JSON.parse((await storage.read(WATERMARK_PATH)) ?? '{}')).toEqual({
-        [LANE]: { id: 1 },
+        [LANE]: entry(1),
       });
     });
 
@@ -1295,7 +1322,9 @@ describe('the watermark', () => {
     expect((await runChannelDigest(deps.deps)).summarised).toBe(1);
 
     expect(JSON.parse((await storage.read(WATERMARK_PATH)) ?? '{}')).toEqual({
-      [LANE]: { id: 1 },
+      [LANE]: entry(1),
+      // The other deployment's lane is preserved verbatim — cursor AND its
+      // (absent) attempt stamp. Nothing here attempted it, so nothing stamps it.
       'telegram:bot-z:-999': { id: 42 },
     });
   });
@@ -1320,7 +1349,7 @@ describe('the watermark', () => {
       code: 'channel.digest_undelivered',
       cause: 'no in-app sink took it',
     });
-    expect(await storage.read(WATERMARK_PATH)).toBeNull();
+    expect(JSON.parse((await storage.read(WATERMARK_PATH)) ?? '{}')).toEqual({ [LANE]: entry(0) });
 
     // ...so the next run digests it again rather than losing it.
     const retry = run(storage, [message({ sentAt: OLD })], {
@@ -1661,7 +1690,7 @@ describe('a lane that throws', () => {
 
     // Lane a was summarised, delivered AND consumed — the failure after it did
     // not take its cursor down with it.
-    expect((await marks(storage))['telegram:bot-a:room-a']).toEqual({ id: 1 });
+    expect((await marks(storage))['telegram:bot-a:room-a']).toEqual(entry(1));
     expect(deps.sends.map((s) => s.chatId)).toEqual(['owner-1', 'owner-1']);
   });
 
@@ -1674,7 +1703,7 @@ describe('a lane that throws', () => {
     expect(prompts).toHaveLength(3);
     expect(prompts[2]).toContain('news from room-c');
     expect(report).toMatchObject({ summarised: 2, deliveredToOwner: 2, failed: 1 });
-    expect((await marks(storage))['telegram:bot-a:room-c']).toEqual({ id: 1 });
+    expect((await marks(storage))['telegram:bot-a:room-c']).toEqual(entry(1));
   });
 
   it('leaves its own lane unconsumed', async () => {
@@ -1683,7 +1712,8 @@ describe('a lane that throws', () => {
 
     await runChannelDigest(deps);
 
-    expect((await marks(storage))['telegram:bot-a:room-b']).toBeUndefined();
+    // Attempted, so it records the attempt; cursor 0, so nothing was consumed.
+    expect((await marks(storage))['telegram:bot-a:room-b']).toEqual(entry(0));
   });
 
   it('is reported rather than swallowed', async () => {
@@ -1731,7 +1761,9 @@ describe('a lane that throws', () => {
     const roomC = second.prompts.find((p) => p.includes('Chat: telegram room-c')) ?? '';
     expect(roomC).toContain('the pour finished');
     expect(roomC).not.toContain('news from room-c');
-    expect((await marks(storage))['telegram:bot-a:room-c']).toEqual({ id: 2 });
+    expect((await marks(storage))['telegram:bot-a:room-c']).toEqual(
+      entry(2, Date.UTC(2026, 8, 4, 13, 0)),
+    );
   });
 
   it('does not let a delivery failure elsewhere advance a watermark either', async () => {
@@ -1747,9 +1779,10 @@ describe('a lane that throws', () => {
 
     expect(report).toMatchObject({ deliveredToOwner: 1, undelivered: 1, failed: 1 });
     const written = await marks(storage);
-    expect(written['telegram:bot-a:room-a']).toEqual({ id: 1 });
-    expect(written['telegram:bot-a:room-b']).toBeUndefined();
-    expect(written['telegram:bot-a:room-c']).toBeUndefined();
+    expect(written['telegram:bot-a:room-a']).toEqual(entry(1));
+    // Both were attempted and neither was consumed — cursor 0, not absent.
+    expect(written['telegram:bot-a:room-b']).toEqual(entry(0));
+    expect(written['telegram:bot-a:room-c']).toEqual(entry(0));
   });
 });
 
@@ -1882,5 +1915,90 @@ describe('the lane cap', () => {
     expect(report.deferred).toBe(0);
     expect(deps.blocks).toHaveLength(0);
     expect(summarizeChannelDigest(report)).not.toContain('deferred');
+  });
+
+  // ---- the cap and a lane that never advances -----------------------------
+
+  // THE STARVATION QUEUE THE CAP REINTRODUCED. `deferred` promised the lane it
+  // skipped was at the front of the next run, and with the cap ordered by cursor
+  // alone that promise was false for the case that matters: a cursor advances
+  // only on a CONFIRMED delivery, so a lane that fails the same way every night
+  // sits at cursor 0 for ever, sorts to the FRONT of every run, and spends the
+  // cap it can never use. Enough of them — a platform with no
+  // `channel_filter.<platform>.ownerUserId`, a provider that throws — and the
+  // healthy lanes behind them are deferred permanently, with `deferred` counting
+  // the same rooms every night and nothing ever clearing it.
+  //
+  // Both tests below run the cap at 1 over three rooms, one of which never
+  // succeeds. The charge is still taken BEFORE the call, so a failing lane
+  // still cannot buy a run more than one; what changed is that spending the
+  // charge is what the ordering sees. See `Attempts` in ../channel-digest.
+  const RUN_CLOCKS = [
+    Date.UTC(2026, 8, 4, 12, 0),
+    Date.UTC(2026, 8, 5, 12, 0),
+    Date.UTC(2026, 8, 6, 12, 0),
+  ];
+
+  /**
+   * Three rooms, one of which (`ROOMS[0]`) never succeeds; run once per entry
+   * in `RUN_CLOCKS` at cap 1, against one shared watermark file. Returns every
+   * prompt the provider was handed across all three runs — `breaks` may append
+   * to it directly when it supplies its own loop.
+   */
+  async function threeNightsAtCapOne(
+    breaks: (chatId: string, prompts: string[]) => Partial<ChannelDigestDeps>,
+  ): Promise<string[]> {
+    const storage = await house();
+    const watermarks = { storage, path: WATERMARK_PATH };
+    const prompts: string[] = [];
+    for (const clock of RUN_CLOCKS) {
+      const { deps, calls } = threeRooms(1, {
+        watermarks,
+        now: () => clock,
+        ...breaks(ROOMS[0] ?? '', prompts),
+      });
+      await runChannelDigest(deps, { maxLanesPerRun: 1 });
+      prompts.push(...calls.map((c) => c.prompt));
+    }
+    return prompts;
+  }
+
+  it('a permanently failing lane does not monopolise the cap', async () => {
+    // `-100` throws the way a provider does, on every run, for ever.
+    const prompts = await threeNightsAtCapOne((chatId, seen) => {
+      const completeDirect = vi.fn(async function* (messages: Array<{ content: string }>) {
+        const prompt = messages[0]?.content ?? '';
+        seen.push(prompt);
+        if (prompt.includes(`Chat: telegram ${chatId}`)) throw new Error('provider exploded');
+        yield { type: 'text_delta' as const, text: 'three lines of summary' };
+        yield { type: 'done' as const, finishReason: 'end_turn' as const };
+      });
+      const loop = {
+        run: vi.fn(),
+        completeDirect,
+        getAvailableTools: () => [],
+      } as unknown as AgentLoop;
+      return { bots: [{ botKey: 'bot-a', loop }] };
+    });
+
+    // The rooms behind it were digested. Ordered by cursor alone, `-100` is the
+    // only room that is ever summarised and these two are silent for ever.
+    expect(prompts.filter((p) => p.includes('room -200 said'))).toHaveLength(1);
+    expect(prompts.filter((p) => p.includes('room -300 said'))).toHaveLength(1);
+    // ...and the failing lane spent the cap once, not once a night.
+    expect(prompts.filter((p) => p.includes('room -100 said'))).toHaveLength(1);
+  });
+
+  it('a lane the owner can never receive does not monopolise the cap either', async () => {
+    // The headline case: one platform has no owner to deliver to, so every lane
+    // on it reports `undelivered` with its cursor untouched, every run.
+    const prompts = await threeNightsAtCapOne((chatId) => ({
+      sendVia: async (_botKey: string, _chatId: string, text: string) =>
+        text.includes(`telegram ${chatId}`) ? { ok: false, error: 'no owner' } : { ok: true },
+    }));
+
+    expect(prompts.filter((p) => p.includes('room -200 said'))).toHaveLength(1);
+    expect(prompts.filter((p) => p.includes('room -300 said'))).toHaveLength(1);
+    expect(prompts.filter((p) => p.includes('room -100 said'))).toHaveLength(1);
   });
 });
