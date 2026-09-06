@@ -4071,6 +4071,7 @@ export function channelDigestSystemTask(
     const report = await gateway.runChannelDigest({
       ...(cd.deliverTo ? { deliverTo: cd.deliverTo } : {}),
       ...(cd.maxMessagesPerLane !== undefined ? { maxMessagesPerLane: cd.maxMessagesPerLane } : {}),
+      ...(cd.maxLanesPerRun !== undefined ? { maxLanesPerRun: cd.maxLanesPerRun } : {}),
       ...(cd.costWarnUsdPerLane !== undefined ? { costWarnUsdPerLane: cd.costWarnUsdPerLane } : {}),
     });
     return { output: summarizeChannelDigest(report) };

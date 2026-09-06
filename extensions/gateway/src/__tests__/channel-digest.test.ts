@@ -37,6 +37,20 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createTestSafety } from '../../../../packages/core/src/__tests__/helpers/test-safety';
 import type { ChannelDigestBot, ChannelDigestDeps } from '../channel-digest';
 import { runChannelDigest, summarizeChannelDigest } from '../channel-digest';
+import { currentBootId } from '../channel-digest-lock';
+
+/**
+ * A boot identity of the same SHAPE this machine writes, naming a different
+ * boot. Built from the real one because the shape is platform-specific, and a
+ * mismatched shape is deliberately read as "cannot prove a different boot".
+ * `null` where the platform has no boot identity at all — the lock then refuses
+ * rather than guesses, which is what `skipIf` below acknowledges.
+ */
+function foreignBootId(): string | null {
+  const current = currentBootId();
+  if (current === null) return null;
+  return 'boot-id:00000000-0000-0000-0000-000000000000';
+}
 
 // ---------------------------------------------------------------------------
 // Fakes
@@ -641,6 +655,69 @@ describe('an owner target that names the observed chat', () => {
     expect(deps.blocks[0]?.cause).toContain('observed chat itself');
     // The digest is refused, not lost — the feed copy still went out.
     expect(deps.notices).toHaveLength(1);
+  });
+
+  // THE LEAK. The guard used to be `ownerChatId === lane.chatId`, which asks
+  // only whether the owner names the room being summarised right now. With two
+  // rooms watched and the owner mistyped as B's chat id, lane B was correctly
+  // refused and lane A's summary was DELIVERED INTO B — counted as delivered to
+  // the owner. B's members got a conversation from a room they may have no part
+  // in, which is the exact failure the guard exists to prevent, one room over.
+  describe('when the owner names a different watched room', () => {
+    const A = 'telegram:bot-a:-100';
+    const B = 'telegram:bot-a:-200';
+
+    function twoRooms(over: Partial<ChannelDigestDeps> = {}) {
+      const { loop } = stubLoop();
+      return makeDeps({
+        transcript: makeStore([lane(), lane({ laneKey: B, chatId: '-200' })], {
+          [A]: [message({ text: 'the crane is late' })],
+          [B]: [message({ laneKey: B })],
+        }),
+        bots: [{ botKey: 'bot-a', loop }],
+        // Room B's chat id, pasted into `channel_filter.telegram.ownerUserId`.
+        ownerChatId: () => '-200',
+        ...over,
+      });
+    }
+
+    it('does not post room A’s digest into room B', async () => {
+      const deps = twoRooms();
+
+      const report = await runChannelDigest(deps);
+
+      expect(deps.sends).toHaveLength(0);
+      expect(report).toMatchObject({ summarised: 2, deliveredToOwner: 0, undelivered: 2 });
+    });
+
+    it('names the refusal, and says the owner is not this lane’s own room', async () => {
+      const deps = twoRooms();
+
+      await runChannelDigest(deps);
+
+      const forA = deps.blocks.find((b) => b.details?.laneKey === A);
+      expect(forA?.code).toBe('channel.digest_owner_is_observed_chat');
+      expect(forA?.details?.ownerIsThisLane).toBe(false);
+      // ...and the lane the owner DOES name is refused on the same rule.
+      const forB = deps.blocks.find((b) => b.details?.laneKey === B);
+      expect(forB?.details?.ownerIsThisLane).toBe(true);
+      // Both digests are refused, not lost — the feed copies still went out.
+      expect(deps.notices).toHaveLength(2);
+    });
+
+    it('leaves room A unconsumed, so it is re-digested once the owner is fixed', async () => {
+      const storage = new InMemoryStorage();
+      await storage.mkdir('/ethos');
+      const watermarks = { storage, path: '/ethos/channel-digest-watermarks.json' };
+
+      await runChannelDigest(twoRooms({ watermarks }));
+      expect(await storage.read(watermarks.path)).toBeNull();
+
+      const fixed = twoRooms({ watermarks, ownerChatId: () => 'owner-1' });
+      const report = await runChannelDigest(fixed);
+      expect(report.deliveredToOwner).toBe(2);
+      expect(fixed.sends.map((send) => send.chatId)).toEqual(['owner-1', 'owner-1']);
+    });
   });
 
   it('still delivers when the owner is somewhere else', async () => {
@@ -1427,6 +1504,66 @@ describe('the run lock', () => {
     expect(await readFile(lockPath(), 'utf-8')).toContain('"token":"peer"');
   });
 
+  // A pid probe answers "is SOME process wearing this number", not "is the
+  // holder alive". After a reboot the OS hands the low numbers out again, so a
+  // lock whose holder died in the crash reads as held for ever and the digest
+  // goes silent permanently — the wedge this module said it had ruled out while
+  // implementing only half of what rules it out. The body says WHICH BOOT wrote
+  // it, so the pid it names cannot be the holder, whatever `kill(pid, 0)` says.
+  it.skipIf(foreignBootId() === null)(
+    'reclaims a lock whose pid was recycled by a reboot',
+    async () => {
+      await writeFile(
+        lockPath(),
+        JSON.stringify({ token: 'recycled', pid: process.pid, boot: foreignBootId() }),
+      );
+      const { deps } = run();
+
+      const report = await runChannelDigest(deps);
+
+      expect(report.skippedReason).toBeUndefined();
+      expect(report).toMatchObject({ summarised: 1, deliveredToOwner: 1 });
+    },
+  );
+
+  // The other direction, and the one that must not regress: a holder from THIS
+  // boot is never taken over, because doing so puts two writers on the cursor
+  // file. Boot identity narrows the wedge; it does not license a preemption.
+  it('still refuses a live holder from this boot', async () => {
+    await writeFile(
+      lockPath(),
+      JSON.stringify({ token: 'peer', pid: process.pid, boot: currentBootId() }),
+    );
+    const { deps } = run();
+
+    expect((await runChannelDigest(deps)).skippedReason).toContain('is held');
+    expect(await readFile(lockPath(), 'utf-8')).toContain('"token":"peer"');
+  });
+
+  // A lock left by the release before this one carries no `boot`, and unknown
+  // means "cannot prove a different boot" — so it is judged by its pid alone,
+  // exactly as it was. Degradation is toward refusal, never toward a takeover.
+  it('judges a lock with no recorded boot by its pid, as before', async () => {
+    await writeFile(lockPath(), JSON.stringify({ token: 'old-release', pid: process.pid }));
+    const { deps } = run();
+
+    expect((await runChannelDigest(deps)).skippedReason).toContain('is held');
+  });
+
+  it('records the boot its own pid belongs to', async () => {
+    // The successor's half of the bargain: a lock that recorded nothing could
+    // never be judged by identity, so the wedge would survive one reboot later.
+    const { deps } = run({
+      sendVia: async () => {
+        const body: unknown = JSON.parse(await readFile(lockPath(), 'utf-8'));
+        expect(body).toMatchObject({ pid: process.pid, boot: currentBootId() });
+        return { ok: true };
+      },
+    });
+
+    expect((await runChannelDigest(deps)).deliveredToOwner).toBe(1);
+  });
+
   it('takes no lock, and needs none, when none is wired', async () => {
     const { deps, calls } = run({ lock: undefined });
     const report = await runChannelDigest(deps);
@@ -1613,5 +1750,137 @@ describe('a lane that throws', () => {
     expect(written['telegram:bot-a:room-a']).toEqual({ id: 1 });
     expect(written['telegram:bot-a:room-b']).toBeUndefined();
     expect(written['telegram:bot-a:room-c']).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The lane cap
+// ---------------------------------------------------------------------------
+
+/**
+ * A lane is a chat AND a thread — `transcriptLaneKey` carries `threadId` — so
+ * one watched Slack channel with eighty threads in a day was eighty provider
+ * calls and eighty direct messages out of a single nightly run. Neither bound
+ * that existed could see that number: `maxMessagesPerLane` bounds ONE call's
+ * input, and `costWarnUsdPerLane` is post-hoc, per lane and blind to the total.
+ *
+ * The cap DEFERS. Everything below is about that word: what is left is counted,
+ * its cursor is untouched, and it is first in the queue next time.
+ */
+describe('the lane cap', () => {
+  const ROOMS = ['-100', '-200', '-300'];
+  const laneKeyOf = (chatId: string): string => `telegram:bot-a:${chatId}`;
+  const WATERMARK_PATH = '/ethos/channel-digest-watermarks.json';
+
+  /** Three watched rooms, each with `perRoom` messages, in `ROOMS` order. */
+  function threeRooms(perRoom = 1, over: Partial<ChannelDigestDeps> = {}) {
+    const { loop, calls } = stubLoop();
+    const byLane: Record<string, ChannelTranscriptMessage[]> = {};
+    for (const chatId of ROOMS) {
+      byLane[laneKeyOf(chatId)] = Array.from({ length: perRoom }, (_, i) =>
+        message({ laneKey: laneKeyOf(chatId), text: `room ${chatId} said ${i}` }),
+      );
+    }
+    const deps = makeDeps({
+      transcript: makeStore(
+        ROOMS.map((chatId) => lane({ laneKey: laneKeyOf(chatId), chatId })),
+        byLane,
+      ),
+      bots: [{ botKey: 'bot-a', loop }],
+      ...over,
+    });
+    return { deps, calls };
+  }
+
+  async function house(): Promise<InMemoryStorage> {
+    const storage = new InMemoryStorage();
+    await storage.mkdir('/ethos');
+    return storage;
+  }
+
+  it('stops paying once the cap is reached', async () => {
+    const { deps, calls } = threeRooms();
+
+    const report = await runChannelDigest(deps, { maxLanesPerRun: 2 });
+
+    // Two provider calls and two direct messages, not three.
+    expect(calls).toHaveLength(2);
+    expect(deps.sends).toHaveLength(2);
+    expect(report).toMatchObject({ summarised: 2, deliveredToOwner: 2, deferred: 1 });
+  });
+
+  it('reports what it deferred rather than skipping it silently', async () => {
+    const { deps } = threeRooms();
+
+    const report = await runChannelDigest(deps, { maxLanesPerRun: 2 });
+
+    const block = deps.blocks.find((b) => b.code === 'channel.digest_lane_cap');
+    expect(block?.cause).toContain('cap of 2 lane(s) per run');
+    expect(block?.details?.lanes).toEqual([laneKeyOf('-300')]);
+    // ...and in the line the cron run-output file prints, which is the only
+    // place a scheduled digest is reported at all.
+    expect(summarizeChannelDigest(report)).toContain('1 deferred to the next run by the lane cap');
+  });
+
+  it('does not consume the lane it deferred', async () => {
+    const storage = await house();
+    const { deps } = threeRooms(1, { watermarks: { storage, path: WATERMARK_PATH } });
+
+    await runChannelDigest(deps, { maxLanesPerRun: 2 });
+
+    const written: unknown = JSON.parse((await storage.read(WATERMARK_PATH)) ?? '{}');
+    expect(Object.keys(written as object).sort()).toEqual([laneKeyOf('-100'), laneKeyOf('-200')]);
+  });
+
+  // Without an order a cap is a starvation bug: the same head of `listLanes`
+  // would win every night and the tail would never be digested at all, losing
+  // its messages to retention rather than deferring them. Lanes are ordered by
+  // cursor — the store's GLOBAL ingestion sequence — so the least-consumed lane
+  // goes first, and a lane that just ran sorts to the back.
+  it('digests the lane it deferred first on the next run', async () => {
+    const storage = await house();
+    const watermarks = { storage, path: WATERMARK_PATH };
+
+    const first = threeRooms(1, { watermarks });
+    expect((await runChannelDigest(first.deps, { maxLanesPerRun: 2 })).deferred).toBe(1);
+
+    // Every room has something new, so nothing but the ordering decides this.
+    const second = threeRooms(2, { watermarks });
+    await runChannelDigest(second.deps, { maxLanesPerRun: 1 });
+
+    expect(second.calls).toHaveLength(1);
+    expect(second.calls[0]?.prompt).toContain('room -300 said');
+  });
+
+  it('does not charge the cap for a lane with nothing new', async () => {
+    const { loop, calls } = stubLoop();
+    const deps = makeDeps({
+      transcript: makeStore(
+        ROOMS.map((chatId) => lane({ laneKey: laneKeyOf(chatId), chatId })),
+        {
+          [laneKeyOf('-100')]: [],
+          [laneKeyOf('-200')]: [message({ laneKey: laneKeyOf('-200') })],
+          [laneKeyOf('-300')]: [message({ laneKey: laneKeyOf('-300') })],
+        },
+      ),
+      bots: [{ botKey: 'bot-a', loop }],
+    });
+
+    const report = await runChannelDigest(deps, { maxLanesPerRun: 2 });
+
+    // The empty lane cost one read and no money, so both rooms that had
+    // something to say still fit under a cap of two.
+    expect(calls).toHaveLength(2);
+    expect(report).toMatchObject({ summarised: 2, empty: 1, deferred: 0 });
+  });
+
+  it('says nothing about deferral when every lane fit', async () => {
+    const { deps } = threeRooms();
+
+    const report = await runChannelDigest(deps, { maxLanesPerRun: 5 });
+
+    expect(report.deferred).toBe(0);
+    expect(deps.blocks).toHaveLength(0);
+    expect(summarizeChannelDigest(report)).not.toContain('deferred');
   });
 });

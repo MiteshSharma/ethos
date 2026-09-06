@@ -31,6 +31,15 @@
 // automatic takeover; everywhere else this returns null and the answer is
 // refusal. Degradation is always toward refusal, on every platform.
 //
+// A THIRD sentinel asks the same question from below the layer model:
+// `extensions/gateway/src/channel-digest-lock.ts`, the ambient channel digest's
+// run lock. `extensions/` cannot import `packages/wiring` (ARCHITECTURE.md §II),
+// so `currentBootId` and `classifyHolder` are COPIED there — the same
+// duplication, for the same reason, as the symlink guard carried twice by
+// `packages/core/src/scoped/scoped-fs.ts` and
+// `packages/storage-fs/src/scoped-storage.ts`. THE TWO MUST CHANGE TOGETHER;
+// that file carries the pointer back to this one.
+//
 // Raw `node:fs` here is the documented Storage carve-out (AGENTS.md): the Linux
 // boot id is a system path under `/proc`, not `~/.ethos/` state.
 

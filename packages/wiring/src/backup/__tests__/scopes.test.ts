@@ -159,6 +159,25 @@ describe('backup scopes: classification', () => {
     }
   });
 
+  // THE PAIR THAT MUST TRAVEL TOGETHER. `channel-transcript.db` is `state`, and
+  // its cursor file matched no rule at all — so a restore brought back thirty
+  // days of watched-room messages with nothing recording which of them had
+  // already been summarised. Every lane then cold-started and re-digested the
+  // whole retention window into the owner's direct messages, one summary per
+  // lane. This test IS the gate: a rule removed or renamed fails here, and the
+  // `*.db` drift gate above would not notice, because this is not a database.
+  it('archives the channel digest cursors with the transcript they index', () => {
+    expect(classifyPath('channel-transcript.db').scope).toBe('state');
+    expect(classifyPath('channel-digest-watermarks.json').scope).toBe('state');
+  });
+
+  // Its lock is the opposite case, and the `*.lock` exclusion already gets it
+  // right: a sentinel naming a pid on the machine that wrote it is meaningless
+  // anywhere else, and restoring one would wedge the digest on arrival.
+  it('does not archive the channel digest run lock', () => {
+    expect(classifyPath('channel-digest.lock').scope).toBeNull();
+  });
+
   it('puts observability.db in telemetry, which the default scopes leave out', () => {
     expect(classifyPath('observability.db').scope).toBe('telemetry');
     expect(DEFAULT_SCOPES).toEqual(['identity', 'state']);
@@ -261,6 +280,8 @@ describe('backup scopes: enumeration', () => {
     write('personalities/bob/mcp/linear/refresh_token', 'lin_secret');
     write('sessions.db');
     write('sessions.db-wal');
+    write('channel-digest-watermarks.json', '{}');
+    write('channel-digest.lock', '{"pid":1}');
     write('observability.db');
     write('delivery-ledger.db');
     write('secrets/ANTHROPIC_API_KEY', 'sk-real');
@@ -282,6 +303,7 @@ describe('backup scopes: enumeration', () => {
     const { entries } = enumerateBackupEntries(dir, ['identity', 'state']);
     expect(entries.map((e) => e.path)).toEqual([
       'MEMORY.md',
+      'channel-digest-watermarks.json',
       'config.yaml',
       'mcp.json',
       'personalities/alice/SOUL.md',

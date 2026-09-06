@@ -38,6 +38,7 @@ describe('channelDigest config', () => {
       'channelDigest.cron: 30 6 * * *',
       'channelDigest.deliverTo: inApp',
       'channelDigest.maxMessagesPerLane: 250',
+      'channelDigest.maxLanesPerRun: 40',
       'channelDigest.costWarnUsdPerLane: 1.25',
     ]);
     expect(cfg.channelDigest).toEqual({
@@ -45,8 +46,16 @@ describe('channelDigest config', () => {
       cron: '30 6 * * *',
       deliverTo: 'inApp',
       maxMessagesPerLane: 250,
+      maxLanesPerRun: 40,
       costWarnUsdPerLane: 1.25,
     });
+  });
+
+  it('rejects a lane cap that is not a positive integer', async () => {
+    await expect(load(['channelDigest.maxLanesPerRun: 0'])).rejects.toThrow(/positive integer/);
+    await expect(load(['channelDigest.maxLanesPerRun: many'])).rejects.toThrow(
+      /channelDigest\.maxLanesPerRun "many"/,
+    );
   });
 
   it('keeps a cron expression intact — spaces and asterisks and all', async () => {
@@ -125,6 +134,7 @@ describe('channelDigest config', () => {
       'channelDigest.cron: 0 8 * * *',
       'channelDigest.deliverTo: owner',
       'channelDigest.maxMessagesPerLane: 500',
+      'channelDigest.maxLanesPerRun: 25',
       'channelDigest.costWarnUsdPerLane: 0.5',
     ]);
     const storage = new InMemoryStorage();
@@ -134,6 +144,7 @@ describe('channelDigest config', () => {
     // Named explicitly: `toEqual` against the parse output alone would still
     // hold if BOTH sides had silently dropped the threshold.
     expect(reloaded?.channelDigest?.costWarnUsdPerLane).toBe(0.5);
+    expect(reloaded?.channelDigest?.maxLanesPerRun).toBe(25);
   });
 });
 

@@ -30,6 +30,18 @@ import { tryAcquireChannelDigestLock } from './channel-digest-lock';
 /** Last-ingested-N messages read per lane. Earlier ones are counted, never summarised. */
 const DEFAULT_MAX_MESSAGES_PER_LANE = 500;
 /**
+ * Default for `maxLanesPerRun` — how many lanes one run may PAY for. See the
+ * setting's doc for the shape of the problem and for why deferral is not loss.
+ *
+ * 25 is chosen against the owner's inbox rather than against a bill. A run's
+ * cost is `lanes x maxMessagesPerLane`, and the message half was already
+ * bounded; this is the factor that was missing, so the two together bound a
+ * run before the fact the way `maxMessagesPerLane` alone never could. The
+ * delivery half is the one an operator feels: 25 direct messages from one
+ * nightly job is already a lot, and the failure that prompted this was 80.
+ */
+const DEFAULT_MAX_LANES_PER_RUN = 25;
+/**
  * Default for `costWarnUsdPerLane` — the spend a lane's summary is REPORTED
  * for exceeding, in USD. Not a ceiling; see the setting's doc for why.
  */
@@ -58,6 +70,33 @@ export interface ChannelDigestSettings {
    */
   deliverTo?: 'owner' | 'inApp';
   maxMessagesPerLane?: number;
+  /**
+   * How many lanes one run may summarise. A CEILING, unlike
+   * `costWarnUsdPerLane`, because it binds before any of the money is spent.
+   *
+   * A lane is not a room. `transcriptLaneKey` carries the thread id, so every
+   * thread in a watched Slack channel is its own lane — a channel with 80
+   * threads in a day is 80 provider calls and 80 direct messages out of one
+   * nightly run, and neither `maxMessagesPerLane` (which bounds ONE call's
+   * input) nor `costWarnUsdPerLane` (post-hoc, per lane, and blind to the
+   * total) can see that number, let alone hold it.
+   *
+   * Only lanes that actually reach the provider count against it: a lane with
+   * nothing new past its cursor costs one indexed read, produces no digest,
+   * and is not charged to the cap.
+   *
+   * WHAT A CAPPED RUN COSTS. Nothing, in messages. A lane the cap does not
+   * reach has its cursor left exactly where it was, so the next run reads the
+   * same rows — the same at-least-once property a failed delivery relies on.
+   * It is reported, never silently dropped: see `ChannelDigestReport.deferred`
+   * and the `channel.digest_lane_cap` event.
+   *
+   * WHY IT DOES NOT STARVE. Lanes are attempted in ascending cursor order and
+   * the cursor is the store's GLOBAL ingestion sequence, so the lane furthest
+   * behind goes first and a lane just digested sorts to the back. A deferred
+   * lane is therefore at the front of the next run. See `digestWatchedLanes`.
+   */
+  maxLanesPerRun?: number;
   /**
    * Spend NOTICE threshold for one lane's summary, in USD. A POST-HOC
    * DETECTOR, not a cap, and named for what it can actually do.
@@ -427,6 +466,18 @@ export interface ChannelDigestReport {
    */
   failed: number;
   /**
+   * Lanes with undigested messages that `maxLanesPerRun` left for the next
+   * run. Not a loss and not a failure: their cursors are untouched, so the
+   * rows are read again — and because lanes are ordered by cursor, a lane
+   * counted here is at the FRONT of the next run's queue.
+   *
+   * Counted by probing, one row per remaining lane, rather than by taking the
+   * length of the tail: most of that tail is lanes with nothing new, and a
+   * nightly `60 deferred` that is really `0 deferred` is a number an operator
+   * learns to ignore.
+   */
+  deferred: number;
+  /**
    * Set when the run did NO work because another digest run held the lock.
    * Every other count is then zero and means nothing — this field is what
    * distinguishes "there was nothing to say" from "somebody else is saying it".
@@ -445,10 +496,14 @@ export function summarizeChannelDigest(report: ChannelDigestReport): string {
   // describe work the run DID; this one describes work it could not do, and a
   // `0 failed` on every healthy run is how an eye learns to skip the field.
   const failed = report.failed > 0 ? `, ${report.failed} failed` : '';
+  // Same rule as `failed`: appended only when the run actually deferred
+  // something, so a healthy run does not train the eye past the field.
+  const deferred =
+    report.deferred > 0 ? `, ${report.deferred} deferred to the next run by the lane cap` : '';
   return (
     `Channel digest: ${report.summarised} lane(s) summarised, ${report.empty} with nothing ` +
     `to report, ${report.deliveredToOwner} delivered to the owner, ` +
-    `${report.undelivered} undelivered${failed}`
+    `${report.undelivered} undelivered${failed}${deferred}`
   );
 }
 
@@ -494,7 +549,7 @@ export function summarizeChannelDigest(report: ChannelDigestReport): string {
  * instead of preventing it. A busy lane now falls behind, and catches up.
  *
  * Delivery still gates the advance:
- *   * a failed owner DM, a missing owner, an owner that names the observed
+ *   * a failed owner DM, a missing owner, an owner that names ANY observed
  *     chat, an in-app feed that did not confirm, a crash mid-run, or a process
  *     killed before the write all leave the cursor where it was, and the next
  *     run re-digests the same messages;
@@ -507,6 +562,15 @@ export function summarizeChannelDigest(report: ChannelDigestReport): string {
  * The alternative — advancing before delivery — would be at-most-once and
  * would silently drop a room's day on one failed send. A duplicate digest is
  * an annoyance; a lost one is the failure this exists to prevent.
+ *
+ * A run is also bounded in LANES, not only in messages per lane:
+ * `maxLanesPerRun` caps how many of them may reach the provider, because
+ * `transcriptLaneKey` carries a thread id and one watched Slack channel can be
+ * eighty lanes in a day. Lanes are attempted in ascending cursor order — the
+ * most-behind first — so the cap defers rather than starves, and what it
+ * deferred is counted in `ChannelDigestReport.deferred` and in a
+ * `channel.digest_lane_cap` event. A deferred lane's cursor is untouched, so
+ * the next run reads exactly the rows this one did not.
  *
  * Without `deps.watermarks` there is no cursor at all and every run re-digests
  * whatever retention still holds. A lane digested for the FIRST time is the
@@ -534,6 +598,7 @@ export async function runChannelDigest(
     deliveredToOwner: 0,
     undelivered: 0,
     failed: 0,
+    deferred: 0,
   };
   // Nothing to read, so nothing to serialise against — do not churn the lock.
   if (!deps.transcript) return idle;
@@ -571,6 +636,7 @@ async function digestWatchedLanes(
     deliveredToOwner: 0,
     undelivered: 0,
     failed: 0,
+    deferred: 0,
   };
   if (!deps.transcript) return report;
 
@@ -595,9 +661,6 @@ async function digestWatchedLanes(
     return report;
   }
 
-  // Only lanes belonging to a bot THIS process serves. A shared transcript file
-  // can hold another deployment's rooms, and summarising one would deliver it
-  // through the wrong bot to the wrong owner.
   const byBotKey = new Map(deps.bots.map((b) => [b.botKey, b]));
   // `since: now` because the digest never reads `ChannelLaneSummary.count` —
   // the window only bounds that field, and the lane set is the same whatever
@@ -605,7 +668,41 @@ async function digestWatchedLanes(
   // a number nobody looks at.
   const lanes = await deps.transcript.listLanes({ since: now });
 
-  for (const lane of lanes) {
+  // platform -> every chat id this store holds a lane for. Built from ALL
+  // lanes, including ones no bot here serves, and consumed only by the
+  // owner-target refusal below — which says what this set does and does not
+  // prove. Built once: the refusal is per lane, the answer is not.
+  const observedChatIds = new Map<string, Set<string>>();
+  for (const observed of lanes) {
+    const onPlatform = observedChatIds.get(observed.platform);
+    if (onPlatform) onPlatform.add(observed.chatId);
+    else observedChatIds.set(observed.platform, new Set([observed.chatId]));
+  }
+
+  // Only lanes belonging to a bot THIS process serves. A shared transcript file
+  // can hold another deployment's rooms, and summarising one would deliver it
+  // through the wrong bot to the wrong owner.
+  //
+  // ORDERED BY CURSOR, ASCENDING, and that ordering is what makes the cap below
+  // safe. A watermark is the store's GLOBAL ingestion sequence, not a per-lane
+  // counter, so comparing two lanes' cursors compares how far behind the store
+  // each one is: a lane digested last night carries a cursor from last night, a
+  // lane the cap has not reached in a week carries one from a week ago, and a
+  // lane never digested carries 0. Least-consumed first is therefore
+  // most-behind first, and it self-rotates for free — a lane's cursor jumps to
+  // the front of the sequence the moment it is digested, which puts it at the
+  // BACK of the next run's queue. No rotation offset has to be persisted for
+  // this, and no lane can be starved by its position in `listLanes`.
+  const candidates = lanes
+    .filter((candidate) => byBotKey.has(candidate.botKey))
+    .sort((a, b) => (watermarks[a.laneKey] ?? 0) - (watermarks[b.laneKey] ?? 0));
+  const maxLanes = settings.maxLanesPerRun ?? DEFAULT_MAX_LANES_PER_RUN;
+  /** Lanes past the cap that DO have work waiting. See `ChannelDigestReport.deferred`. */
+  const deferred: string[] = [];
+  /** Charged only for a lane that reaches the provider — see `maxLanesPerRun`. */
+  let lanesSummarised = 0;
+
+  for (const lane of candidates) {
     const bot = byBotKey.get(lane.botKey);
     if (!bot) continue;
 
@@ -619,12 +716,29 @@ async function digestWatchedLanes(
     // strangers in one watched room could arrange that for every other room.
     //
     // Isolation is the whole of the ordering fix too: every lane is attempted
-    // on every run regardless of what the lane before it did, so there is no
-    // queue position to be starved from and nothing to rotate.
+    // on every run regardless of what the lane before it did.
+    //
+    // There IS a queue position, since `maxLanesPerRun` bounds how many lanes
+    // one run may pay for — but it is not one a lane can be starved in. The
+    // order is ascending cursor, so a lane the cap deferred is among the
+    // least-consumed and sorts to the FRONT next run, while the lanes that ran
+    // sort to the back. See the `candidates` sort above.
     try {
+      const cursor = watermarks[lane.laneKey] ?? 0;
+
+      // Budget spent. Read ONE row rather than a page: the only question left
+      // for this lane is whether it has anything waiting, and the answer is
+      // what the report counts. Nothing is consumed either way — the cursor is
+      // untouched, so the next run reads these rows, with this lane at the
+      // front of the queue because its cursor is among the lowest.
+      if (lanesSummarised >= maxLanes) {
+        const probe = await deps.transcript.readSince(lane.laneKey, cursor, { limit: 1 });
+        if (probe.messages.length > 0) deferred.push(lane.laneKey);
+        continue;
+      }
+
       // Everything past the cursor, and nothing else. No floor, no window, no
       // post-filter — see CONSUMPTION SEMANTICS above.
-      const cursor = watermarks[lane.laneKey] ?? 0;
       const page = await deps.transcript.readSince(lane.laneKey, cursor, { limit });
       if (page.messages.length === 0) {
         report.empty += 1;
@@ -637,6 +751,11 @@ async function digestWatchedLanes(
       const fresh = [...page.messages].sort((a, b) => a.sentAt - b.sentAt);
       const nextCursor = page.messages.reduce((max, m) => (m.id > max ? m.id : max), cursor);
 
+      // Charged BEFORE the call, not after it. The cap bounds what a run may
+      // SPEND, and a turn that throws or comes back empty was billed like any
+      // other — counting only the ones that produced a digest would let a lane
+      // failing deterministically buy the run an unbounded number of calls.
+      lanesSummarised += 1;
       const turn = await runLaneTurn(
         bot.loop,
         buildDigestPrompt({
@@ -707,17 +826,51 @@ async function digestWatchedLanes(
       // one place in the digest that produces visible output. `ownerUserId` is a
       // bare platform id: on Telegram and WhatsApp nothing in it says "DM"
       // rather than "group", so an owner value mistyped as — or copied from —
-      // the observed chat id would post the summary straight back into the room
-      // it summarised, in front of the people it is about. Fail closed: refuse,
-      // count it undelivered, and say why. The feed copy above still went out,
-      // so the digest is not lost, and the watermark does not advance, so it is
-      // re-digested once the configuration is fixed.
-      if (ownerChatId === lane.chatId) {
+      // an observed chat id would post the summary straight into a room it has
+      // no business in, in front of the people it is about.
+      //
+      // ANY OBSERVED CHAT, not just this lane's. `ownerChatId === lane.chatId`
+      // was the whole of this check and it refused exactly one delivery: with
+      // rooms A and B both watched and the owner mistyped as B's chat id, lane
+      // B was refused and lane A's summary went to B — a conversation from one
+      // room read out in another, counted as delivered to the owner. The room
+      // the digest is ABOUT is not the only room it must not be posted in.
+      //
+      // Matched per platform, because a chat id means nothing across platforms
+      // and a cross-platform match would refuse a correct configuration.
+      //
+      // WHAT THIS SET IS. Every chat `ChannelTranscriptStore.listLanes` reports
+      // a lane for — every room this deployment has recorded a message from
+      // within the transcript's retention window, whether or not a bot here
+      // serves it and whether or not it had anything to say this run. It is not
+      // the set of CONFIGURED observed chats, because there is no such set to
+      // consult: observe mode is a per-platform or per-channel MODE
+      // (`defaultChannelMode: observe`, `/ethos channel-mode observe`), never a
+      // list of ids, so the transcript is the only enumeration of watched rooms
+      // that exists. The residual, stated rather than papered over: a room put
+      // into observe mode that has never recorded a message — or whose rows
+      // have all aged out — has no lane, so the owner naming it is not caught
+      // here. Closing that needs an observed-chat enumeration on the adapters,
+      // which is a Gateway change, not one this file can make.
+      //
+      // Fail closed: refuse, count it undelivered, and say why. The feed copy
+      // above still went out, so the digest is not lost, and the watermark does
+      // not advance, so it is re-digested once the configuration is fixed.
+      if (observedChatIds.get(lane.platform)?.has(ownerChatId) === true) {
         report.undelivered += 1;
         deps.observability?.recordSafetyBlock({
           code: 'channel.digest_owner_is_observed_chat',
-          cause: `channel_filter.${lane.platform}.ownerUserId is the observed chat itself — delivering there would break observe mode's silence`,
-          details: { platform: lane.platform, botKey: lane.botKey, laneKey: lane.laneKey },
+          cause: `channel_filter.${lane.platform}.ownerUserId names an observed chat itself — delivering there would break observe mode's silence`,
+          details: {
+            platform: lane.platform,
+            botKey: lane.botKey,
+            laneKey: lane.laneKey,
+            ownerChatId,
+            // `true` when the owner names THIS lane's room, `false` when it
+            // names a different watched room — the second is the case the
+            // per-lane check used to let through, so the report says which.
+            ownerIsThisLane: ownerChatId === lane.chatId,
+          },
         });
         continue;
       }
@@ -747,6 +900,20 @@ async function digestWatchedLanes(
         details: { platform: lane.platform, botKey: lane.botKey, laneKey: lane.laneKey },
       });
     }
+  }
+
+  // A capped run says so. Reported once with the lane keys rather than once
+  // per lane: the operator needs to know the cap is binding and which rooms are
+  // waiting, not a line per room every night.
+  if (deferred.length > 0) {
+    report.deferred = deferred.length;
+    deps.observability?.recordSafetyBlock({
+      code: 'channel.digest_lane_cap',
+      cause:
+        `the digest reached its cap of ${maxLanes} lane(s) per run — ${deferred.length} lane(s) ` +
+        `with undigested messages were left for the next run`,
+      details: { maxLanesPerRun: maxLanes, lanes: deferred, count: deferred.length },
+    });
   }
 
   // One write per run, after every lane. A crash before it re-digests the whole

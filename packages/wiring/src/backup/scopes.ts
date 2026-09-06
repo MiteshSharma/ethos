@@ -4,9 +4,10 @@
 //   identity   config.yaml, mcp.json, MEMORY.md, USER.md, cron/jobs.json,
 //              personalities/ — who this agent is. Small, restorable live.
 //   state      every database that is not telemetry or transient, plus
-//              skills/, teams/, users/, digests/, cron/output/, a2a/ and the
-//              plugin pins. Large, and holds conversation history — an archive
-//              containing it is as sensitive as the machine it came from.
+//              skills/, teams/, users/, digests/, cron/output/, a2a/, the
+//              channel digest's cursor file and the plugin pins. Large, and
+//              holds conversation history — an archive containing it is as
+//              sensitive as the machine it came from.
 //   telemetry  observability.db. Opt-in; nothing depends on it.
 //
 // Classification is an ALLOWLIST. A path that matches no rule is not archived.
@@ -18,6 +19,18 @@
 // call site in the repo is registered in `WAL_STORES` below, and
 // `scopes.test.ts` fails if the repo grows one that is not. See that test for
 // what to do when it fires.
+//
+// NON-DATABASE STATE HAS NO SUCH GATE, and adding one was considered and
+// rejected. A database is enumerable from the repo — a `journal_mode = WAL`
+// pragma is a grep, and a module maps to exactly one path — so `WAL_STORES` can
+// be a manifest that CI compares against. A JSON state file has no equivalent
+// marker: the paths are joined from `dataDir` at wiring time, most `writeAtomic`
+// call sites write somewhere other than `~/.ethos/`, and a gate over "every file
+// in a live `~/.ethos/`" would fire on scratch files, editor droppings and
+// anything an operator left there. That is a gate that gets muted, and a muted
+// gate is worse than the allowlist it replaces. The rule stays: a new file under
+// `~/.ethos/` that must survive a restore needs a line in `RULES` below and a
+// test that pins it, the way `channel-digest-watermarks.json` now has both.
 //
 // Raw `node:fs` here is the documented Storage carve-out (AGENTS.md): the walk
 // needs `readdirSync` with dirents to refuse symlinks, and `statSync` for the
@@ -297,6 +310,17 @@ const RULES: readonly ScopeRule[] = [
   { path: 'digests', kind: 'dir', scope: 'state' },
   { path: 'cron/output', kind: 'dir', scope: 'state' },
   { path: 'a2a', kind: 'dir', scope: 'state' },
+  // The ambient channel digest's per-lane cursors
+  // (`CHANNEL_DIGEST_WATERMARK_FILE`). It travels because `channel-transcript.db`
+  // travels, and the pair is only meaningful together: the cursor names the
+  // greatest ingestion id each watched room has been summarised up to, so a
+  // restore that brought the transcript and left the cursors behind cold-starts
+  // every lane and re-digests a full retention window — up to 30 days of other
+  // people's group chat — into the owner's direct messages, one summary per
+  // lane. The digest errs toward duplicating rather than losing by design, and
+  // this is that design being handed the largest duplicate it can produce.
+  // Tiny, one JSON object of integers, so it costs the archive nothing.
+  { path: 'channel-digest-watermarks.json', kind: 'file', scope: 'state' },
   // Plugin pins: what npm installed under the `plugins/` prefix, not the tree.
   { path: 'plugins/package.json', kind: 'file', scope: 'state' },
   { path: 'plugins/package-lock.json', kind: 'file', scope: 'state' },

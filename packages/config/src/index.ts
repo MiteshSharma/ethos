@@ -2124,6 +2124,7 @@ export interface EthosConfig {
    *   channelDigest.cron: 0 8 * * *
    *   channelDigest.deliverTo: owner
    *   channelDigest.maxMessagesPerLane: 500
+   *   channelDigest.maxLanesPerRun: 25
    *   channelDigest.costWarnUsdPerLane: 0.50
    */
   channelDigest?: {
@@ -2137,6 +2138,15 @@ export interface EthosConfig {
     deliverTo?: 'owner' | 'inApp';
     /** Newest-N messages read per lane. Older ones are counted, not summarised. */
     maxMessagesPerLane?: number;
+    /**
+     * How many lanes one run may summarise — a real ceiling, unlike
+     * `costWarnUsdPerLane`. A lane is a chat AND a thread, so one watched Slack
+     * channel with eighty threads in a day is eighty provider calls and eighty
+     * direct messages from a single nightly run. Lanes past the cap are DEFERRED,
+     * not dropped: their cursors are untouched and they are attempted first on
+     * the next run. See `ChannelDigestSettings.maxLanesPerRun`.
+     */
+    maxLanesPerRun?: number;
     /**
      * Spend NOTICE threshold for one lane's summary turn, in USD — a lane that
      * costs more is still delivered, with a footnote saying what it cost. Not
@@ -3421,6 +3431,8 @@ export async function writeConfig(
     if (cd.deliverTo) lines.push(`channelDigest.deliverTo: ${cd.deliverTo}`);
     if (cd.maxMessagesPerLane !== undefined)
       lines.push(`channelDigest.maxMessagesPerLane: ${cd.maxMessagesPerLane}`);
+    if (cd.maxLanesPerRun !== undefined)
+      lines.push(`channelDigest.maxLanesPerRun: ${cd.maxLanesPerRun}`);
     if (cd.costWarnUsdPerLane !== undefined)
       lines.push(`channelDigest.costWarnUsdPerLane: ${cd.costWarnUsdPerLane}`);
   }
@@ -6305,6 +6317,15 @@ function buildChannelDigestConfig(kv: Record<string, string>): EthosConfig['chan
     );
   }
 
+  const maxLanesRaw = kv['channelDigest.maxLanesPerRun'];
+  const maxLanes =
+    maxLanesRaw !== undefined && /^\d+$/.test(maxLanesRaw) ? Number(maxLanesRaw) : Number.NaN;
+  if (maxLanesRaw !== undefined && !(Number.isSafeInteger(maxLanes) && maxLanes >= 1)) {
+    throw new Error(
+      `Invalid channelDigest.maxLanesPerRun "${maxLanesRaw}". Expected a positive integer.`,
+    );
+  }
+
   const costWarnRaw = kv['channelDigest.costWarnUsdPerLane'];
   const costWarn =
     costWarnRaw !== undefined && /^\d+(\.\d+)?$/.test(costWarnRaw)
@@ -6323,6 +6344,7 @@ function buildChannelDigestConfig(kv: Record<string, string>): EthosConfig['chan
     ...(kv['channelDigest.cron'] ? { cron: kv['channelDigest.cron'] } : {}),
     ...(deliverToRaw !== undefined ? { deliverTo: deliverToRaw } : {}),
     ...(maxMessagesRaw !== undefined ? { maxMessagesPerLane: maxMessages } : {}),
+    ...(maxLanesRaw !== undefined ? { maxLanesPerRun: maxLanes } : {}),
     ...(costWarnRaw !== undefined ? { costWarnUsdPerLane: costWarn } : {}),
   };
 }
