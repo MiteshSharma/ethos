@@ -33,10 +33,34 @@ export interface ChannelModeInputs {
    * and a compile-time union would not help anyway — the value arrives from a
    * per-chat override store on disk, so it is runtime input, not a literal.
    *
-   * A value this module does not recognise is FAIL-CLOSED: neither answered
-   * nor recorded. See `evaluateChannelMode`.
+   * A value outside `supportedModes` is FAIL-CLOSED: neither answered nor
+   * recorded. See `evaluateChannelMode`.
    */
   channelMode: string;
+  /**
+   * The modes THIS adapter offers — its own enum, not the union of everyone's.
+   * Every shipped adapter passes the `CHANNEL_MODES` const its
+   * `ChannelModeSchema` is built from, so the set that validates a WRITE
+   * (`ChannelOverrideStore.set`, typed to the adapter's `Mode`) and the set
+   * that governs a READ are the same list.
+   *
+   * Required, not optional with a union default, and that is the point: a
+   * union default is a hole a new adapter falls into by writing nothing. A
+   * missing declaration is a compile error instead.
+   *
+   * Why per-adapter rather than the union of all four enums (which is what
+   * this was): a mode one platform does not offer is NOT safely "not
+   * applicable here". `regex_match` under the union was recognised on Slack,
+   * which has no `regex_match` and therefore supplies no `matchesPattern` —
+   * so `triageMessage` dropped every message unrecorded while the mention
+   * path, the join greeting, the `link_shared` unfurl and `/ethos ask` all
+   * fell through to the answering `isGroupMention` branch. A channel that
+   * records nothing and speaks on four paths, from a mode string no Slack
+   * surface can write. The union also degrades structurally: every mode added
+   * to any one adapter becomes "known" to the other three, whose branches for
+   * it do not exist.
+   */
+  supportedModes: readonly string[];
   /** `thread_follow`: has the bot already posted in this thread? */
   hasBotPosted?: boolean;
   /**
@@ -47,23 +71,6 @@ export interface ChannelModeInputs {
    */
   matchesPattern?: () => boolean;
 }
-
-/**
- * Every mode any adapter's enum contains. The union of four enums rather than
- * one adapter's, because this module is the shared decision point and a mode
- * one platform does not offer must not become "unrecognised" when it is only
- * "not applicable here" — Telegram's `regex_match` is the live example.
- *
- * A value outside this set is not a mode this build knows how to be safe
- * about, which is what makes it fail closed below.
- */
-const KNOWN_MODES: ReadonlySet<string> = new Set([
-  'mention_only',
-  'observe',
-  'all',
-  'thread_follow',
-  'regex_match',
-]);
 
 // Returned by value on every call — a shared object would let one adapter's
 // mutation of a decision leak into every other adapter's next decision.
@@ -83,14 +90,15 @@ const OBSERVE = (): ChannelModeDecision => ({ shouldReply: false, shouldRecord: 
  *      mode is treated the same way for the same reason; the alternative
  *      makes a bad override string deafen the bot to its own owner, with no
  *      channel left to say so through.
- *   2. An UNRECOGNISED mode — dropped, before any other test. This build
- *      cannot know what a mode it has never heard of is for, and the modes
+ *   2. A mode outside `supportedModes` — dropped, before any other test. This
+ *      adapter cannot know what a mode it does not offer is for, and the modes
  *      that get added are silent ones; a downgraded binary reading a newer
- *      mode out of a shared override store, or a hand-edited override with a
- *      typo in it, must not become an answering bot in a room that asked for
- *      silence. `IGNORE` rather than `OBSERVE` because it is already what an
- *      unmatched recognised mode does, and because recording is itself an act
- *      on a stranger's message that an unreadable mode cannot consent to.
+ *      mode out of a shared override store, a mode copied from another
+ *      platform's override file, or a hand-edited typo must not become an
+ *      answering bot in a room that asked for silence. `IGNORE` rather than
+ *      `OBSERVE` because it is already what an unmatched recognised mode does,
+ *      and because recording is itself an act on a stranger's message that an
+ *      unreadable mode cannot consent to.
  *   3. `observe` — checked BEFORE the mention test. Observe mode never
  *      replies, not even to an explicit @mention. That is a product decision,
  *      not an oversight: a room set to observe is a room the operator has told
@@ -106,7 +114,7 @@ const OBSERVE = (): ChannelModeDecision => ({ shouldReply: false, shouldRecord: 
  */
 export function evaluateChannelMode(inputs: ChannelModeInputs): ChannelModeDecision {
   if (inputs.isDm) return ENGAGE();
-  if (!KNOWN_MODES.has(inputs.channelMode)) return IGNORE();
+  if (!inputs.supportedModes.includes(inputs.channelMode)) return IGNORE();
   if (inputs.channelMode === 'observe') return OBSERVE();
   if (inputs.channelMode === 'all') return ENGAGE();
   if (inputs.isGroupMention) return ENGAGE();

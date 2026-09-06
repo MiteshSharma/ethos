@@ -357,6 +357,14 @@ describe('a stored mode this build cannot read', () => {
     'obserev', // typo
     'silent_digest_only', // a mode a newer binary knows and this one does not
     '', // empty
+    // Two modes that are real — on OTHER adapters. WhatsApp's enum is the
+    // smallest of the four: no threads, so no `thread_follow`, and no
+    // `regex_match`. `evaluateChannelMode` used to test a hard-coded UNION of
+    // all four enums, under which both were "recognised" here and an @mention
+    // fell through to the answering `isGroupMention` branch. WhatsApp now
+    // passes its own `CHANNEL_MODES` (`../config`) as `supportedModes`.
+    'thread_follow',
+    'regex_match',
   ];
 
   const storedAs = (mode: string) =>

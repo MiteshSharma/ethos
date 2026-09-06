@@ -41,7 +41,15 @@ const USER = 'U_OPERATOR';
  * `observe` — and the test below proves the operator still learns the string
  * verbatim from a surface the room cannot see.
  */
-const SILENT = ['observe', 'obserev'] as const;
+/**
+ * `regex_match` joins them as of the per-adapter `supportedModes` change: it is
+ * a REAL mode — on Telegram — that Slack's enum does not contain, so a line
+ * copied from a Telegram override file is unreadable here and must fail closed
+ * exactly like the typo. Under the old hard-coded union of all four enums it
+ * was "recognised", and every handler below fell through to the answering
+ * `isGroupMention` branch while the message path recorded nothing.
+ */
+const SILENT = ['observe', 'obserev', 'regex_match'] as const;
 const ANSWERING = ['mention_only', 'all'] as const;
 
 // ---------------------------------------------------------------------------
@@ -126,10 +134,21 @@ function slashCtx(mode: string, submitted: string[]): SlashContext {
 }
 
 /** Drive the REAL slash dispatcher (authz included) with `/ethos ask`. */
-async function runAsk(mode: string, text = 'ask what is the pour date'): Promise<AskOutcome> {
+async function runAsk(
+  mode: string,
+  text = 'ask what is the pour date',
+  channel: { id: string; name?: string } = { id: CHANNEL },
+): Promise<AskOutcome> {
   const submitted: string[] = [];
   const response = await dispatch(
-    { command: '/ethos', text, channel_id: CHANNEL, user_id: USER, trigger_id: 'T1' },
+    {
+      command: '/ethos',
+      text,
+      channel_id: channel.id,
+      channel_name: channel.name,
+      user_id: USER,
+      trigger_id: 'T1',
+    },
     slashCtx(mode, submitted),
   );
   return { submitted, responseType: response.responseType, text: response.text };
@@ -173,7 +192,7 @@ interface UnfurlOutcome {
   lookups: string[];
 }
 
-async function deliverLinkShared(mode: string): Promise<UnfurlOutcome> {
+async function deliverLinkShared(mode: string, channel = CHANNEL): Promise<UnfurlOutcome> {
   const calls: CallLog = [];
   const lookups: string[] = [];
   const handlers = new Map<string, (args: unknown) => Promise<void>>();
@@ -198,7 +217,7 @@ async function deliverLinkShared(mode: string): Promise<UnfurlOutcome> {
   if (!handler) throw new Error('registerLinkEvents registered no handler');
   await handler({
     event: {
-      channel: CHANNEL,
+      channel,
       message_ts: '1699000000.000100',
       links: [{ url: `${BASE}/sessions/s-1` }],
     },
@@ -280,5 +299,78 @@ describe('an unreadable stored mode stays diagnosable on ungated surfaces', () =
   it('and the greeting that used to carry it is the surface that went silent', async () => {
     // The trade, stated as a test: this is what the three cases above replace.
     expect(await deliverSelfJoin(TYPO)).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 4. The other half of the promise: a DM is not a room
+// ---------------------------------------------------------------------------
+
+// `docs/content/platforms/slack.md` tells the reader "to ask this bot something
+// while a channel is observed, DM it". That sentence was false for the
+// deployment it was written for. `canSpeakInChannel` hard-coded `isDm: false`,
+// discarding `evaluateChannelMode`'s first and load-bearing test — so with
+// `slack.apps.<i>.defaultChannelMode: observe`, a DM (which has no override and
+// therefore resolves to the app default) answered ordinary messages but refused
+// `/ethos ask`, telling the user to go and do the thing they had just done.
+//
+// Every case below is under a SILENT mode. The point is that the mode does not
+// reach the decision at all: there is no third party in a one-to-one
+// conversation for it to be protecting.
+
+/** A DM conversation id. Slack types conversations by id prefix: `D` is an
+ *  `im`, `C` a channel, `G` a legacy private group / multi-person DM. */
+const DM_CHANNEL = 'D_OWNER';
+
+describe('a DM is not a room — the mode does not silence a one-to-one', () => {
+  for (const mode of SILENT) {
+    it(`/ethos ask runs in a DM under \`${mode}\``, async () => {
+      const outcome = await runAsk(mode, 'ask what is the pour date', { id: DM_CHANNEL });
+
+      expect(outcome.submitted).toEqual(['what is the pour date']);
+      expect(outcome.responseType).toBe('in_channel');
+    });
+
+    it(`/ethos ask recognises a DM by channel_name alone under \`${mode}\``, async () => {
+      // The second signal, for the case where the id prefix is not conclusive.
+      // Slack sets `channel_name` to the literal `directmessage` on a slash
+      // command invoked from an `im`.
+      const outcome = await runAsk(mode, 'ask what is the pour date', {
+        id: 'C_LOOKS_LIKE_A_CHANNEL',
+        name: 'directmessage',
+      });
+
+      expect(outcome.submitted).toEqual(['what is the pour date']);
+    });
+
+    it(`link_shared unfurls in a DM under \`${mode}\``, async () => {
+      const outcome = await deliverLinkShared(mode, DM_CHANNEL);
+
+      expect(outcome.calls).toEqual(['chat.unfurl']);
+    });
+  }
+
+  // The controls. Without these the three cases above would pass just as well
+  // against a gate that had simply been deleted.
+  for (const mode of SILENT) {
+    it(`/ethos ask is still refused in a CHANNEL under \`${mode}\``, async () => {
+      const outcome = await runAsk(mode, 'ask what is the pour date', { id: CHANNEL });
+
+      expect(outcome.submitted).toEqual([]);
+      expect(outcome.responseType).toBe('ephemeral');
+    });
+
+    it(`link_shared still unfurls nothing in a CHANNEL under \`${mode}\``, async () => {
+      expect((await deliverLinkShared(mode, CHANNEL)).calls).toEqual([]);
+    });
+  }
+
+  it('a multi-person DM is a ROOM, and stays silent', async () => {
+    // `G`-prefixed: an mpim has other people in it, and the mode is protecting
+    // them. `isSlackDm` matches only the `D` prefix for exactly this reason.
+    const outcome = await runAsk('observe', 'ask what is the pour date', { id: 'G_MPIM' });
+
+    expect(outcome.submitted).toEqual([]);
+    expect(outcome.responseType).toBe('ephemeral');
   });
 });

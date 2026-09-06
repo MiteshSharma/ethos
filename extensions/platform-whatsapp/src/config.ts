@@ -5,7 +5,14 @@ import { z } from 'zod';
 //
 // The smallest of the four adapter enums: WhatsApp has no threads, so no
 // `thread_follow`, and no `regex_match`.
-export const ChannelModeSchema = z.enum(['all', 'mention_only', 'observe']);
+// The modes THIS adapter offers, and the single source `ChannelModeSchema` is
+// built from. Passed to `evaluateChannelMode` as `supportedModes` so the enum
+// that validates a WRITE and the set that governs a READ are the same list —
+// a mode from another platform's override file (or a newer build) is refused
+// here rather than falling through to an answering branch this adapter has no
+// implementation for.
+export const CHANNEL_MODES = ['all', 'mention_only', 'observe'] as const;
+export const ChannelModeSchema = z.enum(CHANNEL_MODES);
 export type ChannelMode = z.infer<typeof ChannelModeSchema>;
 
 /**

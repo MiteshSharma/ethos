@@ -69,8 +69,15 @@ function recordingLogger(): { logger: Logger; warnings: string[] } {
 interface StartOptions {
   /** The bot's global default mode. */
   mode: ChannelMode;
-  /** Stored per-chat override for chat 100, written to the override store. */
-  overrideMode?: ChannelMode;
+  /**
+   * Stored per-chat override for chat 100, written to the override store.
+   *
+   * `string`, not `ChannelMode`, because the unreadable-override cases below
+   * need to plant exactly what `ChannelModeSchema` rejects — which is the only
+   * way that state reaches production too (a hand edit, or a newer binary
+   * writing into the same file).
+   */
+  overrideMode?: ChannelMode | (string & {});
   /** `getMe` result. `undefined` makes the call reject instead. */
   getMe?: Record<string, unknown>;
   /** Omit the logger entirely, as an unwired deployment would. */
@@ -172,5 +179,74 @@ describe('observe-mode privacy warning', () => {
   it('skips the getMe call entirely when no logger is installed', async () => {
     await start({ mode: 'observe', getMe: PRIVACY_ON, noLogger: true });
     expect(mockApi.getMe).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The other silent state: a stored mode this build cannot read
+// ---------------------------------------------------------------------------
+
+// A chat whose stored mode is outside `CHANNEL_MODES` is neither replied to nor
+// recorded — `evaluateChannelMode` (`@ethosagent/core`) fails closed on it. From
+// outside, that is indistinguishable from a bot that was never added to the
+// group, and the privacy warning above cannot report it: its `observe` test is a
+// string LITERAL, so an unreadable mode does not match it. Telegram has no
+// `/ethos channel-mode show` to read the value back from the way Slack does, so
+// this log line is the whole diagnostic surface. Enforced by
+// `warnIfOverridesUnreadable` in `../index.ts`.
+describe('unreadable-override warning', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('warns, naming the chat and the stored string verbatim', async () => {
+    const warnings = await start({ mode: 'mention_only', overrideMode: 'obserev' });
+
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain('"obserev"');
+    expect(warnings[0]).toContain('100');
+  });
+
+  it('warns for a mode that is real on another adapter', async () => {
+    // `regex_match` is Telegram's own, so the mirror case is Slack's — but a
+    // mode a NEWER Telegram build knows and this one does not is the same
+    // shape, and is the case that actually reaches a downgraded binary.
+    const warnings = await start({ mode: 'mention_only', overrideMode: 'silent_digest_only' });
+
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain('"silent_digest_only"');
+  });
+
+  it('stays quiet when every stored override is readable', async () => {
+    // The control: without it the cases above would pass against a warning that
+    // fires on every startup.
+    const warnings = await start({ mode: 'mention_only', overrideMode: 'regex_match' });
+
+    expect(warnings).toEqual([]);
+  });
+
+  it('stays quiet when no override is stored at all', async () => {
+    expect(await start({ mode: 'mention_only' })).toEqual([]);
+  });
+
+  it('says nothing without a logger', async () => {
+    expect(await start({ mode: 'mention_only', overrideMode: 'obserev', noLogger: true })).toEqual(
+      [],
+    );
+  });
+
+  it('is independent of the privacy warning — both can fire', async () => {
+    // Different diagnostics about different chats: chat 100 is unreadable, and
+    // every OTHER group still falls back to the observed default the bot cannot
+    // hear. Collapsing them into one check would lose whichever fired second.
+    const warnings = await start({
+      mode: 'observe',
+      overrideMode: 'obserev',
+      getMe: PRIVACY_ON,
+    });
+
+    expect(warnings).toHaveLength(2);
+    expect(warnings.some((w) => w.includes('/setprivacy'))).toBe(true);
+    expect(warnings.some((w) => w.includes('"obserev"'))).toBe(true);
   });
 });

@@ -34,7 +34,11 @@ export function registerMemberEvents(app: App, deps: MemberJoinedDeps): void {
     // reasoning — and it stays diagnosable, because the operator reads the raw
     // string back from `/ethos channel-mode show`, `/ethos help`, the refusal
     // `/ethos ask` returns, and the App Home tab, none of which the room sees.
-    if (!canSpeakInChannel(mode)) return;
+    // `isDm: false` unconditionally, and not by omission: `member_joined_channel`
+    // only ever fires for a channel or private group. Nobody is invited to a
+    // DM — the conversation exists the moment either party opens it — so there
+    // is no DM case for this handler to get wrong.
+    if (!canSpeakInChannel(mode, false)) return;
     const subject = deps.binding.type === 'team' ? 'team coordinator' : 'personality';
     const text =
       `:wave: I'm bound to the *${subject}* \`${deps.binding.name}\`. ` +

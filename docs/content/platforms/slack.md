@@ -5,7 +5,7 @@ kind: how-to
 audience: shared
 slug: platform-slack
 time: "15 min"
-updated: 2026-09-05
+updated: 2026-09-06
 ---
 
 ## Task
@@ -105,10 +105,11 @@ Silence under `observe` covers every surface, not only replies to messages:
 | The greeting the bot posts when you invite it | Not posted |
 | Unfurling an Ethos link someone pastes | Not unfurled |
 | `/ethos ask` | Refused, with a reply only the person who ran it can see |
+| A DM to the bot | Answered normally — a DM is not a room |
 
-To ask this bot something while a channel is observed, DM it or change the mode.
+To ask this bot something while a channel is observed, DM it or change the mode. The DM answers even when `defaultChannelMode: observe` makes `observe` the mode a DM resolves to: there is no third party in a one-to-one conversation for the mode to be protecting, so `link_shared` unfurls and `/ethos ask` work there too.
 
-A stored mode this build cannot read — a typo such as `obserev`, or a mode a newer Ethos wrote into the same override file — is treated exactly like `observe`: nothing reaches the room, and nothing is recorded either. If a channel has gone quiet unexpectedly, run `/ethos channel-mode`, which prints the stored string verbatim rather than the default it is not. `/ethos help`, the App Home tab, and the `/ethos ask` refusal show the same value.
+A stored mode this build cannot read is stricter than `observe`: nothing reaches the room, and nothing is recorded either. Three things produce one — a typo such as `obserev`, a mode a newer Ethos wrote into the same override file, and a mode that is real on a different platform (`regex_match` is Telegram's; Slack has no such mode, so a line copied from a Telegram override file is unreadable here). If a channel has gone quiet unexpectedly, run `/ethos channel-mode`, which prints the stored string verbatim rather than the default it is not. `/ethos help`, the App Home tab, and the `/ethos ask` refusal show the same value.
 
 Only users on the `/ethos` allowlist can run this; see [step 5a](#5a-restrict-who-can-run-ethos-and-open-app-home).
 

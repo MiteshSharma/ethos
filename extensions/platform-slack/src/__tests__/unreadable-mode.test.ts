@@ -14,6 +14,7 @@ import type { Storage, StorageDirEntry } from '@ethosagent/types';
 import { describe, expect, it } from 'vitest';
 import { type ChannelMode, ChannelModeSchema } from '../config';
 import {
+  canSpeakInChannel,
   type RawSlackMention,
   type RawSlackMessage,
   resolveChannelMode,
@@ -32,6 +33,14 @@ const UNREADABLE = [
   'obserev', // typo
   'silent_digest_only', // a mode a newer binary knows and this one does not
   '', // empty
+  // A mode that is real — on TELEGRAM. Slack has no `regex_match` and so
+  // supplies no `matchesPattern`. `evaluateChannelMode` used to test a
+  // hard-coded UNION of all four adapters' enums, under which this string was
+  // "recognised" here: the message path dropped every message unrecorded
+  // (`matchesPattern` undefined → never matches) while the mention path and
+  // `canSpeakInChannel` fell through to the answering `isGroupMention` branch.
+  // Slack now passes its own `CHANNEL_MODES` (`../config`) as `supportedModes`.
+  'regex_match',
 ] as const;
 
 /** Local, so the Slack package needs no devDependency on a sibling extension. */
@@ -135,6 +144,17 @@ describe('Slack: a stored mode this build cannot read', () => {
       // tab render this same value, so the operator who asks why a channel
       // went quiet is shown the string that silenced it.
       expect(resolveChannelMode('C1', await ctxWithStored(stored))).toBe(stored);
+    });
+  }
+
+  for (const stored of UNREADABLE) {
+    it(`silences every speaking surface under ${JSON.stringify(stored)}`, () => {
+      // `canSpeakInChannel` is the single gate the three non-message surfaces
+      // share — the `member_joined_channel` greeting (`../events/members.ts`),
+      // the `link_shared` unfurl (`../events/links.ts`) and `/ethos ask`
+      // (`../commands/ask.ts`). Asserted here rather than three times over,
+      // because it is the same call with the same argument in all three.
+      expect(canSpeakInChannel(stored, false)).toBe(false);
     });
   }
 

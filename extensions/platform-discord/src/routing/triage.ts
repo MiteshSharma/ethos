@@ -5,7 +5,7 @@
 import type { ChannelOverrideStore } from '@ethosagent/core';
 import { evaluateChannelMode } from '@ethosagent/core';
 import type { InboundMessage } from '@ethosagent/types';
-import { type ChannelMode, DEFAULT_CHANNEL_MODE } from '../config';
+import { CHANNEL_MODES, type ChannelMode, DEFAULT_CHANNEL_MODE } from '../config';
 import type { ThreadStateStore } from '../store/thread-state';
 
 /** What the adapter knows about itself + its persistent state. */
@@ -71,6 +71,7 @@ export async function triageMessage(
     isDm: msg.isDm,
     isGroupMention: msg.isMention,
     channelMode,
+    supportedModes: CHANNEL_MODES,
     hasBotPosted,
   });
 
@@ -114,6 +115,32 @@ export async function triageMessage(
  *     answering `mention_only` default.
  *   - a valid override        → its mode (unchanged).
  */
+/**
+ * May the bot put VISIBLE content into this channel?
+ *
+ * Slack's `canSpeakInChannel` (`extensions/platform-slack/src/routing/triage.ts`)
+ * with the same contract and the same argument for `isGroupMention: true` — a
+ * human has already addressed the bot directly, so the only open question is
+ * whether the ROOM permits a reply at all. Copied rather than shared: the two
+ * packages have no common module below them, and each must pass its OWN
+ * `CHANNEL_MODES` to `evaluateChannelMode` (that is the whole point of
+ * `supportedModes`), so a shared helper would need the enum passed in anyway.
+ *
+ * Discord's only non-message path that can put content in a room is the
+ * `/ethos ask` slash command (`../commands/ask.ts`); the approval and clarify
+ * interactions reply to the clicker, not the room. `isDm` is required, never
+ * defaulted — a hard-coded `false` is exactly what made Slack's `/ethos ask`
+ * refuse in a DM.
+ */
+export function canSpeakInChannel(channelMode: string, isDm: boolean): boolean {
+  return evaluateChannelMode({
+    isDm,
+    isGroupMention: true,
+    channelMode,
+    supportedModes: CHANNEL_MODES,
+  }).shouldReply;
+}
+
 export function resolveChannelMode(channel: string, ctx: TriageContext): string {
   // `.mode` — the shared store indexes `{ mode, regexPattern? }`, where
   // Discord's own copy indexed a bare mode.

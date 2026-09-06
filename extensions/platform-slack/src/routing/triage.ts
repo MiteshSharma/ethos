@@ -5,7 +5,7 @@
 import type { ChannelOverrideStore } from '@ethosagent/core';
 import { evaluateChannelMode } from '@ethosagent/core';
 import type { InboundMessage } from '@ethosagent/types';
-import { type ChannelMode, DEFAULT_CHANNEL_MODE } from '../config';
+import { CHANNEL_MODES, type ChannelMode, DEFAULT_CHANNEL_MODE } from '../config';
 import type { BackfillStateStore } from '../store/backfill-state';
 import type { ThreadStateStore } from '../store/thread-state';
 import type { UsernameResolver } from './usernames';
@@ -123,6 +123,7 @@ export async function triageMessage(
     isDm,
     isGroupMention: false,
     channelMode,
+    supportedModes: CHANNEL_MODES,
     hasBotPosted,
   });
 
@@ -170,6 +171,7 @@ export async function triageMention(
     isDm: false,
     isGroupMention: true,
     channelMode,
+    supportedModes: CHANNEL_MODES,
   });
 
   // The one reachable drop: a mode string this build cannot read. The shared
@@ -253,9 +255,45 @@ async function resolveSenderName(
  * The operator still learns the unreadable string verbatim from the surfaces
  * the room cannot see — `/ethos channel-mode show`, `/ethos help`, the refusal
  * `/ethos ask` returns, and the App Home tab.
+ *
+ * `isDm` is a REQUIRED parameter, not an internal `false`, and that is the fix
+ * for a real refusal: it used to hard-code `false`, so `/ethos ask` in a DM was
+ * refused by the channel's mode with a message telling the user to ask in a DM.
+ * `evaluateChannelMode`'s first test is `isDm`, load-bearingly ("a DM is not a
+ * room"), and a hard-coded `false` here silently discarded it. A default value
+ * would let the same omission recur unnoticed, so every caller states it.
  */
-export function canSpeakInChannel(channelMode: string): boolean {
-  return evaluateChannelMode({ isDm: false, isGroupMention: true, channelMode }).shouldReply;
+export function canSpeakInChannel(channelMode: string, isDm: boolean): boolean {
+  return evaluateChannelMode({
+    isDm,
+    isGroupMention: true,
+    channelMode,
+    supportedModes: CHANNEL_MODES,
+  }).shouldReply;
+}
+
+/**
+ * Is this conversation a one-to-one DM with the bot?
+ *
+ * Slack's own two signals, either of which is conclusive and neither of which
+ * a channel or a group DM carries:
+ *
+ *   - the conversation id's type prefix: `D` is an `im`, where `C` is a
+ *     channel and `G` a legacy private group / `mpim`. A multi-person DM is
+ *     therefore NOT a DM by this test, which is correct — it is a room with
+ *     other people in it, and the mode is protecting them.
+ *   - `channel_name`, which Slack sets to the literal `directmessage` on a
+ *     slash command invoked from an `im`. Only the slash payload carries it;
+ *     `link_shared` and the message events do not, hence the optional second
+ *     argument.
+ *
+ * The message path does NOT use this — it has `channel_type === 'im'` straight
+ * from the event, which is Slack telling us directly. This exists for the two
+ * surfaces whose payloads have no `channel_type`: the slash command
+ * (`commands/ask.ts`) and `link_shared` (`events/links.ts`).
+ */
+export function isSlackDm(channelId: string, channelName?: string): boolean {
+  return channelId.startsWith('D') || channelName === 'directmessage';
 }
 
 export function resolveChannelMode(channel: string, ctx: TriageContext): string {

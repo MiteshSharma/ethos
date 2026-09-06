@@ -12,6 +12,7 @@
 
 import { evaluateChannelMode } from '@ethosagent/core';
 import { describe, expect, it } from 'vitest';
+import { CHANNEL_MODES } from '../config';
 
 const ENGAGE = { shouldReply: true, shouldRecord: true };
 const IGNORE = { shouldReply: false, shouldRecord: false };
@@ -21,6 +22,7 @@ describe('evaluateChannelMode (shared core decision, Slack binding)', () => {
   it('always responds in DMs', () => {
     expect(
       evaluateChannelMode({
+        supportedModes: CHANNEL_MODES,
         isDm: true,
         isGroupMention: false,
         channelMode: 'mention_only',
@@ -32,6 +34,7 @@ describe('evaluateChannelMode (shared core decision, Slack binding)', () => {
   it('mention_only ignores plain channel posts', () => {
     expect(
       evaluateChannelMode({
+        supportedModes: CHANNEL_MODES,
         isDm: false,
         isGroupMention: false,
         channelMode: 'mention_only',
@@ -43,6 +46,7 @@ describe('evaluateChannelMode (shared core decision, Slack binding)', () => {
   it('mention_only responds to @mentions', () => {
     expect(
       evaluateChannelMode({
+        supportedModes: CHANNEL_MODES,
         isDm: false,
         isGroupMention: true,
         channelMode: 'mention_only',
@@ -54,6 +58,7 @@ describe('evaluateChannelMode (shared core decision, Slack binding)', () => {
   it('thread_follow without prior bot post acts like mention_only', () => {
     expect(
       evaluateChannelMode({
+        supportedModes: CHANNEL_MODES,
         isDm: false,
         isGroupMention: false,
         channelMode: 'thread_follow',
@@ -65,6 +70,7 @@ describe('evaluateChannelMode (shared core decision, Slack binding)', () => {
   it('thread_follow with prior bot post responds', () => {
     expect(
       evaluateChannelMode({
+        supportedModes: CHANNEL_MODES,
         isDm: false,
         isGroupMention: false,
         channelMode: 'thread_follow',
@@ -76,6 +82,7 @@ describe('evaluateChannelMode (shared core decision, Slack binding)', () => {
   it('all responds to every channel post', () => {
     expect(
       evaluateChannelMode({
+        supportedModes: CHANNEL_MODES,
         isDm: false,
         isGroupMention: false,
         channelMode: 'all',
@@ -87,6 +94,7 @@ describe('evaluateChannelMode (shared core decision, Slack binding)', () => {
   it('observe records a plain channel post without replying', () => {
     expect(
       evaluateChannelMode({
+        supportedModes: CHANNEL_MODES,
         isDm: false,
         isGroupMention: false,
         channelMode: 'observe',
@@ -98,6 +106,7 @@ describe('evaluateChannelMode (shared core decision, Slack binding)', () => {
   it('observe records an @mention without replying', () => {
     expect(
       evaluateChannelMode({
+        supportedModes: CHANNEL_MODES,
         isDm: false,
         isGroupMention: true,
         channelMode: 'observe',

@@ -21,6 +21,17 @@ export interface SlashCommandPayload {
   command: string; // e.g. '/ethos'
   text: string; // everything after the command — subcommand + args
   channel_id: string;
+  /**
+   * Slack's human-readable name for the conversation — and, in a DM, the
+   * literal `directmessage`. Carried because `/ethos ask` must know whether it
+   * is in a room or a one-to-one conversation (`isSlackDm` in
+   * `../routing/triage`); the slash payload has no `channel_type`, which is
+   * how the DM case came to be hard-coded away. Bolt declares it required on
+   * `SlashCommand`, but it is OPTIONAL here: it is the SECOND of two DM
+   * signals, and the first — the `D` conversation-id prefix that every `im`
+   * carries — is conclusive on its own. A caller that omits it loses no gate.
+   */
+  channel_name?: string;
   user_id: string;
   trigger_id: string;
 }

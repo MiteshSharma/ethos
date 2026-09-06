@@ -29,6 +29,13 @@ const UNREADABLE = [
   'obserev', // typo
   'silent_digest_only', // a mode a newer binary knows and this one does not
   '', // empty
+  // A mode that is real — on TELEGRAM. Discord has no `regex_match` and so
+  // supplies no `matchesPattern`. `evaluateChannelMode` used to test a
+  // hard-coded UNION of all four adapters' enums, under which this string was
+  // "recognised" here and the mention path fell through to the answering
+  // `isGroupMention` branch while the unmentioned path recorded nothing.
+  // Discord now passes its own `CHANNEL_MODES` (`../config`) as `supportedModes`.
+  'regex_match',
 ] as const;
 
 async function storeWith(

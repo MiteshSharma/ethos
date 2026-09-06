@@ -116,6 +116,9 @@ vi.mock('grammy', () => {
 // ---------------------------------------------------------------------------
 
 const slackCalls: CallLog = [];
+/** Which of the adapter's injected handlers a driven registration actually
+ *  reached. See `startSlack` for why this exists. */
+const slackHandlerReached: string[] = [];
 const slackHandlers = new Map<string, (args: unknown) => Promise<void>>();
 const SLACK_WEB_UI_BASE = 'https://ethos.example.com';
 
@@ -192,6 +195,11 @@ const { SlackAdapter } = await import('../../../../extensions/platform-slack/src
 const { WhatsAppAdapter } = await import('../../../../extensions/platform-whatsapp/src/index');
 const { registerMessageHandler } = await import(
   '../../../../extensions/platform-discord/src/events/messages'
+);
+// The modal driver has to build a payload `handleClarifyModalSubmission` will
+// actually accept, and those ids are the adapter's, not this file's.
+const { CLARIFY_MODAL_INPUT_ACTION_ID, CLARIFY_MODAL_INPUT_BLOCK_ID } = await import(
+  '../../../../extensions/platform-slack/src/blocks/clarify'
 );
 
 /** What one adapter's `observe`-mode delivery produced. */
@@ -291,6 +299,23 @@ async function startSlack(mode: Mode): Promise<{ envelopes: InboundMessage[] }> 
   });
   const envelopes: InboundMessage[] = [];
   adapter.onMessage((m) => envelopes.push(m));
+  // The interactive handlers all `await ack()` and then `if (!handler) return;`
+  // (adapter.ts). Without these three the approval, clarify-button and
+  // clarify-modal cases below drove a handler that returned before its body ran
+  // and asserted `[] === []` against nothing — six cases that could not fail,
+  // in a sweep whose value is that it enumerates. `slackHandlerReached` records
+  // that the body got all the way through, and the assertion on it is what
+  // stops the vacuity coming back.
+  slackHandlerReached.length = 0;
+  adapter.onApprovalDecision(() => {
+    slackHandlerReached.push('approval-decision');
+  });
+  adapter.onClarifyAction(() => {
+    slackHandlerReached.push('clarify-action');
+  });
+  adapter.onClarifyModalSubmit(() => {
+    slackHandlerReached.push('clarify-modal-submit');
+  });
   await adapter.start();
   // Everything above is startup. Only the handlers are on trial.
   slackCalls.length = 0;
@@ -551,7 +576,7 @@ async function respond(args: { response_type?: string }): Promise<void> {
 
 /** A `block_actions` payload — the shape both the approval and clarify
  *  handlers narrow. */
-function blockActions(actionId: string): unknown {
+function blockActions(actionId: string, value: string): unknown {
   return {
     ack,
     body: {
@@ -560,14 +585,22 @@ function blockActions(actionId: string): unknown {
       message: { ts: '1699000000.000100' },
       trigger_id: 'T1',
     },
-    action: { action_id: actionId, value: 'v1' },
+    action: { action_id: actionId, value },
   };
 }
 
+/**
+ * `value` is per action id and is NOT interchangeable: `handleClarifyAction`
+ * (`extensions/platform-slack/src/interactions/clarify.ts`) parses a choice
+ * click as `<requestId>:<index>` and returns early on anything else. A
+ * one-size `'v1'` therefore reached the choice handler's first `return`, not
+ * its callback — the same vacuity the `slackHandlerReached` assertion exists
+ * to catch, one layer further in.
+ */
 const buttonDriver =
-  (actionId: string): HandlerDriver =>
+  (actionId: string, value = 'req-1'): HandlerDriver =>
   async (handler) => {
-    await handler(blockActions(actionId));
+    await handler(blockActions(actionId, value));
   };
 
 const SLACK_HANDLER_DRIVERS: Record<string, HandlerDriver> = {
@@ -634,12 +667,17 @@ const SLACK_HANDLER_DRIVERS: Record<string, HandlerDriver> = {
   },
   'action:ethos_approval_allow': buttonDriver('ethos_approval_allow'),
   'action:ethos_approval_deny': buttonDriver('ethos_approval_deny'),
-  'action:ethos_clarify_choice': buttonDriver('ethos_clarify_choice'),
+  'action:ethos_clarify_choice': buttonDriver('ethos_clarify_choice', 'req-1:0'),
   'action:ethos_clarify_cancel': buttonDriver('ethos_clarify_cancel'),
   'action:ethos_clarify_answer': buttonDriver('ethos_clarify_answer'),
   'action:home:refresh': async (handler) => {
     await handler({ ack, body: { user: { id: SLACK_INVOKER } }, client: boltClient() });
   },
+  // `private_metadata` and the input value are both load-bearing:
+  // `handleClarifyModalSubmission` returns early on unparseable metadata, on a
+  // missing input block, and on an empty answer. The previous payload tripped
+  // all three, so this case asserted silence against a function that had
+  // returned three lines in.
   'view:ethos_clarify_modal': async (handler) => {
     await handler({
       ack,
@@ -647,13 +685,39 @@ const SLACK_HANDLER_DRIVERS: Record<string, HandlerDriver> = {
         user: { id: SLACK_INVOKER },
         view: {
           callback_id: 'ethos_clarify_modal',
-          private_metadata: '',
-          state: { values: {} },
+          private_metadata: JSON.stringify({ requestId: 'req-1' }),
+          state: {
+            values: {
+              [CLARIFY_MODAL_INPUT_BLOCK_ID]: {
+                [CLARIFY_MODAL_INPUT_ACTION_ID]: { value: 'thursday' },
+              },
+            },
+          },
         },
       },
     });
   },
 };
+
+/**
+ * The registrations whose handler body only runs once an injected handler is
+ * wired — every one of them `await ack()`s and then `if (!handler) return;`.
+ *
+ * They have no answering-mode control (the list at the bottom of this file):
+ * an approval or clarify click legitimately puts nothing in the ROOM under any
+ * mode — the response goes back through the coordinator — so there is no
+ * "still speaks when the mode says to answer" case to pair them with. That is
+ * precisely why they need this instead: without it, `[] === []` is all they
+ * assert, and it would keep passing against a handler that was never entered.
+ */
+const SLACK_HANDLERS_NEEDING_REACH: ReadonlySet<string> = new Set([
+  'action:ethos_approval_allow',
+  'action:ethos_approval_deny',
+  'action:ethos_clarify_choice',
+  'action:ethos_clarify_cancel',
+  'action:ethos_clarify_answer',
+  'view:ethos_clarify_modal',
+]);
 
 /**
  * Calls the ROOM cannot see. Everything else is content in a channel.
@@ -672,20 +736,28 @@ const SLACK_INVISIBLE: ReadonlySet<string> = new Set([
   'views.publish',
 ]);
 
-/** Drive one registered handler in `mode` and return what the room could see. */
-async function sweepSlackHandler(key: string, mode: Mode): Promise<string[]> {
+/** Drive one registered handler in `mode`; report what the room could see, and
+ *  whether the handler body ran far enough to reach an injected handler. */
+async function sweepSlackHandler(
+  key: string,
+  mode: Mode,
+): Promise<{ visible: string[]; reached: string[] }> {
   await startSlack(mode);
   const handler = slackHandlers.get(key);
   if (!handler) throw new Error(`adapter registered no handler for ${key}`);
   const driver = SLACK_HANDLER_DRIVERS[key];
   if (!driver) throw new Error(`no driver for registered handler ${key}`);
   slackCalls.length = 0;
+  slackHandlerReached.length = 0;
   await driver(handler);
   // Slash and unfurl work is awaited inside the handlers; the receipt reaction
   // and file enrichment are fired without awaiting, so let the microtask queue
   // drain before reading the log or an `all`-mode control would race.
   await new Promise((resolve) => setTimeout(resolve, 0));
-  return slackCalls.filter((c) => !SLACK_INVISIBLE.has(c));
+  return {
+    visible: slackCalls.filter((c) => !SLACK_INVISIBLE.has(c)),
+    reached: [...slackHandlerReached],
+  };
 }
 
 /** The roster, as the adapter itself registered it. */
@@ -704,10 +776,32 @@ describe('platform-slack — every registered handler is silent in observe mode'
     expect(await registeredSlackHandlers()).toEqual(Object.keys(SLACK_HANDLER_DRIVERS).sort());
   });
 
+  it('names no reach-check for a handler it does not drive', () => {
+    // `SLACK_HANDLERS_NEEDING_REACH` is a hand-written set, so it can rot the
+    // other way: a key removed from the driver table would leave a reach-check
+    // for a registration that no longer exists, and `it.each` over it would
+    // fail confusingly inside `sweepSlackHandler` instead of here.
+    for (const key of SLACK_HANDLERS_NEEDING_REACH) {
+      expect(Object.keys(SLACK_HANDLER_DRIVERS)).toContain(key);
+    }
+  });
+
   it.each(Object.keys(SLACK_HANDLER_DRIVERS))(
     '%s puts nothing into an observed room',
     async (key) => {
-      expect(await sweepSlackHandler(key, 'observe')).toEqual([]);
+      expect((await sweepSlackHandler(key, 'observe')).visible).toEqual([]);
+    },
+  );
+
+  // Non-vacuity for the six registrations that have no answering-mode control.
+  // Each one `await ack()`s and then `if (!handler) return;`, so before the
+  // injected handlers were wired in `startSlack` these cases asserted `[]`
+  // against a body that had already returned — and a `chat.update` added
+  // downstream of `handleClarifyAction` would have kept the sweep green.
+  it.each([...SLACK_HANDLERS_NEEDING_REACH])(
+    '%s actually reaches its injected handler, so its silence means something',
+    async (key) => {
+      expect((await sweepSlackHandler(key, 'observe')).reached).toHaveLength(1);
     },
   );
 
@@ -722,7 +816,7 @@ describe('platform-slack — every registered handler is silent in observe mode'
   it.each(['event:member_joined_channel', 'command:/ethos', 'event:link_shared'])(
     '%s still puts content into an answering room',
     async (key) => {
-      expect(await sweepSlackHandler(key, 'all')).not.toEqual([]);
+      expect((await sweepSlackHandler(key, 'all')).visible).not.toEqual([]);
     },
   );
 });

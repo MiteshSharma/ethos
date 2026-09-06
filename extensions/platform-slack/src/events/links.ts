@@ -28,7 +28,7 @@ import {
   type SessionUnfurlData,
   sessionUnfurlBlocks,
 } from '../blocks/unfurl';
-import { canSpeakInChannel } from '../routing/triage';
+import { canSpeakInChannel, isSlackDm } from '../routing/triage';
 
 /** Lookup-by-id readers the unfurl handler needs. A `link_shared` URL carries a
  *  specific id, so unlike the list-oriented readers used by `/ethos` commands
@@ -168,7 +168,14 @@ export function registerLinkEvents(app: App, deps: LinkEventDeps): void {
     // whenever anybody pasted an Ethos link. Checked before the reader fan-out
     // as well as before `chat.unfurl`: a silent room should not even cost the
     // lookups.
-    if (!canSpeakInChannel(deps.resolveChannelMode(evt.channel))) return;
+    //
+    // `link_shared` also fires in DMs, and its payload carries no
+    // `channel_type` — so DM-ness comes from the conversation id's `D` prefix
+    // (`isSlackDm`). Without it a deployment whose app default is `observe`
+    // silently stopped unfurling in DMs too, which is the same hard-coded
+    // `isDm: false` that made `/ethos ask` refuse in a DM. `evaluateChannelMode`
+    // ranks `isDm` above the mode: a DM is not a room.
+    if (!canSpeakInChannel(deps.resolveChannelMode(evt.channel), isSlackDm(evt.channel))) return;
 
     // Match first, then resolve concurrently. Each `buildUnfurl` hits a
     // backing reader; serializing them would make the handler's latency the

@@ -12,7 +12,7 @@ import type {
   Storage,
   VoiceOutboundAdapter,
 } from '@ethosagent/types';
-import { type ChannelMode, ChannelModeSchema, DEFAULT_CHANNEL_MODE } from './config';
+import { CHANNEL_MODES, type ChannelMode, ChannelModeSchema, DEFAULT_CHANNEL_MODE } from './config';
 import { downloadMedia } from './media';
 import {
   hasMedia,
@@ -267,6 +267,7 @@ export class WhatsAppAdapter implements PlatformAdapter, VoiceOutboundAdapter {
           isDm,
           isGroupMention: !isDm && isBotMentioned(msg, this.botJid),
           channelMode: this.channelOverrides?.get(jid)?.mode ?? this.defaultChannelMode,
+          supportedModes: CHANNEL_MODES,
         });
         if (!decision.shouldRecord) continue;
         const recordOnly = !decision.shouldReply;

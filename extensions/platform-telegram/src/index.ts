@@ -18,7 +18,7 @@ import type {
   VoiceOutboundAdapter,
 } from '@ethosagent/types';
 import { Bot, InlineKeyboard, InputFile, webhookCallback } from 'grammy';
-import { type ChannelMode, ChannelModeSchema, DEFAULT_CHANNEL_MODE } from './config';
+import { CHANNEL_MODES, type ChannelMode, ChannelModeSchema, DEFAULT_CHANNEL_MODE } from './config';
 import { chunkHash, markdownToTelegramHtml } from './format';
 import { ThreadStateStore } from './store/thread-state';
 
@@ -508,6 +508,7 @@ export class TelegramAdapter
       isDm: input.isDm,
       isGroupMention: input.isGroupMention,
       channelMode,
+      supportedModes: CHANNEL_MODES,
       hasBotPosted,
       // A thunk, invoked only in `regex_match` mode: the shared evaluator
       // never compiles a pattern, so the guard that turns a bad
@@ -523,6 +524,38 @@ export class TelegramAdapter
         }
       },
     });
+  }
+
+  /**
+   * Warn when a stored override carries a mode this build cannot read.
+   *
+   * `warnIfPrivacyModeHidesObserved` below tests `entry.mode === 'observe'`,
+   * which is a LITERAL and therefore matches only a readable `observe`. That is
+   * correct for what it reports — BotFather's privacy setting — but it means
+   * the one chat state with no diagnostic anywhere is also the quietest one: a
+   * chat whose stored mode is outside `CHANNEL_MODES` is neither answered nor
+   * recorded (`evaluateChannelMode` in `@ethosagent/core` fails closed on it),
+   * and from outside that is indistinguishable from a bot that was never added
+   * to the group. Telegram has no `/ethos channel-mode` to read the value back
+   * from the way Slack does, so this log line is the whole diagnostic surface.
+   *
+   * Synchronous and free — it reads the already-loaded index, no API call — so
+   * unlike the privacy check it needs no evidence-gathering round trip before
+   * it is worth firing.
+   */
+  private warnIfOverridesUnreadable(): void {
+    const logger = this.logger;
+    if (!logger) return;
+    const unreadable = (this.channelOverrides?.entries() ?? []).filter(
+      ([, entry]) => !(CHANNEL_MODES as readonly string[]).includes(entry.mode),
+    );
+    if (unreadable.length === 0) return;
+    const listed = unreadable.map(([chat, entry]) => `${chat}=${JSON.stringify(entry.mode)}`);
+    logger.warn(
+      `Telegram: ${unreadable.length} chat override(s) store a channel mode this build ` +
+        `cannot read (${listed.join(', ')}). Those chats are neither replied to nor ` +
+        'recorded — fix the mode in the override file, or upgrade to a build that knows it.',
+    );
   }
 
   /**
@@ -600,6 +633,7 @@ export class TelegramAdapter
     // because a per-chat `observe` override is one of the two things that make
     // the check worth a `getMe` call.
     await this.warnIfPrivacyModeHidesObserved();
+    this.warnIfOverridesUnreadable();
 
     this.bot.on('message', (ctx) => {
       if (!this.messageHandler) return;

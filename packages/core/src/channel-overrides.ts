@@ -49,6 +49,19 @@ export interface ChannelModeParser<Mode extends string> {
  * override is stored (fall back to the configured default — still correct);
  * a `mode` the adapter's enum does not contain means an override IS stored
  * and this build cannot read it (neither answer nor record).
+ *
+ * The second half of that sentence is enforced by `evaluateChannelMode`
+ * (`./channel-mode`), which refuses any mode outside the `supportedModes` it
+ * is handed, and by each adapter passing its OWN `CHANNEL_MODES` const —
+ * the same list its `ChannelModeSchema` is built from, so the enum that
+ * rejects a record here and the set that refuses to act on it there cannot
+ * drift apart. It used to test a hard-coded union of all four adapters'
+ * enums, under which a `regex_match` line in a Slack override file was
+ * "recognised" by a build that has no such mode. `parseRecord` kept it, and
+ * the evaluator then answered mentions in that channel while recording
+ * nothing. Pinned by `packages/core/src/__tests__/channel-mode.test.ts`
+ * ("a mode from another adapter's enum") and by each adapter's
+ * `__tests__/unreadable-mode.test.ts`.
  */
 export interface ChannelOverrideEntry {
   mode: string;

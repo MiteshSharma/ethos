@@ -637,6 +637,12 @@ export class SlackAdapter implements PlatformAdapter, ApprovalCapableAdapter, Vo
         command: command.command,
         text: command.text ?? '',
         channel_id: command.channel_id,
+        // `?? ''` is belt to Bolt's braces: `SlashCommand.channel_name` is
+        // declared required, but the payload is URL-decoded from Slack's POST
+        // body and a missing field would arrive `undefined` at runtime. An
+        // empty string is simply "not a DM by this signal" — `isSlackDm` still
+        // has the `D` id prefix to go on.
+        channel_name: command.channel_name ?? '',
         user_id: command.user_id,
         trigger_id: command.trigger_id,
       };

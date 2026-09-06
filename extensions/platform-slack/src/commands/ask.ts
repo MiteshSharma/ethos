@@ -1,5 +1,5 @@
 import { plaintextFallback, section } from '../blocks/shared';
-import { canSpeakInChannel, resolveChannelMode } from '../routing/triage';
+import { canSpeakInChannel, isSlackDm, resolveChannelMode } from '../routing/triage';
 import type { SlashCommandPayload, SlashContext, SlashResponse } from './index';
 
 export async function handleAsk(
@@ -24,12 +24,20 @@ export async function handleAsk(
   // There is no ephemeral variant to fall back to: the agent's answer is
   // produced asynchronously by the gateway and has no `response_url` to return
   // through. DM the bot, or change the mode.
+  //
+  // None of that reasoning applies in a DM, and the gate used to apply it there
+  // anyway: `canSpeakInChannel` hard-coded `isDm: false`, so with
+  // `defaultChannelMode: observe` a DM — which has no override, and therefore
+  // resolves to the app default — answered ordinary messages but refused
+  // `/ethos ask`, with a refusal telling the user to ask in a DM. There is no
+  // room of third parties in a one-to-one conversation for a mode to protect,
+  // which is why `evaluateChannelMode` ranks `isDm` above the mode.
   const channelMode = resolveChannelMode(payload.channel_id, {
     botKey: '',
     defaultChannelMode: ctx.defaultChannelMode,
     channelOverrides: ctx.channelOverrides,
   });
-  if (!canSpeakInChannel(channelMode)) {
+  if (!canSpeakInChannel(channelMode, isSlackDm(payload.channel_id, payload.channel_name))) {
     // Naming the mode verbatim makes this one of the ungated surfaces an
     // unreadable mode stays diagnosable through.
     const blocks = [
