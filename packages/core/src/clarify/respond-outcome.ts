@@ -64,22 +64,24 @@ export type ClarifyRespondOutcome =
  * NONE of them advises a retry, and that is a decision, not an omission.
  * `unknown_request` and `already_answered` mean there is no longer a question.
  * `not_answerable` leaves the row open, but the gate keys on the ROW's surface
- * (`isClarifyAnswerableOn(row, row.surfaceType)` in `ClarifyBridge.respond`),
+ * (`isClarifyAnswerableOn(row, row.surfaceType)` in `ClarifyBridge`'s
+ * `acceptsUserAnswer`),
  * so the same surface asking twice is refused identically. The takeover
  * socket's own `handback_failed` copy DOES invite a retry; it can, because it
  * asks `stillBound` first and its lane exists only for a row the web presented
  * (`apps/web-api/src/browser/takeover-socket.ts`, `refuse`).
  *
- * Where these sentences surface, as of this writing: `clarify.respond`
- * (`apps/web-api/src/rpc/clarify.ts`) throws them, and they are rendered by
- * `ClarifyCard`'s `respond` and `TakeoverCard`'s `handBack` (into
- * `submitError`, `apps/web/src/components/chat/ClarifyCard.tsx`) and by
- * `TakeoverMode.handBack` (into `handbackNotice`,
- * `apps/web/src/components/browser/TakeoverMode.tsx`). The voice path in
- * `apps/web/src/pages/Chat.tsx` does NOT render them — `runVoiceClarify` is
- * handed a `.then(() => undefined)` with no catch, so a refusal there is an
- * unhandled rejection nobody hears. A known gap, written down rather than
- * asserted away.
+ * Where these sentences surface: `clarify.respond`
+ * (`apps/web-api/src/rpc/clarify.ts`) throws them, and every surface that
+ * calls it shows the message it threw rather than copy of its own.
+ * `QuestionCard`'s `respond` and `TakeoverPanel`'s `handBack` render it into
+ * `submitError` (`apps/web/src/components/chat/ClarifyCard.tsx`);
+ * `TakeoverMode.handBack` renders it into `handbackNotice`
+ * (`apps/web/src/components/browser/TakeoverMode.tsx`); the voice path's
+ * `respond` closure in `apps/web/src/pages/Chat.tsx` shows it as a
+ * notification and rethrows, so the lane still ends `card-only` and the card
+ * stays the way to answer (pinned by
+ * `apps/web/src/pages/__tests__/chat-voice-clarify-refusal.test.ts`).
  */
 export function clarifyUnresolvedMessage(reason: ClarifyUnresolvedReason): string {
   switch (reason) {
