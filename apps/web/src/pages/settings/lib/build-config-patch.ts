@@ -13,6 +13,7 @@
 // Validation is returned, never notified: the caller owns the notification
 // channel, and a builder that reaches for one cannot be unit-tested.
 
+import { RETENTION_NO_PERSONALITY_SCOPE } from '@ethosagent/types';
 import {
   type ConfigGetData,
   type ConfigUpdatePatch,
@@ -241,6 +242,20 @@ export function buildConfigPatch(
       if (!RECORD_KEY_RE.test(row.personalityId)) {
         return fail(
           `Retention: personality id "${row.personalityId}" must use only letters, digits, hyphens, or underscores.`,
+        );
+      }
+      // The Scope dropdown does not offer these per personality
+      // (`RETENTION_SUBKEYS_PER_PERSONALITY`), so a row that has one was
+      // hydrated from a `personalities.<id>.retention.<subkey>` line an earlier
+      // build wrote. Refused HERE, naming the row and the fix, rather than left
+      // to `config.update`'s refusal — which would reject the whole save with a
+      // field path and no way to see which row meant it. Removing the row and
+      // saving CLEARS the stale line, because this record is a full
+      // replacement: that is the web's `ethos retention reset --personality`.
+      const noScope = RETENTION_NO_PERSONALITY_SCOPE[row.subkey];
+      if (noScope !== undefined) {
+        return fail(
+          `Retention: "${row.subkey}" cannot be scoped to a personality (${row.personalityId}) — ${noScope} Set it as a Global rule, and remove this row to clear the stored value.`,
         );
       }
       const map = personalityRetention[row.personalityId] ?? {};

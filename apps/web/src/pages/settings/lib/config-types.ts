@@ -4,6 +4,7 @@
 // surface (plan/phases/settings-navigation.md Phase 1). The RPC-derived aliases
 // are the single place the page learns the shape of `config.get` / `config.update`.
 
+import { RETENTION_NO_PERSONALITY_SCOPE } from '@ethosagent/types';
 import type { rpc } from '../../../rpc';
 
 // ---------------------------------------------------------------------------
@@ -52,6 +53,22 @@ export const RETENTION_SUBKEYS: readonly RetentionSubkey[] = [
   'events.channel',
   'events.install',
 ];
+
+/**
+ * The subkeys a row scoped to ONE personality may carry — every subkey except
+ * those `RETENTION_NO_PERSONALITY_SCOPE` (`@ethosagent/types`) refuses. Derived
+ * from {@link RETENTION_SUBKEYS} rather than written out, so a subkey added
+ * there is offered per personality unless the shared roster says otherwise.
+ *
+ * This is the "don't offer it" half. The refusal that actually binds is
+ * `checkRetentionMap`'s `scope: 'personality'` branch in
+ * `apps/web-api/src/services/config.service.ts`, which covers callers that
+ * never load this page; `buildConfigPatch` stops a row an EARLIER build wrote
+ * from reaching it, since such a row is hydrated from config.yaml and no
+ * dropdown was involved.
+ */
+export const RETENTION_SUBKEYS_PER_PERSONALITY: readonly RetentionSubkey[] =
+  RETENTION_SUBKEYS.filter((s) => RETENTION_NO_PERSONALITY_SCOPE[s] === undefined);
 
 /** '' / whitespace → null (clear-to-default for nullable config scalars). */
 export function strOrNull(s: string): string | null {

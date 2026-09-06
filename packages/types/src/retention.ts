@@ -62,6 +62,46 @@ export function isRetentionDuration(value: string): boolean {
   return RETENTION_DURATION_PATTERN.test(value);
 }
 
+/**
+ * Retention subkeys that may NOT be scoped to one personality, and the sentence
+ * every refusing surface shows the operator.
+ *
+ * `personalities.<id>.retention.*` is written and displayed by
+ * `ethos retention` and the web Settings page, and read by NOTHING that prunes
+ * on a schedule. No category honours a per-personality window today; the
+ * difference with `channelTranscript` is that there is nothing for one to
+ * honour. Observe-mode transcripts live in ONE `~/.ethos/channel-transcript.db`
+ * with no personality column, pruned from the `observability-prune` cron
+ * handler (`apps/ethos/src/wiring.ts`) against the global
+ * `retention.channelTranscript` alone, so a per-personality value here could
+ * never be more than a number in a file.
+ *
+ * Refused rather than accepted-and-ignored because this is third-party message
+ * text: an operator who sets a shorter window and is told it was set has been
+ * told the room is forgotten sooner than it is. The pre-existing gap for every
+ * OTHER category is not fixed here — see the message, which names it.
+ *
+ * Canonical here for the same reason {@link RETENTION_DURATION_PATTERN} is:
+ * more than one surface has to refuse the same combination, and a copy per
+ * surface is how they come to disagree. The enforcers are
+ * `runRetention`'s `set` branch (`apps/ethos/src/commands/retention.ts`),
+ * `validateSettingsPatch` (`apps/web-api/src/services/config.service.ts` —
+ * covers every `config.update` caller, UI or not), and `buildConfigPatch`
+ * (`apps/web/src/pages/settings/lib/build-config-patch.ts`, which stops the
+ * Settings page from sending one).
+ *
+ * Clearing is deliberately NOT refused anywhere: a value an earlier build wrote
+ * must stay removable. On the CLI that is `ethos retention reset <category>
+ * --personality <id>`; on the web it is removing the row, since
+ * `personalityRetention` is a full replacement of `personalities.*.retention.*`
+ * and an omitted subkey is deleted.
+ */
+export const RETENTION_NO_PERSONALITY_SCOPE: Readonly<Record<string, string>> = {
+  channelTranscript:
+    'observe-mode transcripts are one database with no personality column — ' +
+    'the nightly prune reads the global retention.channelTranscript only.',
+};
+
 export const RETENTION_DEFAULTS: {
   messages: string;
   traces: string;

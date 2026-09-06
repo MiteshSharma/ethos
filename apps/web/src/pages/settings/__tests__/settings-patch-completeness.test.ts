@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { buildConfigPatch, type SettingsRows } from '../lib/build-config-patch';
+import type { RetentionSubkey } from '../lib/config-types';
 import type { FormShape } from '../lib/form-shape';
 
 // T2 — plan/phases/settings-navigation.md §5 and §10.
@@ -265,5 +266,67 @@ describe('buildConfigPatch', () => {
   it('refuses a chain with no primary provider rather than saving a blank one', () => {
     const result = buildConfigPatch(store(), { ...rows(), providerRows: [] }, undefined);
     expect(result).toEqual({ ok: false, error: 'Primary provider and model are required.' });
+  });
+});
+
+// `personalities.<id>.retention.channelTranscript` is a value nothing reads —
+// observe-mode transcripts are one database with no personality column, pruned
+// against the global key alone (`RETENTION_NO_PERSONALITY_SCOPE`,
+// @ethosagent/types). `config.update` refuses it for every caller; the Settings
+// page's job is to make sure the operator never has to see that refusal.
+//
+// The dropdowns stop a NEW row (`RETENTION_SUBKEYS_PER_PERSONALITY` in
+// config-types.ts). This is the other half: a row hydrated from a line an
+// EARLIER build wrote never went through a dropdown, so the builder has to
+// catch it and say which row and what to do.
+describe('buildConfigPatch — per-personality retention scope', () => {
+  const retentionRow = (personalityId: string, subkey: RetentionSubkey) => ({
+    _id: 1,
+    personalityId,
+    subkey,
+    duration: '7d',
+  });
+
+  it('refuses a channelTranscript row scoped to a personality, naming the row', () => {
+    const result = buildConfigPatch(
+      store(),
+      { ...rows(), retentionRows: [retentionRow('researcher', 'channelTranscript')] },
+      undefined,
+    );
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error('unreachable');
+    expect(result.error).toContain('channelTranscript');
+    expect(result.error).toContain('researcher');
+    expect(result.error).toMatch(/remove this row/i);
+  });
+
+  it('keeps the GLOBAL channelTranscript rule settable', () => {
+    const result = buildConfigPatch(
+      store(),
+      { ...rows(), retentionRows: [retentionRow('', 'channelTranscript')] },
+      undefined,
+    );
+    if (!result.ok) throw new Error(`expected a patch, got: ${result.error}`);
+    expect(result.patch.retention).toEqual({ channelTranscript: '7d' });
+    expect(result.patch.personalityRetention).toEqual({});
+  });
+
+  // Removing the row is how a stale value is cleared: `personalityRetention` is
+  // a full replacement, so a save with the row gone deletes the config.yaml
+  // line. That path must reach the server, not be refused on the way out.
+  it('lets the save through once the stale row is removed, clearing the value', () => {
+    const result = buildConfigPatch(store(), { ...rows(), retentionRows: [] }, undefined);
+    if (!result.ok) throw new Error(`expected a patch, got: ${result.error}`);
+    expect(result.patch.personalityRetention).toEqual({});
+  });
+
+  it('still allows every other subkey per personality', () => {
+    const result = buildConfigPatch(
+      store(),
+      { ...rows(), retentionRows: [retentionRow('researcher', 'messages')] },
+      undefined,
+    );
+    if (!result.ok) throw new Error(`expected a patch, got: ${result.error}`);
+    expect(result.patch.personalityRetention).toEqual({ researcher: { messages: '7d' } });
   });
 });

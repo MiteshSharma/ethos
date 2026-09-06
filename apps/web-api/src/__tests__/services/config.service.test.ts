@@ -764,6 +764,97 @@ describe('ConfigService — settings passthrough groups', () => {
     });
   });
 
+  // `personalities.<id>.retention.channelTranscript` is a value NOTHING reads:
+  // observe-mode transcripts are one `~/.ethos/channel-transcript.db` with no
+  // personality column, and the nightly `observability-prune` handler
+  // (apps/ethos/src/wiring.ts) reads the global `retention.channelTranscript`
+  // alone. `ethos retention set --personality` was made to refuse it; this
+  // service was left accepting it, so the web saved an operator a promise that
+  // third-party message text is forgotten sooner than it is.
+  //
+  // The refusal belongs HERE and not only in the Settings page because this
+  // covers every `config.update` caller, including one that never loads the UI.
+  // Roster and sentence: `RETENTION_NO_PERSONALITY_SCOPE` (@ethosagent/types).
+  describe('personalityRetention.<id>.channelTranscript', () => {
+    it('refuses to save a per-personality window nothing prunes on', async () => {
+      await writeBase();
+      await expect(
+        service.update({ personalityRetention: { researcher: { channelTranscript: '7d' } } }),
+      ).rejects.toThrow(/cannot be set per personality/);
+
+      // Nothing was written — not the refused key, and not the rest of the patch.
+      const written = await storage.read(join(DATA, 'config.yaml'));
+      expect(written).not.toContain('personalities.researcher.retention');
+    });
+
+    it('refuses it even when the same patch carries a subkey that is allowed', async () => {
+      await writeBase();
+      await expect(
+        service.update({
+          personalityRetention: { researcher: { messages: '30d', channelTranscript: '7d' } },
+        }),
+      ).rejects.toThrow(/personalityRetention\.researcher\.channelTranscript/);
+      const written = await storage.read(join(DATA, 'config.yaml'));
+      expect(written).not.toContain('personalities.researcher.retention');
+    });
+
+    // The refusal names the global key, which is the setting that actually
+    // shortens the window. It must stay fully settable from this surface.
+    it('leaves the GLOBAL retention.channelTranscript settable', async () => {
+      await writeBase();
+      await service.update({ retention: { channelTranscript: '7d' } });
+      expect(await storage.read(join(DATA, 'config.yaml'))).toContain(
+        'retention.channelTranscript: 7d',
+      );
+    });
+
+    // A value an earlier build wrote must remain removable, or an operator is
+    // stuck with a row they cannot clear. `personalityRetention` is a full
+    // replacement of `personalities.*.retention.*`, so omitting the subkey
+    // deletes it — the web's `ethos retention reset --personality`.
+    it('lets a value an earlier build wrote be cleared', async () => {
+      await writeBase([
+        'personalities.researcher.retention.channelTranscript: 7d',
+        'personalities.researcher.retention.messages: 30d',
+      ]);
+      expect((await service.get()).personalityRetention).toEqual({
+        researcher: { channelTranscript: '7d', messages: '30d' },
+      });
+
+      await service.update({ personalityRetention: { researcher: { messages: '30d' } } });
+      const written = await storage.read(join(DATA, 'config.yaml'));
+      expect(written).not.toContain('personalities.researcher.retention.channelTranscript');
+      expect(written).toContain('personalities.researcher.retention.messages: 30d');
+      expect((await service.get()).personalityRetention).toEqual({
+        researcher: { messages: '30d' },
+      });
+    });
+
+    // Clearing the whole personality entry works too — an empty map deletes
+    // every subkey under it, stale channelTranscript included.
+    it('lets the whole personality entry be cleared', async () => {
+      await writeBase(['personalities.researcher.retention.channelTranscript: 7d']);
+      await service.update({ personalityRetention: {} });
+      expect(await storage.read(join(DATA, 'config.yaml'))).not.toContain(
+        'personalities.researcher.retention',
+      );
+      expect((await service.get()).personalityRetention).toEqual({});
+    });
+
+    // Every other subkey stays scopable. The pre-existing "no category honours
+    // a per-personality window on the scheduled prune" gap is documented, not
+    // closed here — only the category with nothing to honour is refused.
+    it('still accepts every other subkey per personality', async () => {
+      await writeBase();
+      await service.update({
+        personalityRetention: { researcher: { messages: '30d', 'events.audit': '90d' } },
+      });
+      const written = await storage.read(join(DATA, 'config.yaml'));
+      expect(written).toContain('personalities.researcher.retention.messages: 30d');
+      expect(written).toContain('personalities.researcher.retention.events.audit: 90d');
+    });
+  });
+
   it('round-trips every parity leaf under its dotted config key', async () => {
     await writeBase();
     await service.update({

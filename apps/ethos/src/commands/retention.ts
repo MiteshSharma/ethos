@@ -1,6 +1,10 @@
 import { readRawConfig, writeConfig } from '@ethosagent/config';
 import { mergeRetentionConfig, parseDuration } from '@ethosagent/observability-sqlite';
-import { RETENTION_DEFAULTS, type RetentionConfig } from '@ethosagent/types';
+import {
+  RETENTION_DEFAULTS,
+  RETENTION_NO_PERSONALITY_SCOPE,
+  type RetentionConfig,
+} from '@ethosagent/types';
 import { writeJson } from '../json-output';
 import { getSecretsResolver, getStorage } from '../wiring';
 
@@ -11,29 +15,15 @@ import { getSecretsResolver, getStorage } from '../wiring';
 // ---------------------------------------------------------------------------
 
 /**
- * Categories `--personality` may NOT be used with, and why.
- *
- * `personalitiesConfig.<id>.retention` is written and displayed by this
- * command and read by `ethos data` — and by NOTHING that prunes. No category
- * honours a per-personality window today; the difference with
- * `channelTranscript` is that there is nothing for one to honour. Observe-mode
- * transcripts live in ONE `~/.ethos/channel-transcript.db` with no personality
- * column, pruned from the `observability-prune` cron handler
- * (`apps/ethos/src/wiring.ts`) against the global `retention.channelTranscript`
- * alone, so a per-personality value here could never be more than a number in
- * a file.
- *
- * Refused rather than accepted-and-ignored because this is third-party message
- * text: an operator who sets a shorter window and is told it was set has been
- * told the room is forgotten sooner than it is. The pre-existing gap for every
- * OTHER category is not fixed here — see the message, which names it.
+ * Categories `--personality` may NOT be used with, and why: the roster and the
+ * reason both live in `RETENTION_NO_PERSONALITY_SCOPE`
+ * (`packages/types/src/retention.ts`), because the web Settings page has to
+ * refuse the same combination and a second copy of the rule is how two
+ * surfaces come to disagree about it. This command appends its own remedy —
+ * the shared sentence says what is wrong, not which flag to drop.
  */
-const NO_PERSONALITY_SCOPE: Record<string, string> = {
-  channelTranscript:
-    'observe-mode transcripts are one database with no personality column — ' +
-    'the nightly prune reads the global retention.channelTranscript only. ' +
-    'Set it without --personality.',
-};
+const NO_PERSONALITY_SCOPE = RETENTION_NO_PERSONALITY_SCOPE;
+const NO_PERSONALITY_SCOPE_REMEDY = 'Set it without --personality.';
 
 const CATEGORY_LABELS: Record<string, string> = {
   messages: 'messages',
@@ -286,7 +276,9 @@ export async function runRetention(sub: string, argv: string[]): Promise<void> {
     // allowed, so a value an earlier build wrote can be cleared.
     const noScope = flags.personality ? NO_PERSONALITY_SCOPE[category] : undefined;
     if (noScope) {
-      console.error(`retention.${category} cannot be set per personality: ${noScope}`);
+      console.error(
+        `retention.${category} cannot be set per personality: ${noScope} ${NO_PERSONALITY_SCOPE_REMEDY}`,
+      );
       process.exit(1);
     }
     // Validate duration

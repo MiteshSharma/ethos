@@ -5,7 +5,7 @@
 // read-only readout, same treatment as Models & providers' `per-personality
 // routing`, not a place to force a control that would not otherwise exist.
 
-import { RETENTION_DEFAULTS } from '@ethosagent/types';
+import { RETENTION_DEFAULTS, RETENTION_NO_PERSONALITY_SCOPE } from '@ethosagent/types';
 import { Button, Form, Input, InputNumber, Select, Switch, Typography } from 'antd';
 import type { Dispatch, SetStateAction } from 'react';
 import { AdvancedBlock } from '../components/advanced';
@@ -15,6 +15,7 @@ import { SettingTable } from '../components/setting-table';
 import {
   type PersonalityOption,
   RETENTION_SUBKEYS,
+  RETENTION_SUBKEYS_PER_PERSONALITY,
   type RetentionSubkey,
 } from '../lib/config-types';
 import { nextRowId } from '../lib/row-id';
@@ -94,7 +95,9 @@ function RetentionEditor({
         TTLs for stored data (retention.&lt;subkey&gt;, or
         personalities.&lt;id&gt;.retention.&lt;subkey&gt; to override for one personality). Duration
         is &quot;forever&quot; or a number plus d/w/m/y, e.g. 90d. Unlisted subkeys keep the
-        built-in default; saving replaces the whole set.
+        built-in default; saving replaces the whole set. A few subkeys are Global-only — the nightly
+        prune reads no per-personality window for them, so the Personality column does not offer
+        one.
       </Typography.Paragraph>
       <SettingTable<RetentionRow>
         rowKey={(row) => row._id}
@@ -112,9 +115,14 @@ function RetentionEditor({
                 style={{ width: '100%' }}
                 value={row.personalityId}
                 onChange={(v: string) => update(idx, { personalityId: v })}
+                // A subkey the nightly prune only ever reads globally is
+                // Global-only here, so the combination cannot be built from
+                // either direction. See `RETENTION_SUBKEYS_PER_PERSONALITY`.
                 options={[
                   { value: '', label: 'Global' },
-                  ...personalities.map((p) => ({ value: p.id, label: p.name })),
+                  ...(RETENTION_NO_PERSONALITY_SCOPE[row.subkey] === undefined
+                    ? personalities.map((p) => ({ value: p.id, label: p.name }))
+                    : []),
                 ]}
               />
             ),
@@ -128,7 +136,10 @@ function RetentionEditor({
                 style={{ width: '100%' }}
                 value={row.subkey}
                 onChange={(v: RetentionSubkey) => update(idx, { subkey: v })}
-                options={RETENTION_SUBKEYS.map((s) => ({ value: s, label: s }))}
+                options={(row.personalityId
+                  ? RETENTION_SUBKEYS_PER_PERSONALITY
+                  : RETENTION_SUBKEYS
+                ).map((s) => ({ value: s, label: s }))}
               />
             ),
           },

@@ -6,7 +6,11 @@ import {
   VOICE_CHANNEL_PLATFORMS,
   type VoiceBargeInTuning,
 } from '@ethosagent/config';
-import { EthosError, type SecretsResolver } from '@ethosagent/types';
+import {
+  EthosError,
+  RETENTION_NO_PERSONALITY_SCOPE,
+  type SecretsResolver,
+} from '@ethosagent/types';
 import {
   type ConfigRepository,
   parseRealtimeRoster,
@@ -954,13 +958,44 @@ function checkRecordKey(field: string, key: string): void {
   }
 }
 
-function checkRetentionMap(field: string, map: Partial<Record<RetentionSubkey, string>>): void {
+/**
+ * `scope: 'personality'` additionally refuses the subkeys
+ * `RETENTION_NO_PERSONALITY_SCOPE` (`@ethosagent/types`) lists — today only
+ * `channelTranscript`, whose nightly prune reads the global key alone, so a
+ * per-personality window would tell an operator that third-party message text
+ * is forgotten sooner than it is. Refused HERE and not only in the Settings
+ * page because this covers every `config.update` caller, including one that
+ * never loads the UI; `ethos retention set --personality` already refuses the
+ * same combination against the same roster.
+ *
+ * Only a DEFINED duration is refused. An undefined value writes nothing
+ * (`set()` returns early on `undefined`), so it makes no claim to break — the
+ * same reason the grammar check below skips it.
+ *
+ * CLEARING is not refused: `personalityRetention` is a full replacement of
+ * `personalities.*.retention.*`, so a patch that simply omits the subkey
+ * deletes a value an earlier build wrote. That is this surface's equivalent of
+ * `ethos retention reset <category> --personality <id>`, and it is what keeps
+ * an operator from being stuck with a row they cannot remove.
+ */
+function checkRetentionMap(
+  field: string,
+  map: Partial<Record<RetentionSubkey, string>>,
+  scope: 'global' | 'personality' = 'global',
+): void {
   for (const [sub, dur] of Object.entries(map)) {
     if (!(RETENTION_SUBKEYS as readonly string[]).includes(sub)) {
       invalidValue(`${field}.${sub}`, 'is not a retention subkey');
     }
     if (dur !== undefined && !RETENTION_DURATION_RE.test(dur)) {
       invalidValue(`${field}.${sub}`, "must be 'forever' or <n> followed by d|w|m|y");
+    }
+    const noScope = scope === 'personality' ? RETENTION_NO_PERSONALITY_SCOPE[sub] : undefined;
+    if (noScope !== undefined && dur !== undefined) {
+      invalidValue(
+        `${field}.${sub}`,
+        `cannot be set per personality: ${noScope} Set retention.${sub} instead, or remove this entry to clear it.`,
+      );
     }
   }
 }
@@ -1116,7 +1151,7 @@ function validateSettingsPatch(patch: ConfigUpdateInput): void {
   if (patch.personalityRetention) {
     for (const [pid, map] of Object.entries(patch.personalityRetention)) {
       checkRecordKey(`personalityRetention.${pid}`, pid);
-      if (map) checkRetentionMap(`personalityRetention.${pid}`, map);
+      if (map) checkRetentionMap(`personalityRetention.${pid}`, map, 'personality');
     }
   }
   if (patch.channelToolsets) {
