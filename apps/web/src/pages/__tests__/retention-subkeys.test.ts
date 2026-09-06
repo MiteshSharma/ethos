@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { RETENTION_NO_PERSONALITY_SCOPE } from '@ethosagent/types';
+import { RETENTION_DEFAULTS, RETENTION_NO_PERSONALITY_SCOPE } from '@ethosagent/types';
 import { describe, expect, it } from 'vitest';
 import { RETENTION_SUBKEYS, RETENTION_SUBKEYS_PER_PERSONALITY } from '../settings/lib/config-types';
 import { retentionRowsFromConfig } from '../settings/lib/rows';
@@ -93,5 +93,35 @@ describe('retention subkeys offered per personality', () => {
     expect(pane).toContain('RETENTION_SUBKEYS_PER_PERSONALITY');
     // Pick the subkey first and the Personality column offers only `Global`.
     expect(pane).toContain('RETENTION_NO_PERSONALITY_SCOPE');
+  });
+});
+
+// The built-in-defaults readout at the bottom of the pane. It is the ONLY place
+// an operator is told what window applies to a subkey they have written no rule
+// for, and its list is hand-written — nine of the ten subkeys, missing
+// `channelTranscript`, the one governing message text recorded from people who
+// never opted into an agent. Everything else about that category was already
+// present: it is editable above, its per-personality scope is refused, and its
+// default is exported. Only the sentence stating the default was absent.
+describe('built-in retention defaults readout', () => {
+  it('shows a default for every subkey the editor can produce a row for', () => {
+    const pane = paneBody('data.tsx');
+    for (const subkey of RETENTION_SUBKEYS) {
+      // The subkey string doubles as the property path: `events.error` renders
+      // as `RETENTION_DEFAULTS.events.error`, the flat ones as
+      // `RETENTION_DEFAULTS.<subkey>`.
+      expect(pane, `built-in default missing for ${subkey}`).toContain(`'${subkey}'`);
+      expect(pane, `built-in default not read from RETENTION_DEFAULTS for ${subkey}`).toContain(
+        `RETENTION_DEFAULTS.${subkey}`,
+      );
+    }
+  });
+
+  it('reads the 30d observe-transcript default from the shared roster', () => {
+    // Not a literal in the pane: a copy here is how the page comes to disagree
+    // with `observability-prune` (apps/ethos/src/wiring.ts), which reads
+    // `RETENTION_DEFAULTS.channelTranscript` and nothing else.
+    expect(RETENTION_DEFAULTS.channelTranscript).toBe('30d');
+    expect(paneBody('data.tsx')).not.toContain("'channelTranscript', '30d'");
   });
 });

@@ -461,11 +461,19 @@ export class AgentLoop {
 
   /**
    * Resolve a pending clarify request — called by an interactive surface when
-   * the user answers or cancels. No-op when no clarify bridge is wired or the
-   * request id is unknown (already resolved / timed out).
+   * the user answers or cancels. Returns what the answer DID: the
+   * `ClarifyRespondOutcome` that `ClarifyBridge.respond` (`./clarify/clarify-bridge`)
+   * reports on every path. Returning `void` here left the CLI presenter
+   * (`apps/ethos/src/commands/chat.ts`) assuming success — the same defect
+   * `apps/web-api/src/rpc/clarify.ts` was fixed for. No bridge wired is
+   * `unknown_request`, not a resolution: nothing received the answer. Pinned by
+   * `./__tests__/agent-loop-respond-clarify.test.ts`.
    */
-  async respondToClarify(response: import('@ethosagent/types').ClarifyResponse): Promise<void> {
-    await this.clarifyBridge?.respond(response);
+  async respondToClarify(
+    response: import('@ethosagent/types').ClarifyResponse,
+  ): Promise<import('./clarify/respond-outcome').ClarifyRespondOutcome> {
+    const outcome = await this.clarifyBridge?.respond(response);
+    return outcome ?? { resolved: false, reason: 'unknown_request' };
   }
 
   /** Returns all available tools for inventory display (e.g. TUI splash screen). */

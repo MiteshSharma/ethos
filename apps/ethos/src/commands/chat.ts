@@ -5,7 +5,12 @@ import { clearLine, createInterface } from 'node:readline';
 import { InMemorySteerSink } from '@ethosagent/agent-bridge';
 import type { EthosConfig, QuickCommandConfig } from '@ethosagent/config';
 import { ethosDir } from '@ethosagent/config';
-import { type AgentEvent, type AgentLoop, stripAnsiEscapes } from '@ethosagent/core';
+import {
+  type AgentEvent,
+  type AgentLoop,
+  clarifyUnresolvedMessage,
+  stripAnsiEscapes,
+} from '@ethosagent/core';
 import { FsAttachmentCache, FsStorage } from '@ethosagent/storage-fs';
 import { parseSlashCommand, shouldSurfaceProgress } from '@ethosagent/surface-kit';
 import type { SplashInventory } from '@ethosagent/tui';
@@ -398,7 +403,23 @@ export async function runChat(config: EthosConfig, opts: RunChatOptions = {}): P
       // D7 — a human acted on this surface; a background job's next question
       // may route here instead of always falling back to its origin lane.
       loop.clarifyBridge?.recordPresence('cli');
-      void loop.respondToClarify({ requestId: req.requestId, answer, source: 'user' });
+      // An answer that did not land is said out loud. `finish()` above has
+      // already redrawn the prompt on the assumption it did — nothing else on
+      // this surface would ever mention it, and the CLI can be asked a
+      // `browser_takeover` it cannot hand back (`isClarifyAnswerableOn` in
+      // `packages/core/src/clarify/takeover-handback.ts`), which leaves the
+      // request open and this reader believing it is closed. The sentence is
+      // `clarifyUnresolvedMessage`'s, not ours — the web says the same words
+      // for the same reason.
+      void loop
+        .respondToClarify({ requestId: req.requestId, answer, source: 'user' })
+        .then((outcome) => {
+          if (outcome.resolved) return;
+          out(
+            `\n${c.dim}That answer did not land: ${clarifyUnresolvedMessage(outcome.reason)}.${c.reset}\n`,
+          );
+          if (!state.abort) rl.prompt();
+        });
     };
     // Teardown if the request resolves another way first (timeout / abort-cancel).
     const unsubscribe =

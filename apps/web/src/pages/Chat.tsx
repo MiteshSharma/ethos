@@ -757,14 +757,38 @@ export function Chat({ personalityId: personalityIdProp, teamContext }: ChatProp
     void runVoiceClarify({
       request: pendingClarify,
       ask: askByVoice,
-      respond: (answer) =>
-        rpc.clarify
-          .respond({ requestId: pendingClarify.requestId, answer, source: 'user' })
-          .then(() => undefined),
+      respond: async (answer) => {
+        try {
+          await rpc.clarify.respond({
+            requestId: pendingClarify.requestId,
+            answer,
+            source: 'user',
+          });
+        } catch (err) {
+          // A refusal is SAID, not swallowed. `clarify.respond`
+          // (`apps/web-api/src/rpc/clarify.ts`) throws for every outcome its
+          // `ClarifyRespondOutcome` reports unresolved, with the message
+          // `clarifyUnresolvedMessage` supplies — the same sentence
+          // `ClarifyCard`'s `respond` renders into `submitError` on the typed
+          // path. Spoken answers had nowhere to put it: the outcome
+          // `runVoiceClarify` returns collapses every failure into
+          // `card-only`, so the card stayed on screen saying nothing about
+          // the answer the user had already given out loud.
+          //
+          // Rethrown so `runVoiceClarify` still reports `card-only` and leaves
+          // the card as the way to answer.
+          notification.info({
+            message: 'Voice',
+            description: err instanceof Error ? err.message : String(err),
+            placement: 'topRight',
+          });
+          throw err;
+        }
+      },
       signal: controller.signal,
     });
     return () => controller.abort();
-  }, [pendingClarify, inCall, askByVoice]);
+  }, [pendingClarify, inCall, askByVoice, notification]);
 
   const handleNewSession = () => {
     // Team Chat pane (teams-as-a-scope T4): there is nothing to pick — the

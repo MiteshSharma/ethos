@@ -178,12 +178,19 @@ function RetentionEditor({
 // ---------------------------------------------------------------------------
 
 function BuiltInDefaults() {
+  // One entry per subkey the rules editor above can produce a row for. Written
+  // out rather than derived because `RETENTION_DEFAULTS.events` is nested and
+  // `RETENTION_SUBKEYS` is flat — which is how `channelTranscript` came to be
+  // missing here while being editable there, hiding its 30d default for the one
+  // category holding message text from people who never opted into an agent.
+  // Drift is caught by `apps/web/src/pages/__tests__/retention-subkeys.test.ts`.
   const entries: [string, string][] = [
     ['messages', RETENTION_DEFAULTS.messages],
     ['traces', RETENTION_DEFAULTS.traces],
     ['spans', RETENTION_DEFAULTS.spans],
     ['blobs', RETENTION_DEFAULTS.blobs],
     ['archive', RETENTION_DEFAULTS.archive],
+    ['channelTranscript', RETENTION_DEFAULTS.channelTranscript],
     ['events.error', RETENTION_DEFAULTS.events.error],
     ['events.audit', RETENTION_DEFAULTS.events.audit],
     ['events.channel', RETENTION_DEFAULTS.events.channel],
