@@ -1125,6 +1125,10 @@ describe('SshExecutionBackend.exec', () => {
     'rsync: [sender] failed to open "/x": Permission denied (13)',
     'FAIL src/net.test.ts > reconnects after Connection reset by 10.0.0.1 port 22',
     'error: Timeout, server db-01 not responding. (from our health check)',
+    // `kex_exchange_identification:` is the one PREFIX pattern — its tail is
+    // `strerror` output and cannot be enumerated. It is still anchored at the
+    // START of the line, which is what keeps a remote mention of it remote.
+    'FAIL src/kex.test.ts > kex_exchange_identification: read: Connection reset by peer',
   ])('leaves remote output that merely mentions %j as a remote exit 255', async (line) => {
     useReplies([{ stderr: [`${line}\n`], code: 255 }]);
     const chunks = await collect(backend({}).exec('pnpm test', {}));

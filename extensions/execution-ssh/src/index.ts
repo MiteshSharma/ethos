@@ -148,13 +148,17 @@ export class SshEnvUnsupportedError extends Error {
  *    machine cannot write — and it covers those for every execution tool
  *    (`createRunCodeTool` and `makeCommandTool` in `@ethosagent/tools-code`,
  *    `makeTerminalTool` in `@ethosagent/tools-terminal`).
- *  - TOO BROAD is the worse error, so the patterns are anchored to a WHOLE
- *    line rather than searched for inside one: remote output that merely
- *    contains `Connection reset by peer` is a failing command, and reporting
- *    it as a transport failure would tell the agent its test suite never ran
- *    when it did. A remote command whose own stderr is byte-identical to one
- *    of ssh's fatal lines is still claimed — in practice that means the remote
- *    ran `ssh` and it failed, which is the honest reading anyway.
+ *  - TOO BROAD is the worse error, so the patterns are anchored rather than
+ *    searched for inside a line: remote output that merely contains
+ *    `Connection reset by peer` is a failing command, and reporting it as a
+ *    transport failure would tell the agent its test suite never ran when it
+ *    did. Every pattern is anchored at the line's start and all but one at its
+ *    end; the exception is `kex_exchange_identification:`, whose tail is
+ *    `strerror` output and cannot be enumerated without missing real variants
+ *    — its entry in {@link SSH_SELF_DIAGNOSTICS} makes that case. A remote
+ *    command whose own stderr is byte-identical to one of ssh's fatal lines is
+ *    still claimed — in practice that means the remote ran `ssh` and it
+ *    failed, which is the honest reading anyway.
  */
 export class SshTransportError extends Error {
   readonly code = 'SSH_TRANSPORT_FAILED';
@@ -269,15 +273,23 @@ function createDiagnosticBuffer(): { push: (chunk: Buffer) => void; text: () => 
  * The stderr lines ssh writes ABOUT ITSELF on a fatal path, beyond the ones it
  * prefixes `ssh:`.
  *
- * Every entry is anchored `^…$` and matched against a TRIMMED whole line. That
- * anchoring is the entire line-drawing rule, and it is drawn deliberately on
- * the narrow side. stderr carries the remote command's output interleaved with
- * ssh's own, and a matcher that SEARCHED for these phrases would claim
- * `curl: (56) Recv failure: Connection reset by peer` — an ordinary failing
- * command — as a transport failure and tell the agent its suite never ran. The
- * variable parts are constrained too (`\S+`, `port \d+`), so the bare libc
- * string `Connection reset by peer` does not match while ssh's own
- * `Connection reset by 10.0.0.5 port 22` does.
+ * Every entry is anchored at the START of a TRIMMED whole line, and all but one
+ * are anchored at its end as well. That anchoring is the entire line-drawing
+ * rule, and it is drawn deliberately on the narrow side. stderr carries the
+ * remote command's output interleaved with ssh's own, and a matcher that
+ * SEARCHED for these phrases would claim `curl: (56) Recv failure: Connection
+ * reset by peer` — an ordinary failing command — as a transport failure and
+ * tell the agent its suite never ran. The variable parts are constrained too
+ * (`\S+`, `port \d+`), so the bare libc string `Connection reset by peer` does
+ * not match while ssh's own `Connection reset by 10.0.0.5 port 22` does.
+ *
+ * THE ONE EXCEPTION is `kex_exchange_identification:`, which is a prefix: `^…`
+ * with a free tail, not `^…$`. It is called out here rather than left for a
+ * reader to notice, because the rest of this comment leans on `$` and the
+ * exception would otherwise read as an oversight. Its own entry below argues
+ * why a tail cannot be enumerated for that one function and why the prefix is
+ * nonetheless narrow. No other entry may take that shape without the same
+ * argument.
  *
  * Each pattern below was produced by driving the LOCAL ssh binary
  * (OpenSSH_9.6p1 Ubuntu-3ubuntu13.18) into the failure, against a throwaway
@@ -305,8 +317,33 @@ const SSH_SELF_DIAGNOSTICS: readonly RegExp[] = [
   // `Permission denied` both fail to match it.
   /^\S+@\S+: Permission denied \([^()]*\)\.$/,
   // `kex_exchange_identification: read: Connection reset by peer`. Reproduced
-  // against a socket server that accepts and immediately closes. The prefix is
-  // ssh's own function name; nothing but ssh prints it.
+  // against a socket server that accepts and immediately closes.
+  //
+  // A PREFIX, and the only one in this list — see THE ONE EXCEPTION above.
+  // The tail cannot be enumerated. `kex_exchange_identification()` reports
+  // through `error_f`, which prepends `__func__`, so a single occurrence of the
+  // name in the binary fronts every failure that function has; the shipped
+  // OpenSSH_9.6p1 carries at least six distinct continuations for it
+  // (`banner line contains invalid characters`, `Connection closed by remote
+  // host`, `Bad remote protocol version identification: …`, `… invalid protocol
+  // identifier …`, `read: %.100s`, `write: %.100s`), and the last two
+  // interpolate `strerror(errno)` — an open set that varies by errno, libc and
+  // `LC_MESSAGES`. An anchored alternation over that is not a narrower matcher,
+  // it is a matcher that misses real variants, and a missed variant is the
+  // EXPENSIVE error here: a dead connection reported to the agent as its own
+  // command failing. Anchoring the tail as `.*$` instead would be identical to
+  // this pattern, since the input is one newline-free trimmed line — uniform to
+  // read and enforcing nothing.
+  //
+  // What makes the prefix narrow enough anyway: it is a C function name, so it
+  // appears in output only because ssh's own `error_f` put it at the head of a
+  // line, and it is still `^`-anchored — remote output that mentions it inside
+  // a line (a test name, a log with a timestamp column) does not match, which
+  // is pinned alongside the other counter-cases in ssh.test.ts. The residual
+  // risk is a remote command that prints this function name at the start of a
+  // line AND exits 255; in practice that is a nested `ssh` on the target
+  // failing, which this file already claims deliberately (see
+  // {@link isSshDiagnostic}).
   /^kex_exchange_identification: /,
   // `Connection reset by 127.0.0.1 port 22001` / `Connection closed by
   // 127.0.0.1 port 22002` — `sshpkt_vfatal`, whose `remote_id` is
@@ -333,9 +370,9 @@ const SSH_SELF_DIAGNOSTICS: readonly RegExp[] = [
  * remote command.
  *
  * `ssh:`-prefixed lines are ssh's own by construction. The rest are the
- * anchored patterns in {@link SSH_SELF_DIAGNOSTICS}; the reason for anchoring
- * and the limits of the list are documented there and on
- * {@link SshTransportError}. Classifying one of these as a remote failure hands
+ * patterns in {@link SSH_SELF_DIAGNOSTICS} — whole-line anchored, except the
+ * one prefix its own entry argues for; the reason for anchoring and the limits
+ * of the list are documented there and on {@link SshTransportError}. Classifying one of these as a remote failure hands
  * it to the agent as a failing command — an instruction to go fix something
  * that never ran.
  *

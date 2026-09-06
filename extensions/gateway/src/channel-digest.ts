@@ -91,12 +91,16 @@ export interface ChannelDigestSettings {
    * It is reported, never silently dropped: see `ChannelDigestReport.deferred`
    * and the `channel.digest_lane_cap` event.
    *
-   * WHY IT DOES NOT STARVE. Lanes are ordered by their LAST ATTEMPT and then
-   * by cursor, both ascending, so a lane the cap deferred was not attempted and
-   * sorts ahead of every lane that ran. Ordering by cursor alone was not enough
-   * and was the bug: a cursor advances only on a confirmed delivery, so a lane
-   * that fails the same way every night sat at cursor 0 for ever and held the
-   * front of every run. See `Attempts` and the `candidates` sort in
+   * WHY IT DOES NOT STARVE. Lanes are ordered by the RUN ORDINAL in which each
+   * was last attempted, then by cursor, both ascending — so a lane the cap
+   * deferred was not attempted, keeps a smaller ordinal than every lane that
+   * ran, and sorts ahead of all of them next time. Each run therefore promotes
+   * at most `maxLanesPerRun` lanes out of the oldest ordinal, and a lane with
+   * work waiting is attempted within `ceil(lanes / maxLanesPerRun)` runs.
+   * Ordering by cursor alone was not enough and was the bug: a cursor advances
+   * only on a confirmed delivery, so a lane that fails the same way every night
+   * sat at cursor 0 for ever and held the front of every run. See `Attempts`
+   * (including why the ordinal is not a clock) and the `candidates` sort in
    * `digestWatchedLanes`.
    */
   maxLanesPerRun?: number;
@@ -251,9 +255,8 @@ const DIGEST_SYSTEM_PROMPT =
 type Watermarks = Record<string, number>;
 
 /**
- * laneKey → the run clock (`deps.now`) at which this lane last REACHED THE
- * PROVIDER — that is, last spent a charge against `maxLanesPerRun`, whatever
- * came of it.
+ * laneKey → the RUN ORDINAL in which this lane last REACHED THE PROVIDER —
+ * that is, last spent a charge against `maxLanesPerRun`, whatever came of it.
  *
  * A SECOND ordering key, and it exists because the cursor alone could not
  * carry the one the cap needs. A cursor advances only on a CONFIRMED delivery,
@@ -266,23 +269,72 @@ type Watermarks = Record<string, number>;
  * silence 5 working ones for good.
  *
  * Stamping the ATTEMPT rather than the outcome makes the rotation real: a lane
- * that spent a charge sorts to the back next run whether it delivered or not,
- * so the cap becomes a fair round-robin over every lane instead of a queue the
- * front of which never moves. The cost bound is untouched — the charge is
- * still taken before the call, so a lane that throws still cannot buy the run
- * a second one. Pinned by `a permanently failing lane does not monopolise the
- * cap` in `__tests__/channel-digest.test.ts`.
+ * that spent a charge sorts behind every lane that did not, whether it
+ * delivered or failed. The cost bound is untouched — the charge is still taken
+ * before the call, so a lane that throws still cannot buy the run a second one.
  *
- * ON DISK it is `attemptedAt` beside `id` in the same entry, and `id` is
+ * AN ORDINAL, NOT A CLOCK, and that is the whole of what makes the ordering
+ * dependable. The first version of this field stamped `deps.now()`, and a wall
+ * clock is not monotonic: an NTP step, a restored VM snapshot, a wrong hardware
+ * clock, or two hosts sharing one `~/.ethos` all move it BACKWARD, and a clock
+ * that repeats moves it not at all. Either one reinstates the bug this field
+ * exists to fix. A backward step strands the lane stamped before it holding the
+ * LARGEST value in the file, so it sorts last on every run until wall time
+ * climbs back past it — starvation, in the other direction. A repeating clock
+ * gives every lane the same stamp, the sort falls through to the cursor, and a
+ * lane at cursor 0 holds the front for ever again. The ordering never needed a
+ * time: it needs to know WHO WENT MOST RECENTLY, which is a total order, and
+ * `nextRunSeq` derives one from the file itself.
+ *
+ * THE BOUND IT BUYS. Every lane attempted in a run is stamped with that run's
+ * ordinal; every lane not attempted keeps a strictly smaller one and therefore
+ * sorts ahead of all of them on the next run. So each run promotes at most
+ * `maxLanesPerRun` lanes out of the oldest stamp, and a lane with work waiting
+ * is attempted within `ceil(lanes / maxLanesPerRun)` runs no matter what any
+ * of them does with its charge. Pinned by `a permanently failing lane does not
+ * monopolise the cap`, `a lane the owner can never receive does not monopolise
+ * the cap either`, and — for the clock specifically — `the rotation survives a
+ * clock that runs backwards`, in `__tests__/channel-digest.test.ts`.
+ *
+ * ON DISK it is `attemptedRun` beside `id` in the same entry, and `id` is
  * always written even when it is 0, so a build that predates this field reads
  * the entry as the cursor it has always been rather than dropping it. An
- * absent or unusable `attemptedAt` reads as 0 — never attempted, front of the
- * queue — which costs one extra attempt and never a skipped lane.
+ * absent or unusable `attemptedRun` reads as 0 — never attempted, front of the
+ * queue — which costs one extra attempt and never a skipped lane. That is also
+ * what an upgrade from the wall-clock version costs, and a rollback to it: the
+ * field is renamed, so neither build reads the other's stamps and each
+ * cold-starts the rotation once.
  *
  * Not a durability record and not consulted by anything but the sort: losing
  * this file loses an ordering, not a message.
  */
 type Attempts = Record<string, number>;
+
+/**
+ * The ordinal this run stamps onto every lane it attempts: one past the
+ * highest already in the file.
+ *
+ * Derived rather than persisted as its own key, because the file is a map of
+ * lane keys and a reserved non-lane key in it would have to survive readers
+ * that do not know it is reserved. The maximum is taken over EVERY entry the
+ * file holds, including lanes belonging to another deployment sharing this
+ * `~/.ethos` — they are read and written back untouched, so both processes
+ * advance one sequence rather than two that overwrite each other.
+ *
+ * Monotonic per file, which is all the sort needs; not unique across
+ * simultaneous runs. `tryAcquireChannelDigestLock` serialises runs on one machine, and
+ * two hosts sharing a file over a network mount could still compute the same
+ * ordinal — in which case their lanes tie and the cursor breaks it, the same
+ * degradation as a cold file. `Number.MAX_SAFE_INTEGER` in the file (only a
+ * hand edit puts it there — a run adds 1) yields an ordinal the reader's range
+ * check rejects, so the next run reads that lane as never attempted and gives
+ * it a turn. Degrades to an extra attempt, never to a skipped lane.
+ */
+function nextRunSeq(attempts: Attempts): number {
+  let highest = 0;
+  for (const seq of Object.values(attempts)) if (seq > highest) highest = seq;
+  return highest + 1;
+}
 
 /**
  * Is this a value the store could actually have issued as a row id?
@@ -320,11 +372,12 @@ async function readLaneState(
       if (isCursorId(id)) marks[key] = id;
       else dropped.push(key);
       // Read INDEPENDENTLY of the cursor and never reported: the same
-      // non-negative-safe-integer shape, but a bad one costs an extra attempt
+      // non-negative-safe-integer shape (a run ordinal, not an id — the range
+      // it has to be in is the same), but a bad one costs an extra attempt
       // rather than a silent lane, so it degrades to "never attempted" instead
       // of dropping the entry. See `Attempts`.
-      const attemptedAt: unknown = (value as { attemptedAt?: unknown }).attemptedAt;
-      if (isCursorId(attemptedAt)) attempts[key] = attemptedAt;
+      const attemptedRun: unknown = (value as { attemptedRun?: unknown }).attemptedRun;
+      if (isCursorId(attemptedRun)) attempts[key] = attemptedRun;
     }
   } catch {
     // Corrupt file — treat as no watermark. Every lane then re-reads from the
@@ -513,9 +566,9 @@ export interface ChannelDigestReport {
   /**
    * Lanes with undigested messages that `maxLanesPerRun` left for the next
    * run. Not a loss and not a failure: their cursors are untouched, so the
-   * rows are read again — and because lanes are ordered by their last attempt,
-   * a lane counted here was not attempted and sorts ahead of every lane that
-   * was, on the next run.
+   * rows are read again — and because lanes are ordered by the run ordinal in
+   * which each was last attempted, a lane counted here was not attempted, so it
+   * sorts ahead of every lane that was, on the next run.
    *
    * Counted by probing, one row per remaining lane, rather than by taking the
    * length of the tail: most of that tail is lanes with nothing new, and a
@@ -612,13 +665,13 @@ export function summarizeChannelDigest(report: ChannelDigestReport): string {
  * A run is also bounded in LANES, not only in messages per lane:
  * `maxLanesPerRun` caps how many of them may reach the provider, because
  * `transcriptLaneKey` carries a thread id and one watched Slack channel can be
- * eighty lanes in a day. Lanes are attempted least-recently-attempted first,
- * with the cursor breaking ties — so the cap defers rather than starves even
- * when a lane fails on every run, and what it deferred is counted in
- * `ChannelDigestReport.deferred` and in a `channel.digest_lane_cap` event. A
+ * eighty lanes in a day. Lanes are attempted least-recently-attempted first —
+ * by run ordinal, with the cursor breaking ties — so the cap defers rather than
+ * starves even when a lane fails on every run, and what it deferred is counted
+ * in `ChannelDigestReport.deferred` and in a `channel.digest_lane_cap` event. A
  * deferred lane's cursor is untouched, so the next run reads exactly the rows
  * this one did not. See `Attempts` for why the cursor could not carry that
- * ordering by itself.
+ * ordering by itself, and why the ordinal is not a timestamp.
  *
  * Without `deps.watermarks` there is no cursor at all and every run re-digests
  * whatever retention still holds. A lane digested for the FIRST time is the
@@ -693,6 +746,8 @@ async function digestWatchedLanes(
   const costWarnUsd = settings.costWarnUsdPerLane ?? DEFAULT_COST_WARN_USD_PER_LANE;
   const deliverTo = settings.deliverTo ?? 'owner';
   const { marks: watermarks, attempts } = await readLaneState(deps.watermarks, deps.observability);
+  /** What every lane this run attempts is stamped with. See `nextRunSeq`. */
+  const runSeq = nextRunSeq(attempts);
   // Set by a cursor advance OR by an attempt stamp. Both live in the same file
   // and both have to survive the run: a run in which every lane failed changes
   // no cursor but must still record that those lanes had their turn, or the
@@ -735,8 +790,8 @@ async function digestWatchedLanes(
   // can hold another deployment's rooms, and summarising one would deliver it
   // through the wrong bot to the wrong owner.
   //
-  // ORDERED BY LAST ATTEMPT, THEN BY CURSOR, BOTH ASCENDING, and that ordering
-  // is what makes the cap below safe.
+  // ORDERED BY LAST-ATTEMPTED RUN, THEN BY CURSOR, BOTH ASCENDING, and that
+  // ordering is what makes the cap below safe.
   //
   // LAST ATTEMPT FIRST, and it has to be first. A cursor advances only on a
   // CONFIRMED delivery, so ordering by cursor alone put every permanently
@@ -746,17 +801,23 @@ async function digestWatchedLanes(
   // the cap, they spent all of it every night and the healthy lanes behind
   // them were deferred permanently: `deferred` said so, and nothing ever
   // cleared it. Stamping the attempt (see `Attempts`) sorts a lane that spent
-  // a charge to the back whether it delivered or not, which turns the cap into
-  // a round-robin over every lane instead of a queue with a fixed head.
+  // a charge behind every lane that did not, whether it delivered or not, and
+  // that is what bounds the wait: each run promotes at most `maxLanes` lanes
+  // out of the oldest ordinal, so a lane with work is attempted within
+  // `ceil(candidates / maxLanes)` runs. The stamp is `runSeq`, one past the
+  // highest ordinal in the file — NOT `now`, because a wall clock steps
+  // backward and repeats, and both of those hand the front of the queue back
+  // to a lane that just had it. See `Attempts`.
   //
-  // CURSOR SECOND, among lanes last attempted at the same moment — the whole
-  // of a run's lanes share one stamp, and a cold file gives every lane 0. A
+  // CURSOR SECOND, among lanes last attempted in the same run — the whole of a
+  // run's lanes share one ordinal, and a cold file gives every lane 0. A
   // watermark is the store's GLOBAL ingestion sequence, not a per-lane counter,
   // so comparing two lanes' cursors compares how far behind the store each one
   // is: a lane digested last night carries a cursor from last night, a lane the
   // cap has not reached in a week carries one from a week ago, and a lane never
   // digested carries 0. Least-consumed first is therefore most-behind first,
-  // and no lane can be starved by its position in `listLanes`.
+  // and it decides only which lanes of one run's batch go first — it can no
+  // longer decide who goes at all.
   const candidates = lanes
     .filter((candidate) => byBotKey.has(candidate.botKey))
     .sort(
@@ -788,11 +849,13 @@ async function digestWatchedLanes(
     //
     // There IS a queue position, since `maxLanesPerRun` bounds how many lanes
     // one run may pay for — but no lane holds the front of it. Lanes are
-    // ordered by their last ATTEMPT, so a lane the cap deferred was not
-    // attempted and sorts ahead of every lane that ran, and a lane that ran
-    // sorts behind them whether it delivered or failed. See the `candidates`
-    // sort above and `Attempts`; the case that used to break this is pinned by
-    // `a permanently failing lane does not monopolise the cap` in the tests.
+    // ordered by the RUN ORDINAL of their last ATTEMPT, so a lane the cap
+    // deferred was not attempted and sorts ahead of every lane that ran, and a
+    // lane that ran sorts behind them whether it delivered or failed. See the
+    // `candidates` sort above and `Attempts`; the case that used to break this
+    // is pinned by `a permanently failing lane does not monopolise the cap` in
+    // the tests, and the clock the ordinal replaced by `the rotation survives a
+    // clock that runs backwards`.
     try {
       const cursor = watermarks[lane.laneKey] ?? 0;
 
@@ -831,9 +894,11 @@ async function digestWatchedLanes(
       // is taken here rather than on the way out so a throw below cannot skip
       // it. A lane that spends a charge every run and never advances its cursor
       // is exactly the lane that used to hold the front of the queue for ever
-      // — see `Attempts` and the `candidates` sort.
+      // — see `Attempts` and the `candidates` sort. The stamp is this run's
+      // ordinal, not its clock; `Attempts` says why that distinction is the
+      // whole guarantee.
       lanesSummarised += 1;
-      attempts[lane.laneKey] = now;
+      attempts[lane.laneKey] = runSeq;
       stateChanged = true;
       const turn = await runLaneTurn(
         bot.loop,
@@ -1000,19 +1065,25 @@ async function digestWatchedLanes(
   //
   // Cursor and attempt stamp share an entry, and `id` is ALWAYS written even
   // when it is 0. A lane that was attempted and never delivered has no cursor,
-  // and an entry of `{ attemptedAt }` alone would be dropped by the reader's
-  // `'id' in value` guard — and by every build that predates `attemptedAt`,
+  // and an entry of `{ attemptedRun }` alone would be dropped by the reader's
+  // `'id' in value` guard — and by every build that predates `attemptedRun`,
   // which reads this file too when an operator rolls back. `{ id: 0 }` is what
   // "nothing consumed" has always meant, so both readers agree.
+  //
+  // A lane THIS run did not attempt keeps whatever stamp it came in with,
+  // including one belonging to another deployment sharing the file: the
+  // ordinal is a single sequence over every entry (see `nextRunSeq`), so
+  // dropping a foreign lane's stamp would put it at the front of the other
+  // process's next run.
   if (stateChanged && deps.watermarks) {
     const keys = new Set([...Object.keys(watermarks), ...Object.keys(attempts)]);
-    const entries: Record<string, { id: number; attemptedAt?: number }> = {};
+    const entries: Record<string, { id: number; attemptedRun?: number }> = {};
     for (const key of keys) {
-      const attemptedAt = attempts[key];
+      const attemptedRun = attempts[key];
       entries[key] =
-        attemptedAt === undefined
+        attemptedRun === undefined
           ? { id: watermarks[key] ?? 0 }
-          : { id: watermarks[key] ?? 0, attemptedAt };
+          : { id: watermarks[key] ?? 0, attemptedRun };
     }
     await deps.watermarks.storage.writeAtomic(
       deps.watermarks.path,

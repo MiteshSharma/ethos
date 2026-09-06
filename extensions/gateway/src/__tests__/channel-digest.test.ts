@@ -161,9 +161,12 @@ function stubLoop(text = 'three lines of summary') {
   };
 }
 
+/** The clock `makeDeps` runs at. It reaches the watermark file NOWHERE. */
+const RUN_NOW = Date.UTC(2026, 8, 4, 12, 0);
+
 /**
- * The clock `makeDeps` runs at, and therefore the `attemptedAt` every lane
- * that REACHED THE PROVIDER writes into the watermark file.
+ * The ordinal a first run stamps onto every lane it attempts — one past the
+ * highest in the file, and a cold file holds none.
  *
  * The stamp is the lane cap's second ordering key (`Attempts` in
  * ../channel-digest): a cursor advances only on a confirmed delivery, so a lane
@@ -171,12 +174,18 @@ function stubLoop(text = 'three lines of summary') {
  * the front of every run for ever. Its consequence here is that a lane that was
  * attempted writes an entry whether or not it was consumed — with `id: 0` when
  * it was not, which is what "nothing consumed" has always meant.
+ *
+ * A RUN ORDINAL, not a clock. `deps.now` moved this value until it turned out
+ * that a wall clock steps backward (NTP, a restored snapshot, a second host on
+ * the same `~/.ethos`) and repeats, and that either one hands the queue's front
+ * straight back to the lane that just held it — see `the rotation survives a
+ * clock that runs backwards` at the bottom of this file.
  */
-const RUN_NOW = Date.UTC(2026, 8, 4, 12, 0);
+const FIRST_RUN = 1;
 
-/** The watermark entry a lane attempted at `attemptedAt` with cursor `id` writes. */
-function entry(id: number, attemptedAt = RUN_NOW): { id: number; attemptedAt: number } {
-  return { id, attemptedAt };
+/** The watermark entry a lane attempted in run `attemptedRun` with cursor `id` writes. */
+function entry(id: number, attemptedRun = FIRST_RUN): { id: number; attemptedRun: number } {
+  return { id, attemptedRun };
 }
 
 function makeDeps(over: Partial<ChannelDigestDeps> = {}): ChannelDigestDeps & {
@@ -730,7 +739,7 @@ describe('an owner target that names the observed chat', () => {
 
       await runChannelDigest(twoRooms({ watermarks }));
       // Both lanes were attempted, so both write an entry — but neither cursor
-      // moved, which is what "unconsumed" means. See `RUN_NOW`.
+      // moved, which is what "unconsumed" means. See `FIRST_RUN`.
       expect(JSON.parse((await storage.read(watermarks.path)) ?? '{}')).toEqual({
         [A]: entry(0),
         [B]: entry(0),
@@ -1030,7 +1039,7 @@ describe('the watermark', () => {
     const failed = run(storage, msgs, { sendVia: async () => ({ ok: false, error: 'no chat' }) });
     expect((await runChannelDigest(failed.deps)).undelivered).toBe(1);
     // The lane was attempted, so it records the attempt — at cursor 0, which is
-    // the whole of what "did not advance" means. See `RUN_NOW`.
+    // the whole of what "did not advance" means. See `FIRST_RUN`.
     expect(JSON.parse((await storage.read(WATERMARK_PATH)) ?? '{}')).toEqual({ [LANE]: entry(0) });
 
     const retry = run(storage, msgs, { now: () => Date.UTC(2026, 8, 4, 13, 0) });
@@ -1151,9 +1160,9 @@ describe('the watermark', () => {
     const raw = await storage.read(WATERMARK_PATH);
     const marks: unknown = JSON.parse(raw ?? '{}');
     // `id` is the consumed row's ingestion id — not the run's `now`, not a
-    // timestamp of any kind, and not the row that arrived behind it. The run
-    // clock appears only as `attemptedAt`, which is an ordering key for the
-    // lane cap and is never read as a cursor. See `RUN_NOW`.
+    // timestamp of any kind, and not the row that arrived behind it. No clock
+    // reading reaches this file at all: the second key, `attemptedRun`, is a
+    // run ordinal. See `FIRST_RUN`.
     expect(marks).toEqual({ [LANE]: entry(1) });
 
     // ...so the next run digests exactly the one it did not see.
@@ -1761,9 +1770,9 @@ describe('a lane that throws', () => {
     const roomC = second.prompts.find((p) => p.includes('Chat: telegram room-c')) ?? '';
     expect(roomC).toContain('the pour finished');
     expect(roomC).not.toContain('news from room-c');
-    expect((await marks(storage))['telegram:bot-a:room-c']).toEqual(
-      entry(2, Date.UTC(2026, 8, 4, 13, 0)),
-    );
+    // Second run, so ordinal 2 — the run's clock (13:00 here, 12:00 before)
+    // is not what the file records.
+    expect((await marks(storage))['telegram:bot-a:room-c']).toEqual(entry(2, 2));
   });
 
   it('does not let a delivery failure elsewhere advance a watermark either', async () => {
@@ -1987,6 +1996,38 @@ describe('the lane cap', () => {
     expect(prompts.filter((p) => p.includes('room -300 said'))).toHaveLength(1);
     // ...and the failing lane spent the cap once, not once a night.
     expect(prompts.filter((p) => p.includes('room -100 said'))).toHaveLength(1);
+  });
+
+  // THE CLOCK THE ORDINAL REPLACED. The fix above first stamped `deps.now()`,
+  // and a wall clock is not monotonic — an NTP correction, a restored VM
+  // snapshot, a wrong hardware clock, or a second host on the same `~/.ethos`
+  // all move it BACKWARD. Under that, the lane stamped before the step holds
+  // the LARGEST value in the file and sorts LAST on every run until wall time
+  // climbs past it again, while the lanes stamped after the step keep sinking
+  // below each other and take every turn between them. Six runs of the clock
+  // below at cap 1 over three rooms gave 1/1/4 instead of 2/2/2 — the same
+  // starvation the ordering exists to prevent, arriving from the other side.
+  //
+  // Nothing here freezes or reverses the clock to make a point: `now` is a
+  // dependency and a host really does hand back a smaller reading. The ordinal
+  // makes the reading irrelevant, which is what this pins.
+  it('the rotation survives a clock that runs backwards', async () => {
+    const storage = await house();
+    const watermarks = { storage, path: WATERMARK_PATH };
+    const prompts: string[] = [];
+    // Strictly descending: every run's clock is a full day BEFORE the last.
+    const backwards = [6, 5, 4, 3, 2, 1].map((h) => Date.UTC(2026, 8, h, 12, 0));
+
+    for (const [index, clock] of backwards.entries()) {
+      const { deps, calls } = threeRooms(index + 1, { watermarks, now: () => clock });
+      await runChannelDigest(deps, { maxLanesPerRun: 1 });
+      prompts.push(...calls.map((c) => c.prompt));
+    }
+
+    // Three rooms, six runs, one lane a run: two turns each and no other split.
+    for (const chatId of ROOMS) {
+      expect(prompts.filter((p) => p.includes(`room ${chatId} said`))).toHaveLength(2);
+    }
   });
 
   it('a lane the owner can never receive does not monopolise the cap either', async () => {
