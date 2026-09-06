@@ -373,10 +373,21 @@ export function acquireAgentLease(sessionId: string, session: BrowserSession): (
  * is safe in the other direction, the session is merely left for the idle
  * sweeper.
  *
- * `exclusive` counts as held with no exception for `own`: nothing that takes
- * the shared lease can also hold the exclusive one, and a takeover claims it
- * SYNCHRONOUSLY before `session.takeover` is set — so this covers the window
- * where a human is arriving but the flag has not landed yet.
+ * `exclusive` counts as held with no exception for `own`: `own` is always a
+ * SHARED `release` (the value `acquireAgentLease` returns), and nothing holding
+ * a shared lease can also be the exclusive holder, so there is nothing for an
+ * exception to excuse.
+ *
+ * It does NOT cover a window between the takeover flag and the takeover lease.
+ * There is no such window, and the order is the opposite of what this comment
+ * used to claim: `browser_request_takeover` (`./browser-takeover.ts`) sets
+ * `session.takeover` first and calls `claimTakeoverLease` on the next line,
+ * with no `await` between them, and its `finally` releases the lease and clears
+ * the flag the same way — one uninterrupted step each time, so no caller can
+ * observe either without the other. The exclusive branch is what makes this
+ * predicate answer its own question honestly; the only production caller,
+ * `closeSession` below, tests `s.takeover` first and would skip such a session
+ * on that alone.
  */
 export function leaseHeldByOthers(sessionId: string, own?: (() => void) | null): boolean {
   const state = leases.get(sessionId);

@@ -253,6 +253,40 @@ describe('hand-back when the lane goes away underneath it', () => {
     expect(handBackButton().disabled).toBe(true);
   });
 
+  it('renders the SERVER’s reason when the fallback RPC refuses', async () => {
+    // `clarify.respond` throws with a sentence built from the bridge's own
+    // `ClarifyRespondOutcome` — three different causes, each true only for
+    // itself. This component used to catch and discard it, substituting one
+    // fixed line ending "Try again.", which is wrong advice for all three: two
+    // of them mean the question is already settled and the third means the row
+    // is open but this surface can never be the one to close it.
+    respondFn.mockRejectedValue(
+      new Error(
+        'That answer did not land: that request was already answered somewhere else, and the first answer is the one the agent received.',
+      ),
+    );
+    await act(async () => {
+      root.render(
+        createElement(TakeoverMode, {
+          request: REQUEST,
+          startedAt: Date.now(),
+          onBackToChat: () => {},
+        }),
+      );
+    });
+    const ws = FakeSocket.last as FakeSocket;
+    await act(async () => {
+      ws.readyState = 3;
+      ws.onclose?.();
+    });
+
+    await act(async () => handBackButton().click());
+
+    expect(container.textContent).toContain('already answered somewhere else');
+    expect(container.textContent).not.toContain('Try again');
+    expect(handBackButton().disabled).toBe(false);
+  });
+
   it('stays disabled after a hand-back the lane actually completed', async () => {
     const ws = await live();
     await act(async () => handBackButton().click());

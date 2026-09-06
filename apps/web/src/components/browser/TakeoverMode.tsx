@@ -83,10 +83,18 @@ export function TakeoverMode({ request, startedAt, onBackToChat }: TakeoverModeP
         answer: 'handed back',
         source: 'user',
       });
-    } catch {
+    } catch (err) {
       setHandingBack(null);
+      // The server's own sentence, not a fixed one. `clarify.respond` throws
+      // with a message built from `ClarifyRespondOutcome` — three different
+      // causes, and the fixed line this used to show ("Try again.") was wrong
+      // advice for all three: two mean the question is already settled, and the
+      // third means the row is open but this surface can never be the one to
+      // close it. Nothing here invents a retry the server did not offer.
       setHandbackNotice(
-        'The hand-back did not go through — the browser is still yours. Try again.',
+        err instanceof Error
+          ? err.message
+          : 'The hand-back did not go through — the browser is still yours.',
       );
     }
   };

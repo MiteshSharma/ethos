@@ -79,6 +79,11 @@ export {
   sweepClarifyEscalations,
 } from './clarify/escalation-notifier';
 export { FileClarifyStore } from './clarify/file-clarify-store';
+export {
+  type ClarifyRespondOutcome,
+  type ClarifyUnresolvedReason,
+  clarifyUnresolvedMessage,
+} from './clarify/respond-outcome';
 export { isClarifyAnswerableOn } from './clarify/takeover-handback';
 export { clarifyPromptText } from './clarify/takeover-prompt';
 export { type ConformanceResult, validateContextEngine } from './context-engines/conformance';

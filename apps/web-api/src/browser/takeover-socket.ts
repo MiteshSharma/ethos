@@ -114,13 +114,13 @@ export interface TakeoverSessionRegistry {
  * What a hand-back attempt DID — the evidence `closed: handed_back` is sent on.
  *
  * A discriminated result rather than `Promise<void>` because "resolved without
- * throwing" is not evidence of anything here. `ClarifyBridge.respond()` returns
- * `void` and swallows every request it cannot resolve — an id it has never
- * heard of, a row a peer process already settled, a takeover its answer gate
- * refuses — so the four causes this lane's own error message names all reach
- * the caller looking exactly like success. Four times now this feature has
- * reported a hand-back nothing performed; a shape with no "it worked" value to
- * default to is what stops a fifth.
+ * throwing" is not evidence of anything here. `ClarifyBridge.respond()` used to
+ * return `void` and swallow every request it could not resolve — an id it has
+ * never heard of, a takeover its answer gate refuses, a row a peer process
+ * already answered — so all of them reached the caller looking exactly like
+ * success. Four times now this feature has reported a hand-back nothing
+ * performed; a shape with no "it worked" value to default to is what stops a
+ * fifth.
  *
  * `reason` is a sentence for the viewer, not a code: it is interpolated into
  * `handback_failed` and read by the person who pressed the button.
@@ -130,10 +130,11 @@ export type TakeoverHandbackResult = { resolved: true } | { resolved: false; rea
 /**
  * Resolve the clarify the agent is parked on, and REPORT WHETHER IT DID.
  *
- * Bound to `ClarifyBridge.respond` — but never to it directly, precisely
- * because that method cannot answer the question this type asks. See
- * `respondAndConfirm` in `../clarify-resolution`, which is what supplies the
- * evidence in production.
+ * Bound in production to `ClarifyBridge.respond` (see the `handback` option
+ * assembled in `apps/web-api/src/index.ts`), whose own
+ * `ClarifyRespondOutcome` supplies `resolved` and the sentence for `reason`.
+ * The adapter is thin on purpose: it exists to turn a machine-readable reason
+ * into viewer copy, not to decide the outcome.
  */
 export type TakeoverHandback = (requestId: string) => Promise<TakeoverHandbackResult>;
 
@@ -520,8 +521,8 @@ export function createTakeoverSocket(opts: TakeoverSocketOptions): TakeoverSocke
      * `handed_back` is a claim about the AGENT, not about this socket: it says
      * the request the agent is parked on has been answered and the browser is
      * its own again. A missing, expired, cancelled or already-settled request
-     * does NOT make `ClarifyBridge.respond` throw — it returns `void` and
-     * swallows all four — so the guarantee this comment used to assert was
+     * does NOT make `ClarifyBridge.respond` throw — it used to return `void`
+     * and swallow all four — so the guarantee this comment used to assert was
      * enforced by nothing, and reporting those as a hand-back told the viewer
      * they were done while the agent stayed parked or settled some other way.
      *

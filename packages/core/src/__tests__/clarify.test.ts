@@ -579,11 +579,12 @@ describe('ClarifyBridge', () => {
       expect(resolvedRows).toEqual([row.requestId]);
 
       // A second respond() for the same id (e.g. a stale Telegram callback
-      // racing in after web already answered) must be swallowed, not throw
-      // or double-resolve.
+      // racing in after web already answered) must not throw or double-resolve
+      // — and must not report success either: `respond()` names the reason
+      // rather than returning silence (`ClarifyRespondOutcome`).
       await expect(
         bridge.respond({ requestId: row.requestId, answer: 'stale', source: 'user' }),
-      ).resolves.toBeUndefined();
+      ).resolves.toEqual({ resolved: false, reason: 'unknown_request' });
       expect(resolvedRows).toEqual([row.requestId]); // still exactly one notification
     });
   });
@@ -655,11 +656,11 @@ describe('ClarifyBridge', () => {
     expect(res.source).toBe('cancel');
   });
 
-  it('swallows respond() for an unknown / already-resolved request id', async () => {
+  it('does not throw — and does not claim success — for an unknown request id', async () => {
     const { bridge } = makeBridge();
     await expect(
       bridge.respond({ requestId: 'never-existed', answer: 'x', source: 'user' }),
-    ).resolves.toBeUndefined();
+    ).resolves.toEqual({ resolved: false, reason: 'unknown_request' });
   });
 
   // Fix 2 (pi-delegation.md §1b) — a respond() with no in-process entry can

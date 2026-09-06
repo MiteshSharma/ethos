@@ -21,6 +21,7 @@ import type {
   ClarifySurfaceType,
   PendingClarify,
 } from '@ethosagent/types';
+import type { ClarifyRespondOutcome } from './respond-outcome';
 import { isClarifyAnswerableOn } from './takeover-handback';
 import { handbackUrlFor } from './takeover-prompt';
 
@@ -467,9 +468,25 @@ export class ClarifyBridge {
 
   /**
    * Resolve a pending clarify. Called by a surface when the user answers or
-   * cancels, and internally on timeout. Unknown / already-resolved ids are
-   * swallowed (another surface or the timeout beat this one). Frees the lane
-   * and drains the next queued item, if any (G1).
+   * cancels, and internally on timeout. Frees the lane and drains the next
+   * queued item, if any (G1).
+   *
+   * REPORTS WHAT IT DID. Unknown / already-resolved ids are still swallowed in
+   * the sense that nothing throws — a question answered in another tab a moment
+   * earlier is ordinary, not an error — but they no longer look like success:
+   * every path returns a `ClarifyRespondOutcome` (`./respond-outcome`), and a
+   * caller claiming a hand-back has to read `resolved`. Four branches below are
+   * distinguishable failures and each names itself: no row anywhere
+   * (`unknown_request`), the answer gate refusing the row's surface
+   * (`not_answerable`, twice — once per branch), and first-writer-wins
+   * discarding this answer (`already_answered`).
+   *
+   * That last one is why the outcome could not be inferred from outside:
+   * `notifyResolved` fires on the discard path too, with the caller's own
+   * response object, so web-api's identity test read a thrown-away answer as a
+   * hand-back. The notification payload is deliberately unchanged here — which
+   * response a listener should be shown when two answers race is a separate
+   * question from what this call returns to its caller.
    *
    * Fix 2 (pi-delegation.md §1b) — no in-process entry means one of TWO
    * things, and this bridge cannot tell which: the owning process crashed
@@ -486,20 +503,29 @@ export class ClarifyBridge {
    * First writer wins if two non-owning processes race — never overwrite an
    * `answer` that's already there.
    */
-  async respond(response: ClarifyResponse): Promise<void> {
+  async respond(response: ClarifyResponse): Promise<ClarifyRespondOutcome> {
     const entry = this.pending.get(response.requestId);
     if (!entry) {
       const persisted = await this.store.get(response.requestId);
-      if (!persisted) return;
-      if (!this.acceptsUserAnswer(persisted, response)) return;
+      if (!persisted) return { resolved: false, reason: 'unknown_request' };
+      if (!this.acceptsUserAnswer(persisted, response)) {
+        return { resolved: false, reason: 'not_answerable' };
+      }
       const notify = response.source === 'timeout-no-default' ? null : response;
-      if (!persisted.answer) {
+      // First writer wins. Reported, not silent: the row settles either way,
+      // but it settles on somebody ELSE's answer, and a surface that says
+      // "handed back" on the strength of this one is describing an event that
+      // did not happen.
+      const discarded = persisted.answer !== undefined;
+      if (!discarded) {
         await this.store.update(response.requestId, { answer: response });
       }
       this.notifyResolved(persisted, notify);
-      return;
+      return discarded ? { resolved: false, reason: 'already_answered' } : { resolved: true };
     }
-    if (!this.acceptsUserAnswer(entry.row, response)) return;
+    if (!this.acceptsUserAnswer(entry.row, response)) {
+      return { resolved: false, reason: 'not_answerable' };
+    }
     if (entry.timer) clearTimeout(entry.timer);
     this.pending.delete(response.requestId);
     await this.store.remove(response.requestId);
@@ -523,6 +549,7 @@ export class ClarifyBridge {
     }
 
     this.drainLane(entry.lane);
+    return { resolved: true };
   }
 
   /**
@@ -560,9 +587,35 @@ export class ClarifyBridge {
    * The takeover answer gate. A `browser_takeover` says "I am parked on a
    * login; drive my browser and hand it back" — so an answer to one is a claim
    * that a real authenticated session now exists, which the tool reports to the
-   * agent as `handed_back: true`. Only a surface that can actually reach that
-   * browser may make the claim (`isClarifyAnswerableOn`); on every other
-   * surface a takeover row is text, not a question.
+   * agent as `handed_back: true`. What is checked is the SURFACE THE ROW WAS
+   * ASKED ON: `isClarifyAnswerableOn(row, row.surfaceType)` passes only for a
+   * takeover routed to `web`/`tui`/`cli`, so on every other surface a takeover
+   * row is text, not a question.
+   *
+   * LIMITATION — this does not check who is ANSWERING, because it cannot.
+   * `ClarifyResponse` (`packages/types/src/clarify.ts`) carries `requestId`,
+   * `answer` and `source` and no surface, so by the time an answer reaches this
+   * funnel the responder's identity is gone. "Only a surface that can reach
+   * that browser answers a takeover" is therefore NOT a funnel guarantee; it is
+   * an invariant each adapter carries by refusing rows that are not its own
+   * before it responds, and it holds today only because all four channel
+   * adapters do:
+   *
+   *   `extensions/platform-telegram/src/clarify-surface.ts` — `handleCallback`
+   *     (`row.surfaceType !== SURFACE`) and `correlateMessage`
+   *     (`store.list({ surfaceType: SURFACE })`).
+   *   `extensions/platform-slack/src/clarify-surface.ts` — `handleAction` and
+   *     `handleModalSubmit` (both `row.surfaceType !== SURFACE`).
+   *   `extensions/platform-discord/src/clarify-surface.ts` — the modal-submit
+   *     and button-click paths (both `row.surfaceType !== SURFACE`).
+   *   `extensions/platform-whatsapp/src/clarify-surface.ts` —
+   *     `correlateMessage` (`store.list({ surfaceType: SURFACE })`).
+   *
+   * A fifth adapter that responded to a row it did not present would hand back
+   * a `web` takeover from a group chat and this gate would allow it, because
+   * the row says `web`. Closing that properly means a responder surface on
+   * `ClarifyResponse` — a frozen-schema change (ARCHITECTURE.md §VII) with its
+   * own decision to make — so it is written down here rather than half-done.
    *
    * Here rather than in each adapter because here is the ONE funnel: every
    * surface, in every process (a channel's own `respond()`, the cross-process
@@ -576,10 +629,13 @@ export class ClarifyBridge {
    * through untouched, so a takeover nobody may answer still resolves and
    * `browser_request_takeover`'s `finally` still clears the session lock.
    *
-   * Silent, like every other unresolvable `respond()` (unknown id, already
-   * resolved). The surfaces below refuse to draw an answer affordance for a
-   * takeover in the first place, so nothing reaches here that a user is
-   * waiting on a reply to.
+   * Throws nothing, like every other unresolvable `respond()` — but no longer
+   * silent: a refusal here becomes `{ resolved: false, reason:
+   * 'not_answerable' }`, which is the one unresolved reason that leaves the row
+   * fully OPEN. The surfaces below refuse to draw an answer affordance for a
+   * takeover in the first place, so a user is rarely waiting on the reply; the
+   * web fallback path (`clarify.respond`) draws no such affordance either and
+   * renders the reason when it hits this.
    */
   private acceptsUserAnswer(row: PendingClarify, response: ClarifyResponse): boolean {
     if (response.source !== 'user') return true;

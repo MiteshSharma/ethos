@@ -59,8 +59,25 @@ export interface TakeoverConnection {
    *
    * A LANE fact, so the lane owns it: the server answers a `handback` frame
    * with either `closed: handed_back` or `error: handback_failed`, and only
-   * this hook sees either. It is cleared by `send`ing another `handback`,
-   * which is the only thing that can make it stale.
+   * this hook sees either. Set in the `handback_failed` branch of `onmessage`;
+   * cleared in `send` below, and NOWHERE else.
+   *
+   * That clearing is narrower than it looks, and the two gaps are known:
+   *
+   *   `send` returns early when the socket is not `OPEN`, BEFORE the clearing
+   *     block — so a `handback` frame that never went out does not reset a
+   *     previous refusal.
+   *   a `closed` frame does not clear it, so a lane refused and then closed
+   *     ends its life with the flag still true.
+   *
+   * Neither can produce a false hand-back: nothing reads this flag as evidence
+   * that anything succeeded — the only success signal is the `closed:
+   * handed_back` frame, which sets `status` to `'ended'`. The worst either gap
+   * produces is a stale SENTENCE: `TakeoverMode`'s effect reads the flag only
+   * while `handingBack === 'lane'`, and treats it as "the server already
+   * explained this, leave `lane.notice` alone" — so a press whose frame never
+   * left leaves the previous refusal's text on screen instead of a fresh one.
+   * The button is re-enabled either way, so the operator is not stuck.
    */
   handbackRefused: boolean;
   /** Send one input frame. No-op while the socket is not open. */

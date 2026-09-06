@@ -19,8 +19,16 @@ import {
 // every path, including `context.clarifyBridge?.respond(...)` optional-chaining
 // past an absent bridge into a success the caller renders as "done".
 //
-// `{ ok: true }` now means the row was RESOLVED. These tests drive the three
-// ways it is not, and the one way it is.
+// `{ ok: true }` now means the row was RESOLVED — enforced by
+// `ClarifyBridge.respond`'s `ClarifyRespondOutcome`, which the handler reads
+// directly. These tests drive the three ways it is not, and the one way it is.
+//
+// The `already_answered` case is the one the old evidence got wrong: web-api
+// used to infer resolution from outside `respond()` by identity-testing an
+// `onResolved` notification, and the bridge notifies with the caller's own
+// object even when first-writer-wins has discarded that answer. Revert the
+// `discarded` branch in `packages/core/src/clarify/clarify-bridge.ts` and that
+// test fails with a 200.
 
 function row(over: Partial<PendingClarify> = {}): PendingClarify {
   return {
@@ -104,7 +112,7 @@ describe('clarify.respond RPC', () => {
 
   it('does not return ok for a request that is no longer open', async () => {
     // Nothing in memory and nothing on disk — answered in another tab a moment
-    // ago, or timed out. `ClarifyBridge.respond()` returns quietly here.
+    // ago, or timed out. `ClarifyBridge.respond()` reports `unknown_request`.
     await boot(true);
 
     const res = await respond('req-gone');
@@ -117,8 +125,8 @@ describe('clarify.respond RPC', () => {
     // The answer gate (`isClarifyAnswerableOn`): a `browser_takeover` routed to
     // a channel cannot be handed back from anywhere but that channel's
     // allowlist, and web is not on it for a telegram-surfaced row. `respond()`
-    // refuses SILENTLY, which is exactly the shape this endpoint must not read
-    // as a hand-back.
+    // reports `not_answerable` — it used to refuse in silence, which is the
+    // shape this endpoint must never read as a hand-back.
     await boot(true);
     await clarifyStore.add(row({ kind: 'browser_takeover', surfaceType: 'telegram' }));
 
@@ -127,6 +135,49 @@ describe('clarify.respond RPC', () => {
     expect(res.status).not.toBe(200);
     const stored = await clarifyStore.get('req-1');
     expect(stored?.answer).toBeUndefined();
+    // The row is still OPEN, so the sentence must not say it was answered,
+    // cancelled or timed out — which is what the single covering reason this
+    // endpoint used to print said, in all three of its clauses.
+    expect(await res.text()).toContain('cannot hand a browser back');
+  });
+
+  it('does not return ok when first-writer-wins DISCARDED this answer', async () => {
+    // The row already carries a peer process's answer. `respond()` skips its
+    // `store.update` — the agent will collect the FIRST answer — but still
+    // fires `onResolved` with the caller's own response object, which is
+    // exactly what the identity inference this endpoint used to depend on read
+    // as success. A 200 here is a hand-back nobody performed.
+    await boot(true);
+    const first = { requestId: 'req-1', answer: 'first', source: 'user' as const };
+    await clarifyStore.add(row({ answer: first }));
+
+    const res = await respond('req-1');
+
+    expect(res.status).not.toBe(200);
+    expect(await res.text()).toContain('already answered somewhere else');
+    // ...and the winner is untouched.
+    expect((await clarifyStore.get('req-1'))?.answer).toEqual(first);
+  });
+
+  it('never advises a retry — none of the three reasons is retryable here', async () => {
+    // `unknown_request` and `already_answered` mean the question is over;
+    // `not_answerable` leaves the row open but refuses a second attempt from
+    // this surface identically, because the gate keys on the ROW's surface.
+    // `TakeoverMode` renders whichever of these it gets verbatim.
+    await boot(true);
+    await clarifyStore.add(
+      row({ requestId: 'req-open', kind: 'browser_takeover', surfaceType: 'slack' }),
+    );
+    await clarifyStore.add(
+      row({
+        requestId: 'req-taken',
+        answer: { requestId: 'req-taken', answer: 'x', source: 'user' },
+      }),
+    );
+
+    for (const id of ['req-gone', 'req-open', 'req-taken']) {
+      expect(await (await respond(id)).text()).not.toContain('ry again');
+    }
   });
 
   it('returns ok — and records the answer — when the row actually resolves', async () => {

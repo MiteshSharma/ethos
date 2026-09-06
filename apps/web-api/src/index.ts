@@ -2,7 +2,7 @@ import { join } from 'node:path';
 import { SessionStreamBuffer } from '@ethosagent/agent-bridge';
 import { AgentMesh, defaultRegistryPath } from '@ethosagent/agent-mesh';
 import { resolveSecretRef, type VoiceBargeInTuning } from '@ethosagent/config';
-import { type AgentLoop, satelliteLaneKey } from '@ethosagent/core';
+import { type AgentLoop, clarifyUnresolvedMessage, satelliteLaneKey } from '@ethosagent/core';
 import type { CronScheduler } from '@ethosagent/cron';
 import {
   DashboardRefreshScheduler,
@@ -41,7 +41,6 @@ import {
   type TakeoverSessionRegistry,
   type TakeoverSocket,
 } from './browser/takeover-socket';
-import { CLARIFY_UNRESOLVED_REASON, respondAndConfirm } from './clarify-resolution';
 import { formatRunHandBack } from './features/chat/handback';
 import { resolveJobSessionId } from './features/chat/job-session';
 import { ChatRepository } from './features/chat/repository';
@@ -1446,9 +1445,14 @@ export function createWebApi(opts: CreateWebApiOptions): CreateWebApiResult {
     // that branch is unreachable in practice — it exists so the impossible
     // case is loud.
     //
-    // `respondAndConfirm`, not `clarifyBridge.respond`: the bridge returns
-    // `void` and swallows an id it cannot resolve, so awaiting it proves only
-    // that nothing threw. See `./clarify-resolution`.
+    // The evidence is `ClarifyBridge.respond`'s own return value
+    // (`ClarifyRespondOutcome`), not an inference drawn around the call. This
+    // used to route through a `respondAndConfirm` helper that registered an
+    // `onResolved` listener and tested object identity against the response it
+    // had just passed in — which read a FIRST-WRITER-WINS discard as success,
+    // because the bridge notifies listeners with the caller's own object even
+    // when it throws that answer away. `resolved` now comes from the branch
+    // that made the decision.
     handback: async (requestId: string) => {
       if (!clarifyBridge) {
         return {
@@ -1457,14 +1461,14 @@ export function createWebApi(opts: CreateWebApiOptions): CreateWebApiResult {
         };
       }
       clarifyBridge.recordPresence('web');
-      const resolved = await respondAndConfirm(clarifyBridge, {
+      const outcome = await clarifyBridge.respond({
         requestId,
         answer: 'handed back',
         source: 'user',
       });
-      return resolved
+      return outcome.resolved
         ? { resolved: true as const }
-        : { resolved: false as const, reason: CLARIFY_UNRESOLVED_REASON };
+        : { resolved: false as const, reason: clarifyUnresolvedMessage(outcome.reason) };
     },
     authenticate: async (req) => {
       const cookie = readCookie(req.headers.cookie, AUTH_COOKIE);

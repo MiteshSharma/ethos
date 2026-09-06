@@ -1,5 +1,5 @@
+import { clarifyUnresolvedMessage } from '@ethosagent/core';
 import { ORPCError } from '@orpc/server';
-import { CLARIFY_UNRESOLVED_REASON, respondAndConfirm } from '../clarify-resolution';
 import { os } from './context';
 
 // Thin RPC shell for the clarify namespace. Resolves a pending clarify
@@ -22,15 +22,16 @@ const TERMINAL_STATUSES: ReadonlySet<string> = new Set(['done', 'failed', 'abort
 export const clarifyRouter = {
   /**
    * Answer one pending clarify. `{ ok: true }` means the row was RESOLVED —
-   * nothing weaker, and `respondAndConfirm` is what enforces it.
-   *
-   * Both ways this can resolve nothing used to report success: optional
-   * chaining returned `{ ok: true }` with no bridge at all, and
-   * `ClarifyBridge.respond()` swallows a request it cannot resolve. This is
-   * the takeover's FALLBACK hand-back (`TakeoverMode.handBack`), so either one
-   * told an operator the browser was back with the agent while it stayed
-   * parked. Failure THROWS because the contract's output is `z.literal(true)`
-   * — no other channel exists — and both callers already render the message.
+   * nothing weaker. What enforces that is `ClarifyBridge.respond`'s own
+   * `ClarifyRespondOutcome` (`packages/core/src/clarify/respond-outcome.ts`):
+   * success sits behind `outcome.resolved`, a union with no value meaning "it
+   * worked" to fall through to. Both ways this used to report success — a
+   * `{ ok: true }` optional-chained past an absent bridge, and a `respond()`
+   * returning `void` for anything it could not resolve — told an operator the
+   * browser was back while it stayed parked; this is the takeover's FALLBACK
+   * hand-back. Failure THROWS (the output is `z.literal(true)`); who renders
+   * the reason, who drops it, and why none is retryable from here are on
+   * `clarifyUnresolvedMessage`.
    */
   respond: os.clarify.respond.handler(async ({ input, context }) => {
     const bridge = context.clarifyBridge;
@@ -43,15 +44,15 @@ export const clarifyRouter = {
     // D7 — a human acted on this surface; a background job's next question
     // may route here instead of always falling back to its origin lane.
     bridge.recordPresence('web');
-    const resolved = await respondAndConfirm(bridge, {
+    const outcome = await bridge.respond({
       requestId: input.requestId,
       answer: input.answer,
       source: input.source,
     });
-    if (!resolved) {
+    if (!outcome.resolved) {
       throw new ORPCError('CLARIFY_NOT_RESOLVED', {
         status: 409,
-        message: `That answer did not land: ${CLARIFY_UNRESOLVED_REASON}.`,
+        message: `That answer did not land: ${clarifyUnresolvedMessage(outcome.reason)}.`,
       });
     }
     return { ok: true as const };
