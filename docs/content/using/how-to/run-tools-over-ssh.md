@@ -117,15 +117,23 @@ Then ask the agent to run `terminal: hostname` in chat. The answer is the remote
 
 ### `Permission denied (publickey)`
 
-ssh prints authentication refusals without its usual `ssh:` prefix, so the exec stream cannot tell them apart from a remote command that genuinely exited 255. What catches them instead is the reachability probe every execution tool runs before it sends a command: `run_code`, `run_tests` and `lint` report `Code execution backend is not available:` followed by ssh's own sentence. The text is the diagnosis — re-run step 1 by hand and fix the key, the user, or the remote `authorized_keys`.
+ssh prints authentication refusals without its usual `ssh:` prefix. What catches them is the reachability probe every execution tool runs before it sends a command — `run_code`, `run_tests`, `lint` and `terminal` — reporting the backend as unavailable with ssh's own sentence after it. The text is the diagnosis: re-run step 1 by hand and fix the key, the user, or the remote `authorized_keys`.
 
-A refusal that lands *between* a successful probe and the command (the probe result is trusted for 60 seconds) still surfaces as a remote exit 255.
+A refusal that lands *between* a successful probe and the command (the probe result is trusted for 60 seconds) is caught too: ssh's authentication line has a fixed shape (`user@host: Permission denied (publickey).`) and a whole line matching it is read as ssh failing, not as a command that ran and exited 255.
 
 ### `Host key verification failed.`
 
 The target's host key is not the one that was pinned, or `strictHostKeys: yes` is set and no key is pinned at all. This is reported as an unavailable backend, never as a failing command — a host key that no longer matches is not something to fix by editing tests, and telling the agent otherwise would send it off doing exactly that.
 
 Under `accept-new` this means the key **changed**, which is the one thing that policy exists to refuse. Do not clear the entry to make it go away until you know why it changed: a reprovisioned host and a machine-in-the-middle produce the identical message. Once you are sure, remove the stale line from the known-hosts file and let the next connection learn the new key.
+
+### `ssh transport failed: Connection to <host> closed by remote host.`
+
+The connection died *while* the command was running — the remote sshd was restarted, the network dropped, or a keepalive went unanswered (`Timeout, server <host> not responding.` is the same event seen from the other end). ssh exits 255 for its own failures exactly as a remote command exiting 255 does, so these are told apart by matching ssh's own diagnostic lines. When one matches, the tool reports `not_available`, not a failing command.
+
+No probe can prevent this: it happens after the command was accepted, potentially minutes in. Re-run the tool. If it recurs, raise `ServerAliveInterval` on the remote's sshd or check for a firewall idle timeout between the two machines.
+
+The match is a fixed list of lines one OpenSSH build was observed to print, so a drop that prints something else still surfaces as `Command exited with error (code 255)` with ssh's diagnostic in the output. If the output names ssh rather than your command, treat it as a transport failure regardless of the code.
 
 ### The tool timed out but the remote command kept running
 

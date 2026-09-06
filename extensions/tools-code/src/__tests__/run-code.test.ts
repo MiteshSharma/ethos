@@ -255,6 +255,8 @@ function makeSshBackend(opts: {
   available: boolean;
   probeError?: string;
   transportError?: string;
+  /** Thrown from `exec` verbatim, for codes other than SSH_TRANSPORT_FAILED. */
+  execError?: Error;
 }): FakeBackend & { lastProbeError?: string } {
   const backend: FakeBackend & { lastProbeError?: string } = {
     name: 'ssh',
@@ -267,10 +269,12 @@ function makeSshBackend(opts: {
       // rejects.
       return {
         [Symbol.asyncIterator]: () => ({
-          next: () =>
-            opts.transportError === undefined
+          next: () => {
+            if (opts.execError !== undefined) return Promise.reject(opts.execError);
+            return opts.transportError === undefined
               ? Promise.resolve({ done: true as const, value: undefined })
-              : Promise.reject(new FakeSshTransportError(opts.transportError)),
+              : Promise.reject(new FakeSshTransportError(opts.transportError));
+          },
         }),
       };
     },
@@ -322,6 +326,45 @@ describe('run_tests / lint transport failures (F11)', () => {
       expect(result.code).toBe('not_available');
       expect(result.error).toBe(`ssh transport failed: ${HOST_KEY_FAILED}`);
     }
+  });
+
+  // A known-hosts refusal is NOT a transport failure — it is thrown by
+  // `target()` before ssh is spawned — but it reaches exec the same way, INSIDE
+  // the 60 s availability-cache window, because the thing it reads is the live
+  // filesystem: a chmod, a remount or an `~/.ssh/config` edit turns a target
+  // that passed its probe into one that refuses. Its message was always
+  // honest; the code said `execution_failed`, which claims a command ran.
+  it.each([
+    ['run_tests', 1],
+    ['lint', 2],
+  ])('%s reports a mid-exec known-hosts refusal as not_available', async (_n, index) => {
+    const message = "execution.ssh: with strictHostKeys 'accept-new' the learned host key …";
+    const execError = Object.assign(new Error(message), { code: 'SSH_KNOWN_HOSTS_INVALID' });
+    const tool = createCodeTools({ backend: makeSshBackend({ available: true, execError }) })[
+      index
+    ];
+    const result = await tool?.execute({}, ctx);
+    expect(result?.ok).toBe(false);
+    if (result && !result.ok) {
+      expect(result.code).toBe('not_available');
+      expect(result.error).toBe(message);
+    }
+  });
+
+  // THE CONTROL for that widening: an env-delivery refusal is a WIRING mistake
+  // in Ethos, not a property of the host's availability, so it must keep
+  // saying `execution_failed` rather than sending an operator to look at their
+  // remote machine.
+  it('leaves an unsupported-env refusal as execution_failed', async () => {
+    const execError = Object.assign(new Error('ssh backend cannot deliver environment variables'), {
+      code: 'SSH_ENV_UNSUPPORTED',
+    });
+    const [, runTests] = createCodeTools({
+      backend: makeSshBackend({ available: true, execError }),
+    });
+    const result = await runTests?.execute({}, ctx);
+    expect(result?.ok).toBe(false);
+    if (result && !result.ok) expect(result.code).toBe('execution_failed');
   });
 
   it('run_code reports a transport failure mid-exec as not_available too', async () => {

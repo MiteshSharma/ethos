@@ -23,6 +23,64 @@ const DEFAULT_HOST_EXEC_FORBIDDEN =
   'Execution requires a Docker sandbox, but none is available and the constitution forbids running un-sandboxed on the host.';
 
 /**
+ * The stderr of a backend's most recent FAILED availability probe, when it
+ * keeps one. `ExecutionBackend` does not declare it, and this package must not
+ * import a concrete backend to reach it, so it is read structurally: a backend
+ * that has nothing to say is simply absent from the error, and one that does
+ * (`Permission denied (publickey)` vs `Connection timed out`) says the one
+ * thing that tells an operator which fix is theirs.
+ *
+ * Copied — not imported — from `@ethosagent/tools-code`, which carries the same
+ * three helpers. Same rule as {@link staticExecutionRouter} below: a helper
+ * this small is not worth an extension-to-extension dependency, and
+ * `@ethosagent/types` holds no runtime code to put it in.
+ */
+function lastProbeError(backend: ExecutionBackend): string | undefined {
+  if (!('lastProbeError' in backend)) return undefined;
+  const value = backend.lastProbeError;
+  return typeof value === 'string' && value.trim() !== '' ? value.trim() : undefined;
+}
+
+/** The tool's answer when the resolved backend's own availability probe says no. */
+function backendUnavailable(backend: ExecutionBackend): ToolResult {
+  const detail = lastProbeError(backend);
+  return {
+    ok: false,
+    error: detail
+      ? `Command execution backend is not available: ${detail}`
+      : 'Command execution backend is not available',
+    code: 'not_available',
+  };
+}
+
+/**
+ * Error codes the ssh backend throws that mean THE COMMAND NEVER RAN — ssh
+ * failing to connect/authenticate/hold the session, and a known-hosts
+ * destination this machine cannot write.
+ *
+ * The same set, for the same reasons, as `BACKEND_UNUSABLE_CODES` in
+ * `@ethosagent/tools-code`; that copy carries the full argument for what is in
+ * it and what is deliberately left out. Read structurally, because this package
+ * must not import a concrete backend. The producer's spelling is pinned by
+ * `extensions/execution-ssh/src/__tests__/ssh.test.ts` ("SshTransportError
+ * carries the code tools-code matches on").
+ */
+const BACKEND_UNUSABLE_CODES: ReadonlySet<string> = new Set([
+  'SSH_TRANSPORT_FAILED',
+  'SSH_KNOWN_HOSTS_INVALID',
+]);
+
+/** Whether `err` is one of {@link BACKEND_UNUSABLE_CODES}. */
+function isTransportFailure(err: unknown): err is Error {
+  return (
+    err instanceof Error &&
+    'code' in err &&
+    typeof err.code === 'string' &&
+    BACKEND_UNUSABLE_CODES.has(err.code)
+  );
+}
+
+/**
  * Drain an `ExecChunk` stream into combined stdout/stderr strings, mirroring
  * the ScopedProcess result shape so the routed and local paths produce the
  * same ToolResult. Throws on backend stream errors (timeout/abort/unavailable),
@@ -121,6 +179,21 @@ function makeTerminalTool(route: ExecutionRouter): Tool {
       // Routed path: run inside the mount-confined backend. env is empty by
       // default (review #3) so host secrets never cross into the container.
       if (backend) {
+        // The availability gate every code tool has (`createRunCodeTool` and
+        // `makeCommandTool` in `@ethosagent/tools-code`), and this tool never
+        // did. Without it ssh's own failures — a refused credential, a changed
+        // or unpinnable host key — reach the non-zero branch below and are
+        // rendered `Command exited with error (code 255)`, which tells the
+        // agent a command ran on the remote and failed when nothing ever
+        // reached it. That gap was load-bearing in two places that claimed
+        // otherwise: the KNOWN LIMIT on `SshTransportError` in
+        // `extensions/execution-ssh/src/index.ts` ("every code tool gates on
+        // isAvailable()") and this feature's own how-to, whose Verify step is
+        // `terminal: hostname`. The check runs on EVERY invocation; the
+        // backend decides what to cache, and the ssh backend caches only
+        // successes, so a transient blip does not pin this tool to
+        // `not_available` for a minute.
+        if (!(await backend.isAvailable())) return backendUnavailable(backend);
         try {
           const { stdout, stderr, exitCode } = await drainExec(
             backend.exec(command, {
@@ -162,6 +235,11 @@ function makeTerminalTool(route: ExecutionRouter): Tool {
             ? { ok: true, value: `${body}${EXIT_SUFFIX}`, structured: { exitCode: 0, command } }
             : { ok: true, value: body, structured: { command } };
         } catch (err) {
+          // Same reason as the gate above: the backend becoming unusable in the
+          // window after a cached probe success is not the command failing.
+          if (isTransportFailure(err)) {
+            return { ok: false, error: err.message, code: 'not_available' };
+          }
           return {
             ok: false,
             error: err instanceof Error ? err.message : String(err),

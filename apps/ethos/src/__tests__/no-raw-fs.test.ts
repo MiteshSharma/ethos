@@ -230,9 +230,14 @@
 //                                here. `~/.ssh/known_hosts`
 //                                (`DEFAULT_KNOWN_HOSTS`) is only the fail-open
 //                                fallback for a `-G` this process cannot read
-//                                — no ssh binary, non-zero status, timeout, no
-//                                `userknownhostsfile` line, or a quoted path
-//                                it will not split. Whichever path that
+//                                — no ssh binary, non-zero status, timeout, or
+//                                no `userknownhostsfile` line. A MULTI-ENTRY
+//                                value is not fail-open: `-G` prints a
+//                                space-containing path raw (verified 9.6p1),
+//                                so it is read as a list, the first entry is
+//                                probed, and the refusal names the whole
+//                                resolved value, not a fragment. Whichever
+//                                path that
 //                                resolution names lives outside `~/.ethos/`
 //                                entirely and is read by the ssh binary,
 //                                never by Ethos:

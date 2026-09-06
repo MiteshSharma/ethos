@@ -57,27 +57,55 @@ function backendUnavailable(backend: ExecutionBackend): ToolResult {
 }
 
 /**
- * Whether `err` is the ssh backend reporting that ssh ITSELF failed — it could
- * not connect, authenticate, or verify the host key — as opposed to the remote
- * command running and exiting non-zero.
+ * Error codes the ssh backend throws that mean THE COMMAND NEVER RAN.
  *
- * Read structurally, like {@link lastProbeError}: `SshTransportError` lives in
+ *  - `SSH_TRANSPORT_FAILED` — ssh itself could not connect, authenticate, or
+ *    hold the session open, as opposed to the remote command exiting non-zero.
+ *  - `SSH_KNOWN_HOSTS_INVALID` — the effective known-hosts destination cannot
+ *    keep a learned key, so the backend refuses before it spawns anything. It
+ *    reaches exec DESPITE the `isAvailable()` gate because a probe success is
+ *    trusted for 60 s while the thing that check reads is the live filesystem:
+ *    a `chmod`, a remount, or an `~/.ssh/config` edit inside that window turns
+ *    a passing target into a refusing one, and the refusal then lands in the
+ *    catch below. The message was always honest; the CODE said
+ *    `execution_failed`, which is a claim that a command ran and lost.
+ *
+ * `SSH_HOST_MISSING` and `SSH_DESTINATION_INVALID` are deliberately absent:
+ * `probe()` refuses both, and neither can become true under a running process
+ * — they read config that was frozen at construction — so they cannot appear
+ * after a probe success. `SSH_ENV_UNSUPPORTED` is absent for a different
+ * reason: it is a wiring mistake in Ethos, not a property of the backend's
+ * availability, and calling it `not_available` would send an operator to look
+ * at their host.
+ *
+ * Read structurally, like {@link lastProbeError}: these classes live in
  * `@ethosagent/execution-ssh` and this package must not import a concrete
- * backend to reach it. The string is that class's own `readonly code`, which no
- * compiler holds to this one, so both sides are pinned by test:
+ * backend to reach them. The strings are those classes' own `readonly code`,
+ * which no compiler holds to these, so both sides are pinned by test:
  * `extensions/execution-ssh/src/__tests__/ssh.test.ts` ("SshTransportError
  * carries the code tools-code matches on") asserts the producer's spelling, and
  * `extensions/tools-code/src/__tests__/run-code.test.ts` ("… reports a
  * transport failure mid-exec as not_available") drives that same shape through
  * this consumer.
  *
- * It matters because the alternative is silent: a transport failure rendered
- * as `execution_failed` sits beside `Tests failed` in the agent's context and
+ * It matters because the alternative is silent: a backend refusal rendered as
+ * `execution_failed` sits beside `Tests failed` in the agent's context and
  * reads as a command that ran and lost, so the agent goes and edits tests that
  * were never executed.
  */
+const BACKEND_UNUSABLE_CODES: ReadonlySet<string> = new Set([
+  'SSH_TRANSPORT_FAILED',
+  'SSH_KNOWN_HOSTS_INVALID',
+]);
+
+/** Whether `err` is one of {@link BACKEND_UNUSABLE_CODES}. */
 function isTransportFailure(err: unknown): err is Error {
-  return err instanceof Error && 'code' in err && err.code === 'SSH_TRANSPORT_FAILED';
+  return (
+    err instanceof Error &&
+    'code' in err &&
+    typeof err.code === 'string' &&
+    BACKEND_UNUSABLE_CODES.has(err.code)
+  );
 }
 
 /**

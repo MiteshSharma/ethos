@@ -7,13 +7,14 @@ import { runExecutionConformance } from '@ethosagent/core';
 import type { ExecChunk, Logger, PersonalityConfig, SecretsResolver } from '@ethosagent/types';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-vi.mock('node:child_process', () => ({ spawn: vi.fn(), spawnSync: vi.fn() }));
+vi.mock('node:child_process', () => ({ spawn: vi.fn() }));
 
-import { spawn, spawnSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import {
   buildRemoteWords,
   buildSshArgs,
   knownHostsFromSshConfig,
+  type SshConfigResolver,
   SshDestinationInvalidError,
   SshEnvUnsupportedError,
   SshExecutionBackend,
@@ -76,6 +77,21 @@ let replies: Reply[] = [];
 function fakeSpawn(replyFor: (index: number) => Reply) {
   return (_cmd: string, args: readonly string[]) => {
     const child = new FakeChild();
+    // `ssh -G` is a SEPARATE spawn from the client, and it is not a connection:
+    // it must not land in `spawned`, which every "nothing was spawned" and
+    // "the client's argv was …" expectation reads. Told apart by its own first
+    // argument, exactly as `runSshDashG` builds it.
+    if (args[0] === '-G') {
+      setTimeout(() => {
+        if (gConfigOutput === null) {
+          child.emit('close', 1);
+          return;
+        }
+        child.stdout.emit('data', Buffer.from(gConfigOutput));
+        child.emit('close', 0);
+      }, 0);
+      return child as unknown as ChildProcess;
+    }
     const index = spawned.length;
     spawned.push({ args: [...args], child });
     setTimeout(() => {
@@ -97,17 +113,17 @@ function useReplies(list: Reply[]): void {
   );
 }
 
+/** Stdout the faked `ssh -G` subprocess prints, or `null` to make it fail. */
+let gConfigOutput: string | null = null;
+
 /**
  * Drive the `ssh -G` lookup without a real ssh binary. `null` is the
  * subprocess failing (no binary, non-zero status, timeout); a string is its
- * stdout.
+ * stdout. It goes through `spawn` like the client does — `runSshDashG` is
+ * asynchronous so it cannot stall the event loop.
  */
 function useSshConfig(stdout: string | null): void {
-  vi.mocked(spawnSync).mockReturnValue(
-    (stdout === null
-      ? { status: 1, stdout: '', stderr: '' }
-      : { status: 0, stdout, stderr: '' }) as ReturnType<typeof spawnSync>,
-  );
+  gConfigOutput = stdout;
 }
 
 function backend(ssh?: Record<string, unknown>) {
@@ -200,6 +216,21 @@ afterEach(() => {
   else process.env.HOME = savedHome;
   rmSync(tmpHome, { recursive: true, force: true });
 });
+
+/**
+ * No ssh CONNECTION was opened.
+ *
+ * `spawn` itself may legitimately have been called: `runSshDashG` uses it for
+ * the non-connecting `ssh -G` lookup, which `fakeSpawn` keeps out of `spawned`.
+ * So the assertion is on the SHAPE of every call rather than on the mock being
+ * untouched — the claim is "nothing dialled the host", not "nothing ran".
+ */
+function expectNoSshConnection(): void {
+  expect(spawned).toHaveLength(0);
+  for (const call of vi.mocked(spawn).mock.calls) {
+    expect((call[1] as readonly string[])[0]).toBe('-G');
+  }
+}
 
 /** A directory inside the throwaway home that this process cannot write. */
 function readOnlyDir(name: string): string {
@@ -400,39 +431,43 @@ describe('sshKnownHostsError (pre-spawn host-key persistence)', () => {
 // connection is a first connection — with the config still claiming pinning.
 // The lexical check above cannot see any of this.
 describe('sshKnownHostsUnwritableError (pre-spawn host-key persistence on this machine)', () => {
-  it('accepts a writable file', () => {
+  it('accepts a writable file', async () => {
     const file = join(tmpHome, '.ssh', 'known_hosts');
     writeFileSync(file, '');
-    expect(sshKnownHostsUnwritableError({ host: 'build-01', knownHostsFile: file })).toBeNull();
+    expect(
+      await sshKnownHostsUnwritableError({ host: 'build-01', knownHostsFile: file }),
+    ).toBeNull();
   });
 
   // Absence is the ORDINARY case — `accept-new` creates the file on the first
   // connection, which is how an operator adopts a dedicated known-hosts file.
-  it('accepts a file that does not exist yet in a writable directory', () => {
+  it('accepts a file that does not exist yet in a writable directory', async () => {
     const file = join(tmpHome, '.ssh', 'known_hosts_ethos');
-    expect(sshKnownHostsUnwritableError({ host: 'build-01', knownHostsFile: file })).toBeNull();
+    expect(
+      await sshKnownHostsUnwritableError({ host: 'build-01', knownHostsFile: file }),
+    ).toBeNull();
   });
 
-  it('rejects a file whose directory does not exist, naming the directory to create', () => {
+  it('rejects a file whose directory does not exist, naming the directory to create', async () => {
     const file = join(tmpHome, 'nodir', 'known_hosts');
-    const err = sshKnownHostsUnwritableError({ host: 'build-01', knownHostsFile: file });
+    const err = await sshKnownHostsUnwritableError({ host: 'build-01', knownHostsFile: file });
     expect(err).toContain(file);
     expect(err).toContain(`mkdir -p '${join(tmpHome, 'nodir')}'`);
   });
 
-  asUnprivilegedUser('rejects a file whose directory is not writable', () => {
+  asUnprivilegedUser('rejects a file whose directory is not writable', async () => {
     const dir = readOnlyDir('ro-dir');
     const file = join(dir, 'known_hosts');
-    const err = sshKnownHostsUnwritableError({ host: 'build-01', knownHostsFile: file });
+    const err = await sshKnownHostsUnwritableError({ host: 'build-01', knownHostsFile: file });
     expect(err).toContain(file);
     expect(err).toContain('is not writable');
   });
 
-  asUnprivilegedUser('rejects an existing file that is not writable', () => {
+  asUnprivilegedUser('rejects an existing file that is not writable', async () => {
     const file = join(tmpHome, '.ssh', 'known_hosts');
     writeFileSync(file, '');
     chmodSync(file, 0o400);
-    const err = sshKnownHostsUnwritableError({ host: 'build-01', knownHostsFile: file });
+    const err = await sshKnownHostsUnwritableError({ host: 'build-01', knownHostsFile: file });
     expect(err).toContain(file);
     expect(err).toContain('that file is not writable');
   });
@@ -441,40 +476,40 @@ describe('sshKnownHostsUnwritableError (pre-spawn host-key persistence on this m
   // in a container, so the probe must resolve ssh's own default rather than
   // skip. Here `$HOME` itself does not exist, so nothing about the path is
   // inherited from the machine running the test.
-  it('resolves ssh’s own default when knownHostsFile is unset', () => {
+  it('resolves ssh’s own default when knownHostsFile is unset', async () => {
     process.env.HOME = join(tmpHome, 'no-such-home');
-    const err = sshKnownHostsUnwritableError({ host: 'build-01' });
+    const err = await sshKnownHostsUnwritableError({ host: 'build-01' });
     expect(err).toContain(join(tmpHome, 'no-such-home', '.ssh', 'known_hosts'));
     expect(err).toContain('does not exist');
   });
 
-  it('accepts the unset default when ~/.ssh is writable', () => {
-    expect(sshKnownHostsUnwritableError({ host: 'build-01' })).toBeNull();
+  it('accepts the unset default when ~/.ssh is writable', async () => {
+    expect(await sshKnownHostsUnwritableError({ host: 'build-01' })).toBeNull();
   });
 
   // `~/.ssh` is the ONE directory ssh creates for itself
   // (`hostfile_create_user_ssh_dir`), so a fresh container missing it must not
   // be refused for a directory ssh would have made. Verified 9.6p1: any OTHER
   // missing directory is not created and the write fails.
-  it('defers to the home directory when only ~/.ssh is missing', () => {
+  it('defers to the home directory when only ~/.ssh is missing', async () => {
     rmSync(join(tmpHome, '.ssh'), { recursive: true });
-    expect(sshKnownHostsUnwritableError({ host: 'build-01' })).toBeNull();
+    expect(await sshKnownHostsUnwritableError({ host: 'build-01' })).toBeNull();
   });
 
-  asUnprivilegedUser('rejects the unset default under an unwritable home', () => {
+  asUnprivilegedUser('rejects the unset default under an unwritable home', async () => {
     const home = readOnlyDir('ro-home');
     process.env.HOME = home;
-    const err = sshKnownHostsUnwritableError({ host: 'build-01' });
+    const err = await sshKnownHostsUnwritableError({ host: 'build-01' });
     expect(err).toContain(join(home, '.ssh', 'known_hosts'));
   });
 
   // Under `yes` nothing is ever LEARNED — an unknown host is refused outright —
   // so whether a key could be written is irrelevant, and a deliberately
   // read-only known_hosts is a legitimate deployment this must not break.
-  it('does not probe at all when strictHostKeys is yes', () => {
+  it('does not probe at all when strictHostKeys is yes', async () => {
     const file = join(tmpHome, 'nodir', 'known_hosts');
     expect(
-      sshKnownHostsUnwritableError({
+      await sshKnownHostsUnwritableError({
         host: 'build-01',
         knownHostsFile: file,
         strictHostKeys: 'yes',
@@ -484,10 +519,10 @@ describe('sshKnownHostsUnwritableError (pre-spawn host-key persistence on this m
 
   // A learned key goes to the FIRST file listed; the rest are read-only
   // fallbacks (ssh_config(5)), so they are not this probe's subject.
-  it('probes only the first file of a list', () => {
+  it('probes only the first file of a list', async () => {
     const first = join(tmpHome, '.ssh', 'known_hosts');
     expect(
-      sshKnownHostsUnwritableError({
+      await sshKnownHostsUnwritableError({
         host: 'build-01',
         knownHostsFile: `${first} ${join(tmpHome, 'nodir', 'known_hosts2')}`,
       }),
@@ -503,8 +538,8 @@ describe('sshKnownHostsUnwritableError (pre-spawn host-key persistence on this m
     '%d/.ssh/known_hosts',
     // biome-ignore lint/suspicious/noTemplateCurlyInString: ssh's own syntax, quoted verbatim.
     '${HOME}/.ssh/known_hosts',
-  ])('declines to guess at the unresolvable path %j', (knownHostsFile) => {
-    expect(sshKnownHostsUnwritableError({ host: 'build-01', knownHostsFile })).toBeNull();
+  ])('declines to guess at the unresolvable path %j', async (knownHostsFile) => {
+    expect(await sshKnownHostsUnwritableError({ host: 'build-01', knownHostsFile })).toBeNull();
   });
 });
 
@@ -520,7 +555,7 @@ describe('sshKnownHostsUnwritableError (pre-spawn host-key persistence on this m
 // unset case asks. Driven through a fake here; no real ssh is required.
 // ---------------------------------------------------------------------------
 describe('knownHostsFromSshConfig (parsing `ssh -G` output)', () => {
-  it('reads the userknownhostsfile list', () => {
+  it('reads the userknownhostsfile list', async () => {
     expect(
       knownHostsFromSshConfig(
         'user deploy\nhostname build-01\nuserknownhostsfile ~/.ssh/known_hosts ~/.ssh/known_hosts2\nport 22\n',
@@ -528,27 +563,41 @@ describe('knownHostsFromSshConfig (parsing `ssh -G` output)', () => {
     ).toEqual(['~/.ssh/known_hosts', '~/.ssh/known_hosts2']);
   });
 
-  it('returns null when the output names no known-hosts file', () => {
+  it('returns null when the output names no known-hosts file', async () => {
     expect(knownHostsFromSshConfig('user deploy\nhostname build-01\n')).toBeNull();
   });
 
-  it('returns null for empty output', () => {
+  it('returns null for empty output', async () => {
     expect(knownHostsFromSshConfig('')).toBeNull();
   });
 
-  // OpenSSH quotes a path containing spaces. Splitting one on whitespace would
-  // yield fragments that are not paths, which the caller would then probe as if
-  // they were and refuse a working target over.
-  it('declines to split a quoted path', () => {
-    expect(knownHostsFromSshConfig('userknownhostsfile "/keys/my hosts/known_hosts"\n')).toBeNull();
+  // `ssh -G` STRIPS the quoting it was given. Captured from the real binary
+  // (OpenSSH_9.6p1 Ubuntu-3ubuntu13.18) for the config line
+  //   UserKnownHostsFile "/tmp/my hosts" /tmp/second
+  // — so the guard this replaces, which returned null for any value containing
+  // a `"`, could never fire on the case it was written for. Nothing here can
+  // recover the entry boundaries; the caller says so in its refusal instead.
+  it('splits what real `ssh -G` emits for a quoted path, quotes already gone', async () => {
+    expect(knownHostsFromSshConfig('userknownhostsfile /tmp/my hosts /tmp/second\n')).toEqual([
+      '/tmp/my',
+      'hosts',
+      '/tmp/second',
+    ]);
+  });
+
+  // The one thing the old guard DID fire on: a path that genuinely contains a
+  // `"`. Real capture, for `UserKnownHostsFile /tmp/wei\"rd`. Declining to read
+  // it refused a legitimate target.
+  it('reads a path that genuinely contains a double quote', async () => {
+    expect(knownHostsFromSshConfig('userknownhostsfile /tmp/wei"rd\n')).toEqual(['/tmp/wei"rd']);
   });
 });
 
 describe('sshKnownHostsUnwritableError (effective known-hosts per `ssh -G`)', () => {
-  const G = (line: string) => () => `hostname build-01\n${line}\n`;
+  const G = (line: string) => () => Promise.resolve(`hostname build-01\n${line}\n`);
 
-  it('refuses when the operator’s ssh config redirects known-hosts to /dev/null', () => {
-    const err = sshKnownHostsUnwritableError(
+  it('refuses when the operator’s ssh config redirects known-hosts to /dev/null', async () => {
+    const err = await sshKnownHostsUnwritableError(
       { host: 'build-01' },
       G('userknownhostsfile /dev/null'),
     );
@@ -558,26 +607,26 @@ describe('sshKnownHostsUnwritableError (effective known-hosts per `ssh -G`)', ()
   });
 
   // OpenSSH's literal, not a path. Same hole, spelled differently.
-  it('refuses the OpenSSH literal `none`', () => {
+  it('refuses the OpenSSH literal `none`', async () => {
     expect(
-      sshKnownHostsUnwritableError({ host: 'build-01' }, G('userknownhostsfile none')),
+      await sshKnownHostsUnwritableError({ host: 'build-01' }, G('userknownhostsfile none')),
     ).toContain('cannot persist');
   });
 
   // A list is only as trustworthy as what ssh actually consults — the same rule
   // the lexical check applies to a configured list.
-  it('refuses a non-persistent entry anywhere in the resolved list', () => {
+  it('refuses a non-persistent entry anywhere in the resolved list', async () => {
     expect(
-      sshKnownHostsUnwritableError(
+      await sshKnownHostsUnwritableError(
         { host: 'build-01' },
         G('userknownhostsfile ~/.ssh/known_hosts /dev/null'),
       ),
     ).toContain('/dev/null');
   });
 
-  it('names the destination it resolved for, user included', () => {
+  it('names the destination it resolved for, user included', async () => {
     expect(
-      sshKnownHostsUnwritableError(
+      await sshKnownHostsUnwritableError(
         { host: 'build-01', user: 'deploy' },
         G('userknownhostsfile /dev/null'),
       ),
@@ -586,9 +635,9 @@ describe('sshKnownHostsUnwritableError (effective known-hosts per `ssh -G`)', ()
 
   // The redirect is a REAL path, just not the default one: the probe must
   // follow it rather than keep testing ~/.ssh/known_hosts.
-  it('probes the file `ssh -G` actually named, not the default', () => {
+  it('probes the file `ssh -G` actually named, not the default', async () => {
     const redirected = join(tmpHome, 'nodir', 'known_hosts');
-    const err = sshKnownHostsUnwritableError(
+    const err = await sshKnownHostsUnwritableError(
       { host: 'build-01' },
       G(`userknownhostsfile ${redirected}`),
     );
@@ -596,9 +645,9 @@ describe('sshKnownHostsUnwritableError (effective known-hosts per `ssh -G`)', ()
     expect(err).not.toContain(join(tmpHome, '.ssh', 'known_hosts'));
   });
 
-  it('accepts a redirected file whose directory is writable', () => {
+  it('accepts a redirected file whose directory is writable', async () => {
     expect(
-      sshKnownHostsUnwritableError(
+      await sshKnownHostsUnwritableError(
         { host: 'build-01' },
         G(`userknownhostsfile ${join(tmpHome, 'known_hosts_alt')}`),
       ),
@@ -608,26 +657,25 @@ describe('sshKnownHostsUnwritableError (effective known-hosts per `ssh -G`)', ()
   // FAIL OPEN on not knowing. Each of these falls back to ~/.ssh/known_hosts —
   // the behaviour that shipped before `-G` was consulted — so an ssh that
   // formats its resolved config differently is no worse off than it was.
-  it.each<[string, () => string | null]>([
-    ['`ssh -G` could not be run', () => null],
-    ['the output carries no userknownhostsfile line', () => 'hostname build-01\n'],
-    ['the resolved path is quoted', () => 'userknownhostsfile "/a b/known_hosts"\n'],
-  ])('falls back to ssh’s own default when %s', (_label, resolver) => {
+  it.each<[string, SshConfigResolver]>([
+    ['`ssh -G` could not be run', () => Promise.resolve(null)],
+    ['the output carries no userknownhostsfile line', () => Promise.resolve('hostname build-01\n')],
+  ])('falls back to ssh’s own default when %s', async (_label, resolver) => {
     // ~/.ssh is writable here, so the fallback ACCEPTS …
-    expect(sshKnownHostsUnwritableError({ host: 'build-01' }, resolver)).toBeNull();
+    expect(await sshKnownHostsUnwritableError({ host: 'build-01' }, resolver)).toBeNull();
     // … and it is genuinely the default being probed, not a skipped check.
     process.env.HOME = join(tmpHome, 'no-such-home');
-    expect(sshKnownHostsUnwritableError({ host: 'build-01' }, resolver)).toContain(
+    expect(await sshKnownHostsUnwritableError({ host: 'build-01' }, resolver)).toContain(
       join(tmpHome, 'no-such-home', '.ssh', 'known_hosts'),
     );
   });
 
   // A configured knownHostsFile is passed as a command-line `-o`, which
   // outranks the config file — there is nothing for `-G` to tell us.
-  it('does not consult `ssh -G` when knownHostsFile is set', () => {
-    const resolver = vi.fn(() => 'userknownhostsfile /dev/null\n');
+  it('does not consult `ssh -G` when knownHostsFile is set', async () => {
+    const resolver = vi.fn(() => Promise.resolve('userknownhostsfile /dev/null\n'));
     expect(
-      sshKnownHostsUnwritableError(
+      await sshKnownHostsUnwritableError(
         { host: 'build-01', knownHostsFile: join(tmpHome, '.ssh', 'known_hosts') },
         resolver,
       ),
@@ -635,12 +683,44 @@ describe('sshKnownHostsUnwritableError (effective known-hosts per `ssh -G`)', ()
     expect(resolver).not.toHaveBeenCalled();
   });
 
-  it('does not consult `ssh -G` under strictHostKeys yes', () => {
-    const resolver = vi.fn(() => 'userknownhostsfile /dev/null\n');
+  it('does not consult `ssh -G` under strictHostKeys yes', async () => {
+    const resolver = vi.fn(() => Promise.resolve('userknownhostsfile /dev/null\n'));
     expect(
-      sshKnownHostsUnwritableError({ host: 'build-01', strictHostKeys: 'yes' }, resolver),
+      await sshKnownHostsUnwritableError({ host: 'build-01', strictHostKeys: 'yes' }, resolver),
     ).toBeNull();
     expect(resolver).not.toHaveBeenCalled();
+  });
+
+  // A multi-entry `-G` value is the one place this fails closed without
+  // knowing: `/etc/ssh known_hosts` is either two paths or one path with a
+  // space, and `-G` strips the quoting that would have said which (verified
+  // 9.6p1 — see `knownHostsFromSshConfig`). Refusing is still right; refusing
+  // over a FRAGMENT the operator never configured, with no mention of the
+  // value ssh actually resolved, is not.
+  it('names the whole resolved value when the split it made could be wrong', async () => {
+    const err = await sshKnownHostsUnwritableError(
+      { host: 'build-01' },
+      G(`userknownhostsfile ${join(tmpHome, 'nodir', 'kh')} known_hosts`),
+    );
+    // The fragment it probed is named …
+    expect(err).toContain(join(tmpHome, 'nodir', 'kh'));
+    // … but so is the value ssh printed, unsplit …
+    expect(err).toContain(`'${join(tmpHome, 'nodir', 'kh')} known_hosts'`);
+    // … and the destination, and the way out.
+    expect(err).toContain('build-01');
+    expect(err).toContain('execution.ssh.knownHostsFile');
+  });
+
+  // The note is about a split that COULD be wrong. A single-entry value has no
+  // split, so attaching it there would be noise claiming a doubt that does not
+  // exist.
+  it('does not claim ambiguity for a single-entry resolved value', async () => {
+    const err = await sshKnownHostsUnwritableError(
+      { host: 'build-01' },
+      G(`userknownhostsfile ${join(tmpHome, 'nodir', 'known_hosts')}`),
+    );
+    expect(err).toContain('nodir');
+    expect(err).not.toContain('whitespace-separated list');
   });
 });
 
@@ -666,6 +746,35 @@ describe('SshExecutionBackend and a redirected known-hosts file', () => {
     useSshConfig(`hostname build-01\nuserknownhostsfile ${join(tmpHome, '.ssh', 'known_hosts')}\n`);
     await collect(backend({}).exec('echo hi', {}));
     expect(spawned).toHaveLength(1);
+  });
+
+  // The `-G` lookup evaluates the operator's `Match exec` blocks and reads a
+  // config file that can live on a slow filesystem. It ran as `spawnSync` on
+  // the reasoning that it sits "beside an ssh connection that costs orders of
+  // magnitude more" — but that connection is `spawn`, which yields, so the
+  // comparison was against something that never blocked. Other work must be
+  // able to run while this resolves.
+  //
+  // KNOWN LIMIT of this pin: `spawn` is mocked here, so a hypothetical
+  // reimplementation that blocked the loop some other way would still pass. It
+  // asserts the shape the fix gives the call, not the absence of every
+  // possible stall.
+  it('lets other work run while `ssh -G` resolves', async () => {
+    useSshConfig('hostname build-01\nuserknownhostsfile /dev/null\n');
+    const order: string[] = [];
+    const otherWork = new Promise<void>((resolve) => {
+      setTimeout(() => {
+        order.push('other work');
+        resolve();
+      }, 0);
+    });
+    const probe = backend({})
+      .isAvailable()
+      .then(() => {
+        order.push('probe');
+      });
+    await Promise.all([otherWork, probe]);
+    expect(order[0]).toBe('other work');
   });
 });
 
@@ -804,8 +913,7 @@ describe('SshExecutionBackend.exec', () => {
     await expect(collect(be.exec('echo hi', {}))).rejects.toBeInstanceOf(
       SshDestinationInvalidError,
     );
-    expect(spawned).toHaveLength(0);
-    expect(vi.mocked(spawn)).not.toHaveBeenCalled();
+    expectNoSshConnection();
   });
 
   it('refuses a ProxyCommand-shaped user before spawning anything', async () => {
@@ -827,8 +935,7 @@ describe('SshExecutionBackend.exec', () => {
       await expect(collect(be.exec('echo hi', {}))).rejects.toBeInstanceOf(
         SshKnownHostsInvalidError,
       );
-      expect(spawned).toHaveLength(0);
-      expect(vi.mocked(spawn)).not.toHaveBeenCalled();
+      expectNoSshConnection();
     },
   );
 
@@ -868,8 +975,7 @@ describe('SshExecutionBackend.exec', () => {
     await expect(collect(be.exec('echo hi', {}))).rejects.toThrow(
       new RegExp(file.replaceAll('/', '\\/')),
     );
-    expect(spawned).toHaveLength(0);
-    expect(vi.mocked(spawn)).not.toHaveBeenCalled();
+    expectNoSshConnection();
   });
 
   asUnprivilegedUser(
@@ -880,8 +986,7 @@ describe('SshExecutionBackend.exec', () => {
       await expect(collect(be.exec('echo hi', {}))).rejects.toBeInstanceOf(
         SshKnownHostsInvalidError,
       );
-      expect(spawned).toHaveLength(0);
-      expect(vi.mocked(spawn)).not.toHaveBeenCalled();
+      expectNoSshConnection();
     },
   );
 
@@ -892,8 +997,7 @@ describe('SshExecutionBackend.exec', () => {
     process.env.HOME = join(tmpHome, 'no-such-home');
     const be = backend({});
     await expect(collect(be.exec('echo hi', {}))).rejects.toBeInstanceOf(SshKnownHostsInvalidError);
-    expect(spawned).toHaveLength(0);
-    expect(vi.mocked(spawn)).not.toHaveBeenCalled();
+    expectNoSshConnection();
   });
 
   // Nothing is learned under `yes`, so persistence is irrelevant and a
@@ -982,6 +1086,51 @@ describe('SshExecutionBackend.exec', () => {
     expect(new SshTransportError('x').code).toBe('SSH_TRANSPORT_FAILED');
   });
 
+  // Every line below was captured from the LOCAL ssh binary (OpenSSH_9.6p1
+  // Ubuntu-3ubuntu13.18) driven into the failure it names, against a throwaway
+  // sshd or a socket server — except `Corrupted MAC on input.`, which is
+  // literal-verified in the shipped binary's strings only. Each arrives with
+  // exit 255 and none carries the `ssh:` prefix, so before this list they were
+  // classified as a remote command that exited 255 and rendered `Tests failed
+  // (code 255)`.
+  it.each([
+    // Reproduced: throwaway sshd, empty authorized_keys.
+    'miteshsharma@127.0.0.1: Permission denied (publickey).',
+    // Reproduced: socket server that accepts and immediately closes.
+    'kex_exchange_identification: read: Connection reset by peer',
+    'Connection reset by 127.0.0.1 port 22001',
+    // Reproduced: socket server that sends a banner then shuts down.
+    'Connection closed by 127.0.0.1 port 22002',
+    // Reproduced MID-EXEC: sshd session killed while `sleep 20` ran, after the
+    // remote had already streamed stdout. No probe can cover this one.
+    'Connection to 127.0.0.1 closed by remote host.',
+    // Reproduced MID-EXEC: ServerAliveInterval=1, sshd session SIGSTOPped.
+    'Timeout, server 127.0.0.1 not responding.',
+    // strings(1) only — a corrupted stream is not reachable from here.
+    'Corrupted MAC on input.',
+  ])('classifies ssh’s own unprefixed fatal line %j as a transport failure', async (line) => {
+    useReplies([{ stdout: ['STARTED\n'], stderr: [`${line}\n`], code: 255 }]);
+    await expect(collect(backend({}).exec('pnpm test', {}))).rejects.toBeInstanceOf(
+      SshTransportError,
+    );
+  });
+
+  // The other half of the line, and the more expensive error to make. These
+  // are REMOTE output; claiming them would tell the agent a suite that really
+  // did run never ran. The patterns are anchored to a whole line for exactly
+  // this reason — `Connection reset by peer` is a libc string, not ssh's.
+  it.each([
+    'curl: (56) Recv failure: Connection reset by peer',
+    'Connection reset by peer',
+    'rsync: [sender] failed to open "/x": Permission denied (13)',
+    'FAIL src/net.test.ts > reconnects after Connection reset by 10.0.0.1 port 22',
+    'error: Timeout, server db-01 not responding. (from our health check)',
+  ])('leaves remote output that merely mentions %j as a remote exit 255', async (line) => {
+    useReplies([{ stderr: [`${line}\n`], code: 255 }]);
+    const chunks = await collect(backend({}).exec('pnpm test', {}));
+    expect(chunks.at(-1)).toEqual({ stream: 'exit', code: 255 });
+  });
+
   it('passes a remote command that genuinely exited 255 through as an exit chunk', async () => {
     useReplies([{ stderr: ['app: fatal\n'], code: 255 }]);
     const chunks = await collect(backend({}).exec('exit 255', {}));
@@ -1046,8 +1195,7 @@ describe('SshExecutionBackend.isAvailable', () => {
   it('resolves false for a non-persistent knownHostsFile, without spawning', async () => {
     const be = backend({ knownHostsFile: 'none' });
     expect(await be.isAvailable()).toBe(false);
-    expect(spawned).toHaveLength(0);
-    expect(vi.mocked(spawn)).not.toHaveBeenCalled();
+    expectNoSshConnection();
     expect(be.lastProbeError).toContain('cannot persist a learned host key');
   });
 
@@ -1058,8 +1206,7 @@ describe('SshExecutionBackend.isAvailable', () => {
     const file = join(tmpHome, 'nodir', 'known_hosts');
     const be = backend({ knownHostsFile: file });
     expect(await be.isAvailable()).toBe(false);
-    expect(spawned).toHaveLength(0);
-    expect(vi.mocked(spawn)).not.toHaveBeenCalled();
+    expectNoSshConnection();
     expect(be.lastProbeError).toContain(file);
   });
 });

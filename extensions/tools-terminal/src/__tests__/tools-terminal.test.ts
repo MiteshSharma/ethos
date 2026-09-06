@@ -216,6 +216,117 @@ describe('terminal exit-code evidence', () => {
 });
 
 // ---------------------------------------------------------------------------
+// The availability gate.
+//
+// `terminal` is the tool this feature's own how-to tells an operator to verify
+// with (`terminal: hostname`), and it was the one execution tool with no
+// `isAvailable()` call. With an ssh backend and a wrong key, ssh exits 255
+// after printing `deploy@build-01: Permission denied (publickey).` and the
+// result read `Command exited with error (code 255)` — a command that ran on
+// the remote and failed, when nothing ever reached the remote.
+// ---------------------------------------------------------------------------
+
+/** A backend whose probe says no and which keeps the probe's own sentence. */
+function makeUnavailableBackend(probeError?: string): ExecutionBackend & { execCalls: number } {
+  const be = {
+    name: 'ssh',
+    execCalls: 0,
+    ...(probeError !== undefined ? { lastProbeError: probeError } : {}),
+    isAvailable: () => Promise.resolve(false),
+    exec(_cmd: string, _opts: ExecOpts): AsyncIterable<ExecChunk> {
+      be.execCalls++;
+      async function* gen(): AsyncIterable<ExecChunk> {
+        yield { stream: 'stderr', data: 'deploy@build-01: Permission denied (publickey).' };
+        yield { stream: 'exit', code: 255 };
+      }
+      return gen();
+    },
+    spawnSession: (personalityId: string) => ({
+      personalityId,
+      exec: (cmd: string, opts: ExecOpts = {}) => be.exec(cmd, opts),
+      dispose: () => Promise.resolve(),
+    }),
+    mountsFor: () => [],
+    dispose: () => Promise.resolve(),
+  };
+  return be;
+}
+
+/** A backend that passes its probe and then throws mid-exec. */
+function makeThrowingBackend(err: Error): ExecutionBackend {
+  const exec = (_cmd: string, _opts: ExecOpts): AsyncIterable<ExecChunk> => {
+    async function* gen(): AsyncIterable<ExecChunk> {
+      yield { stream: 'stdout', data: 'partial' };
+      throw err;
+    }
+    return gen();
+  };
+  return {
+    name: 'ssh',
+    isAvailable: () => Promise.resolve(true),
+    exec,
+    spawnSession: (personalityId: string) => ({
+      personalityId,
+      exec,
+      dispose: () => Promise.resolve(),
+    }),
+    mountsFor: () => [],
+    dispose: () => Promise.resolve(),
+  };
+}
+
+describe('terminal availability gate', () => {
+  it('refuses without executing when the backend probe says no', async () => {
+    const backend = makeUnavailableBackend();
+    const [tool] = createTerminalTools({ backend });
+    const result = await tool.execute({ command: 'hostname' }, ctx);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.code).toBe('not_available');
+    expect(backend.execCalls).toBe(0);
+  });
+
+  // "not available" alone leaves an operator guessing between a wrong key, an
+  // unreachable host, and a host key that no longer matches. The probe already
+  // has the answer.
+  it('carries the probe’s own sentence when it kept one', async () => {
+    const backend = makeUnavailableBackend('deploy@build-01: Permission denied (publickey).');
+    const [tool] = createTerminalTools({ backend });
+    const result = await tool.execute({ command: 'hostname' }, ctx);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.code).toBe('not_available');
+      expect(result.error).toContain('Permission denied (publickey)');
+    }
+  });
+
+  // The 60 s availability cache means a probe success can be stale. A backend
+  // that fails at exec time for a transport/known-hosts reason is still the
+  // backend failing, not the command.
+  it.each([
+    ['SSH_TRANSPORT_FAILED', 'ssh transport failed: Connection reset by 10.0.0.1 port 22'],
+    ['SSH_KNOWN_HOSTS_INVALID', 'execution.ssh: … the learned host key is written to …'],
+  ])('reports a mid-exec %s as not_available, not a failed command', async (code, message) => {
+    const err = Object.assign(new Error(message), { code });
+    const [tool] = createTerminalTools({ backend: makeThrowingBackend(err) });
+    const result = await tool.execute({ command: 'hostname' }, ctx);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.code).toBe('not_available');
+      expect(result.error).toBe(message);
+    }
+  });
+
+  // The opposite error: an ordinary backend error is still a failed execution.
+  it('leaves an unrelated backend error as execution_failed', async () => {
+    const err = Object.assign(new Error('Execution timed out'), { code: 'EXEC_TIMEOUT' });
+    const [tool] = createTerminalTools({ backend: makeThrowingBackend(err) });
+    const result = await tool.execute({ command: 'hostname' }, ctx);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.code).toBe('execution_failed');
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Truncation spill
 // ---------------------------------------------------------------------------
 
