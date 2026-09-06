@@ -131,7 +131,11 @@ Under `accept-new` this means the key **changed**, which is the one thing that p
 
 The connection died *while* the command was running — the remote sshd was restarted, the network dropped, or a keepalive went unanswered (`Timeout, server <host> not responding.` is the same event seen from the other end). ssh exits 255 for its own failures exactly as a remote command exiting 255 does, so these are told apart by matching ssh's own diagnostic lines. When one matches, the tool reports `not_available`, not a failing command.
 
-No probe can prevent this: it happens after the command was accepted, potentially minutes in. Re-run the tool. If it recurs, raise `ServerAliveInterval` on the remote's sshd or check for a firewall idle timeout between the two machines.
+No probe can prevent this: it happens after the command was accepted, potentially minutes in. Re-run the tool.
+
+If it recurs, the fix is on one of three machines. On the **remote**, `ClientAliveInterval` and `ClientAliveCountMax` in `sshd_config` are what make sshd hang up on a client it has not heard from — raise them there. (`ServerAliveInterval` is an ssh *client* option. sshd does not read it, so setting it on the remote changes nothing.) **Between** the two, a stateful firewall or NAT reaps an idle connection, and the only thing that prevents that is traffic. On the **local** side, that traffic is what `ServerAliveInterval` (with `ServerAliveCountMax`) generates, and it goes in the `~/.ssh/config` of the user the Ethos process runs as, under a `Host` block for your target — there is no `execution.ssh` field for it.
+
+That last one works because Ethos does not isolate ssh from its own configuration. `buildSshArgs` in `extensions/execution-ssh/src/index.ts` passes no `-F`, so ssh reads that config file exactly as it would for an `ssh` you typed yourself — it is the same resolution the known-hosts check inspects with `ssh -G` — and none of the `-o` options Ethos does pass is a `ServerAlive*`, so nothing on the command line overrides yours.
 
 The match is a fixed list of lines one OpenSSH build was observed to print, so a drop that prints something else still surfaces as `Command exited with error (code 255)` with ssh's diagnostic in the output. If the output names ssh rather than your command, treat it as a transport failure regardless of the code.
 

@@ -478,8 +478,8 @@ export class ClarifyBridge {
    * caller claiming a hand-back has to read `resolved`. Four branches below are
    * distinguishable failures and each names itself: no row anywhere
    * (`unknown_request`), the answer gate refusing the row's surface
-   * (`not_answerable`, twice — once per branch), and first-writer-wins
-   * discarding this answer (`already_answered`).
+   * (`not_answerable`, twice — once per branch), and an answer already on the
+   * row discarding this one (`already_answered`).
    *
    * That last one is why the outcome could not be inferred from outside:
    * `notifyResolved` fires on the discard path too, with the caller's own
@@ -500,8 +500,35 @@ export class ClarifyBridge {
    * listeners for the row's surface (the common cross-process case, e.g.
    * web-api answering a Telegram-origin row), and exactly what's needed for
    * a same-process-restart answer (there is no other process left to do it).
-   * First writer wins if two non-owning processes race — never overwrite an
-   * `answer` that's already there.
+   *
+   * LIMITATION — the "first writer wins" this branch aims for is a NARROWING,
+   * not a guarantee, and nothing enforces it. `store.get` and `store.update`
+   * below are two separate awaits, so the guard is check-then-act: the window
+   * is every instant between the read returning and the write landing, and two
+   * `respond()` calls inside it — in this process, or in any other sharing the
+   * store — both see `answer === undefined`, both write, and BOTH return
+   * `{ resolved: true }`, while the row keeps only the later answer. One of
+   * those callers is then told exactly the thing `ClarifyRespondOutcome`
+   * (`./respond-outcome`) was introduced to stop it saying.
+   *
+   * There is no compare-and-set to reach for. `ClarifyStore`
+   * (`packages/types/src/clarify.ts`) has none, and `FileClarifyStore`
+   * (`./file-clarify-store`) could not honour one across processes if it did:
+   * its `mutate` mutex is per-process, and `Storage.writeAtomic` rewrites the
+   * whole of `pending.json` from a snapshot read before it — untorn, not
+   * isolated, so two processes racing already lose each other's writes on
+   * every field, not just this one. Closing the window needs cross-process
+   * isolation the store does not have (an atomic create-if-absent lock, or a
+   * SQLite-backed store): a change to make deliberately, not a comment to
+   * write.
+   *
+   * What the guard DOES buy, and all it buys: an answer that had already
+   * landed BEFORE this call started is never overwritten, and its would-be
+   * overwriter is told `already_answered` rather than `resolved`. That is the
+   * ordinary case — a question answered in another tab a moment earlier — and
+   * `packages/core/src/__tests__/clarify-respond-outcome.test.ts` ("reports
+   * already_answered for an answer first-writer-wins DISCARDS") pins it. The
+   * millisecond race has no pinning test because it has no enforcer to pin.
    */
   async respond(response: ClarifyResponse): Promise<ClarifyRespondOutcome> {
     const entry = this.pending.get(response.requestId);
@@ -512,10 +539,12 @@ export class ClarifyBridge {
         return { resolved: false, reason: 'not_answerable' };
       }
       const notify = response.source === 'timeout-no-default' ? null : response;
-      // First writer wins. Reported, not silent: the row settles either way,
-      // but it settles on somebody ELSE's answer, and a surface that says
-      // "handed back" on the strength of this one is describing an event that
-      // did not happen.
+      // Check-then-act (see the LIMITATION above): an answer that is already
+      // VISIBLE here is never overwritten, and the discard is reported rather
+      // than silent — the row settles either way, but it settles on somebody
+      // ELSE's answer, and a surface that says "handed back" on the strength
+      // of this one is describing an event that did not happen. Two calls that
+      // both read the row before either writes miss this branch entirely.
       const discarded = persisted.answer !== undefined;
       if (!discarded) {
         await this.store.update(response.requestId, { answer: response });

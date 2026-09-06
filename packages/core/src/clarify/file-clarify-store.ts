@@ -3,8 +3,16 @@
 // process restart. See plan/phases/tool_clarity_plan.md.
 //
 // The store owns only `pending.json`. A per-process mutex serializes the
-// read-modify-write cycle; `writeAtomic` keeps the file consistent even under
-// a cross-process race (the gateway daemon and web-api both write).
+// read-modify-write cycle; `writeAtomic` means no reader ever sees a
+// half-written file, even when the gateway daemon and web-api write at once.
+//
+// That is UNTORN, not ISOLATED. Every mutation rewrites the whole file from a
+// snapshot taken before it, so two processes mutating concurrently keep only
+// the later write, and the earlier one's row edits are gone with no error
+// anywhere. There is no cross-process compare-and-set here, and no method on
+// `ClarifyStore` that could express one; `ClarifyBridge.respond`
+// (`./clarify-bridge`) is the caller that depends on that and names the
+// consequence in its LIMITATION note.
 
 import type { ClarifyStore, PendingClarify, Storage } from '@ethosagent/types';
 

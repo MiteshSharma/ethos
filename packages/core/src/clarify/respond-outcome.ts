@@ -27,9 +27,15 @@ export type ClarifyUnresolvedReason =
    */
   | 'unknown_request'
   /**
-   * The row exists and is still open, but a peer process already wrote an
-   * `answer` onto it. First writer wins (`respond()`'s cross-process branch),
-   * so THIS answer was discarded and the agent gets the earlier one.
+   * The row exists and is still open, but an `answer` was already on it when
+   * this call read the row, so THIS answer was discarded and the agent gets
+   * the one that was already there.
+   *
+   * Reported only when that earlier answer was VISIBLE at read time. Two calls
+   * that both read an unanswered row before either writes miss this branch and
+   * both report `{ resolved: true }` — see the LIMITATION note on
+   * `ClarifyBridge.respond` in `./clarify-bridge`, which is where the guard
+   * lives and where its window is named.
    */
   | 'already_answered'
   /**
